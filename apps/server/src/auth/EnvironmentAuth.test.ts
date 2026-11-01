@@ -3,7 +3,11 @@ import * as NodeCrypto from "node:crypto";
 
 import * as NodePlatformCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { authScopeResponse, AuthStandardClientScopes } from "@t3tools/contracts";
+import {
+  authScopeResponse,
+  AuthPrincipalScopes,
+  AuthStandardClientScopes,
+} from "@t3tools/contracts";
 import {
   computeDpopAccessTokenHash,
   computeDpopJwkThumbprint,
@@ -435,7 +439,41 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
         }).pipe(Effect.provide(layerEnvironmentAuth())),
     );
 
-    it.effect("narrows seeded desktop grants to the requested scopes", () =>
+    it.effect(
+    "caps a principal's credentials at orchestration scopes and keeps them out of MCP",
+    () =>
+      Effect.gen(function* () {
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const link = yield* serverAuth.createPairingLink({ principal: "alice" });
+        expect(link).toMatchObject({
+          subject: "principal:alice",
+          scopes: AuthPrincipalScopes,
+        });
+        const session = yield* serverAuth.issueSession({ principal: "alice" });
+        expect(session).toMatchObject({ subject: "principal:alice", scopes: AuthPrincipalScopes });
+
+        const tooWide = ["orchestration:read", "terminal:operate"] as const;
+        expect(
+          yield* serverAuth
+            .createPairingLink({ principal: "alice", scopes: tooWide })
+            .pipe(Effect.flip),
+        ).toMatchObject({ _tag: "ServerAuthScopeNotGrantedError" });
+        expect(
+          yield* serverAuth.issueSession({ principal: "alice", scopes: tooWide }).pipe(Effect.flip),
+        ).toMatchObject({ _tag: "ServerAuthScopeNotGrantedError" });
+        expect(
+          yield* serverAuth
+            .issueSession({ subject: "principal:alice", scopes: tooWide })
+            .pipe(Effect.flip),
+        ).toMatchObject({ _tag: "ServerAuthScopeNotGrantedError" });
+
+        expect(
+          yield* serverAuth.consumeMcpApprovalCode(link.credential, "read-only").pipe(Effect.flip),
+        ).toMatchObject({ _tag: "ServerAuthMcpApprovalCodeError", reason: "not_a_pairing_code" });
+      }).pipe(Effect.provide(layerEnvironmentAuth())),
+  );
+
+  it.effect("narrows seeded desktop grants to the requested scopes", () =>
       Effect.gen(function* () {
         const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
         const token = yield* serverAuth.exchangeBootstrapCredentialForAccessToken(

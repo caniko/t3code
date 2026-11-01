@@ -2,7 +2,11 @@ import {
   AuthAccessTokenType,
   AuthAccessWriteScope,
   AuthOrchestrationOperateScope,
+  AuthPrincipalScopes,
   AuthStandardClientScopes,
+  DEFAULT_PRINCIPAL_ID,
+  principalOfSubject,
+  principalSubject,
   type AuthAccessTokenResult,
   type AuthBrowserSessionResult,
   type AuthClientMetadata,
@@ -486,11 +490,14 @@ export class EnvironmentAuth extends Context.Service<
       readonly label?: string;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
       readonly subject?: string;
+      readonly principal?: string;
       readonly proofKeyThumbprint?: string;
       readonly purpose?: "startup";
     }) => Effect.Effect<
       IssuedPairingLink,
-      ServerAuthInternalError | ManagedLimits.ManagedPolicyRefusedError
+      | ServerAuthInternalError
+      | ManagedLimits.ManagedPolicyRefusedError
+      | ServerAuthScopeNotGrantedError
     >;
     readonly issuePairingCredential: (
       input?: AuthCreatePairingCredentialInput,
@@ -509,9 +516,13 @@ export class EnvironmentAuth extends Context.Service<
     readonly issueSession: (input?: {
       readonly ttl?: Duration.Duration;
       readonly subject?: string;
+      readonly principal?: string;
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
       readonly label?: string;
-    }) => Effect.Effect<IssuedBearerSession, ServerAuthInternalError>;
+    }) => Effect.Effect<
+      IssuedBearerSession,
+      ServerAuthInternalError | ServerAuthScopeNotGrantedError
+    >;
     readonly listSessions: () => Effect.Effect<
       ReadonlyArray<AuthClientSession>,
       ServerAuthInternalError
@@ -1015,6 +1026,30 @@ export const make = Effect.gen(function* () {
       );
     };
 
+  const resolveIssuance = (
+    input:
+      | {
+          readonly subject?: string;
+          readonly principal?: string;
+          readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
+        }
+      | undefined,
+    fallbackSubject: string,
+  ): Effect.Effect<
+    { readonly subject: string; readonly scopes: ReadonlyArray<AuthEnvironmentScope> },
+    ServerAuthScopeNotGrantedError
+  > => {
+    const subject =
+      input?.principal === undefined || input.principal === DEFAULT_PRINCIPAL_ID
+        ? (input?.subject ?? fallbackSubject)
+        : principalSubject(input.principal);
+    const isPrincipal = principalOfSubject(subject) !== DEFAULT_PRINCIPAL_ID;
+    const scopes = input?.scopes ?? (isPrincipal ? AuthPrincipalScopes : AuthStandardClientScopes);
+    return isPrincipal && !scopes.every((scope) => AuthPrincipalScopes.some((own) => own === scope))
+      ? Effect.fail(new ServerAuthScopeNotGrantedError({}))
+      : Effect.succeed({ subject, scopes });
+  };
+
   const toPairingCredential = (issued: IssuedPairingLink): AuthPairingCredentialResult => ({
     id: issued.id,
     credential: issued.credential,
@@ -1024,10 +1059,11 @@ export const make = Effect.gen(function* () {
 
   const issuePairingLink = Effect.fn("EnvironmentAuth.issuePairingLink")(
     function* (input: Parameters<EnvironmentAuth["Service"]["createPairingLink"]>[0]) {
+      const { subject, scopes } = yield* resolveIssuance(input, "one-time-token");
       const createdAt = yield* DateTime.now;
       const issued = yield* bootstrapCredentials.issueOneTimeToken({
-        scopes: input?.scopes ?? AuthStandardClientScopes,
-        subject: input?.subject ?? "one-time-token",
+        scopes,
+        subject,
         ...(input?.ttl ? { ttl: input.ttl } : {}),
         ...(input?.label ? { label: input.label } : {}),
         ...(input?.proofKeyThumbprint ? { proofKeyThumbprint: input.proofKeyThumbprint } : {}),
@@ -1036,14 +1072,18 @@ export const make = Effect.gen(function* () {
       return {
         id: issued.id,
         credential: issued.credential,
-        scopes: input?.scopes ?? AuthStandardClientScopes,
-        subject: input?.subject ?? "one-time-token",
+        scopes,
+        subject,
         ...(issued.label ? { label: issued.label } : {}),
         createdAt: DateTime.toUtc(createdAt),
         expiresAt: DateTime.toUtc(issued.expiresAt),
       } satisfies IssuedPairingLink;
     },
-    Effect.mapError((cause) => new ServerAuthPairingLinkCreationError({ cause })),
+    Effect.mapError((cause) =>
+      cause._tag === "ServerAuthScopeNotGrantedError"
+        ? cause
+        : new ServerAuthPairingLinkCreationError({ cause }),
+    ),
   );
 
   const createPairingLink: EnvironmentAuth["Service"]["createPairingLink"] = Effect.fn(
@@ -1083,33 +1123,37 @@ export const make = Effect.gen(function* () {
     );
 
   const issueSession: EnvironmentAuth["Service"]["issueSession"] = (input) =>
-    sessions
-      .issue({
-        subject: input?.subject ?? DEFAULT_SESSION_SUBJECT,
-        method: "bearer-access-token",
-        scopes: input?.scopes ?? AuthStandardClientScopes,
-        client: {
-          ...(input?.label ? { label: input.label } : {}),
-          deviceType: "bot",
-        },
-        ...(input?.ttl ? { ttl: input.ttl } : {}),
-      })
-      .pipe(
-        Effect.map(
-          (issued) =>
-            ({
-              sessionId: issued.sessionId,
-              token: issued.token,
-              method: "bearer-access-token",
-              scopes: issued.scopes,
-              subject: input?.subject ?? DEFAULT_SESSION_SUBJECT,
-              client: issued.client,
-              expiresAt: DateTime.toUtc(issued.expiresAt),
-            }) satisfies IssuedBearerSession,
-        ),
-        Effect.mapError((cause) => new ServerAuthSessionTokenIssueError({ cause })),
-        Effect.withSpan("EnvironmentAuth.issueSession"),
-      );
+    resolveIssuance(input, DEFAULT_SESSION_SUBJECT).pipe(
+      Effect.flatMap(({ subject, scopes }) =>
+        sessions
+          .issue({
+            subject,
+            method: "bearer-access-token",
+            scopes,
+            client: {
+              ...(input?.label ? { label: input.label } : {}),
+              deviceType: "bot",
+            },
+            ...(input?.ttl ? { ttl: input.ttl } : {}),
+          })
+          .pipe(
+            Effect.map(
+              (issued) =>
+                ({
+                  sessionId: issued.sessionId,
+                  token: issued.token,
+                  method: "bearer-access-token",
+                  scopes: issued.scopes,
+                  subject,
+                  client: issued.client,
+                  expiresAt: DateTime.toUtc(issued.expiresAt),
+                }) satisfies IssuedBearerSession,
+            ),
+            Effect.mapError((cause) => new ServerAuthSessionTokenIssueError({ cause })),
+          ),
+      ),
+      Effect.withSpan("EnvironmentAuth.issueSession"),
+    );
 
   const listSessions: EnvironmentAuth["Service"]["listSessions"] = () =>
     sessions.listActive().pipe(
@@ -1369,7 +1413,8 @@ export const make = Effect.gen(function* () {
           Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "insufficient_scope" })),
       }),
       Effect.flatMap((grant) =>
-        grant.method !== "one-time-token" && grant.method !== "reusable-dev-token"
+        (grant.method !== "one-time-token" && grant.method !== "reusable-dev-token") ||
+        principalOfSubject(grant.subject) !== DEFAULT_PRINCIPAL_ID
           ? Effect.fail(new ServerAuthMcpApprovalCodeError({ reason: "not_a_pairing_code" }))
           : Effect.void,
       ),

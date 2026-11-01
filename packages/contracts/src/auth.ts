@@ -146,6 +146,27 @@ export function sessionHasLegacyPermissions(session: SessionGrantInput): boolean
   );
 }
 
+export const DEFAULT_PRINCIPAL_ID = "owner";
+
+export const PrincipalId = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]{0,31}$/));
+export type PrincipalId = typeof PrincipalId.Type;
+
+const PRINCIPAL_SUBJECT_PREFIX = "principal:";
+
+export const principalSubject = (id: string) => `${PRINCIPAL_SUBJECT_PREFIX}${id}`;
+
+/** Subjects without the prefix predate principals and act as the default one; a malformed id never widens to it. */
+export const principalOfSubject = (subject: string): string =>
+  subject.startsWith(PRINCIPAL_SUBJECT_PREFIX)
+    ? subject.slice(PRINCIPAL_SUBJECT_PREFIX.length)
+    : DEFAULT_PRINCIPAL_ID;
+
+/** The most a non-default principal may hold: terminal, filesystem, settings, provider and access scopes act as the server's OS user or across the whole environment. */
+export const AuthPrincipalScopes = [
+  AuthOrchestrationReadScope,
+  AuthOrchestrationOperateScope,
+] as const;
+
 // Shell and full-access agent scopes already confer access and relay authority.
 export const AuthStandardClientScopes = [
   AuthOrchestrationReadScope,

@@ -1,5 +1,7 @@
 import {
   authScopeRequiredResponse,
+  DEFAULT_PRINCIPAL_ID,
+  principalOfSubject,
   AuthAccessWriteScope,
   AuthStandardClientScopes,
   AuthGrantScope,
@@ -18,7 +20,7 @@ import {
   EnvironmentAuthenticatedAuth,
   EnvironmentAuthenticatedPrincipal,
 } from "@t3tools/contracts";
-import type { AuthEnvironmentScope, DpopFailureReason } from "@t3tools/contracts";
+import type { AuthEnvironmentScope, DpopFailureReason, ThreadId } from "@t3tools/contracts";
 import { parseOAuthScope } from "@t3tools/shared/oauthScope";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as Clock from "effect/Clock";
@@ -32,6 +34,7 @@ import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
+import { threadVisibleTo } from "../orchestration-v2/ThreadOwnership.ts";
 import * as SessionStore from "./SessionStore.ts";
 import { traceAuthenticatedRelayRequest, traceRelayRequest } from "../cloud/traceRelayRequest.ts";
 import { deriveAuthClientMetadata } from "./utils.ts";
@@ -179,7 +182,7 @@ export const authenticateMediaRequest =
         }),
       ),
     );
-    if (!session.scopes.includes(requiredScope)) {
+    if (!session.scopes.includes(requiredScope) || !isDefaultPrincipal(session.subject)) {
       return yield* failEnvironmentScopeRequired(requiredScope);
     }
     return session;
@@ -216,12 +219,43 @@ const appendSessionCookie = (cookieName: string, token: string, expiresAt: DateT
     ),
   );
 
-export const requireEnvironmentScope = Effect.fn("environment.auth.requireScope")(function* (
-  scope: AuthEnvironmentScope,
-) {
+/** Non-default principals reach only routes that filter by owner; every other route fails closed for them. */
+export const isDefaultPrincipal = (subject: string) =>
+  principalOfSubject(subject) === DEFAULT_PRINCIPAL_ID;
+
+export const requireEnvironmentScopeForPrincipal = Effect.fn(
+  "environment.auth.requireScopeForPrincipal",
+)(function* (scope: AuthEnvironmentScope) {
   const session = yield* EnvironmentAuthenticatedPrincipal;
   if (!session.scopes.has(scope)) {
     return yield* failEnvironmentScopeRequired(scope);
+  }
+  return session;
+});
+
+export const requireEnvironmentScope = Effect.fn("environment.auth.requireScope")(function* (
+  scope: AuthEnvironmentScope,
+) {
+  const session = yield* requireEnvironmentScopeForPrincipal(scope);
+  if (!isDefaultPrincipal(session.subject)) {
+    return yield* failEnvironmentScopeRequired(scope);
+  }
+  return session;
+});
+
+/** Not-found rather than forbidden, so another principal's thread is indistinguishable from a missing one. */
+export const requireThreadAccess = Effect.fn("environment.auth.requireThreadAccess")(function* (
+  scope: AuthEnvironmentScope,
+  threadId: ThreadId,
+  readOwner: (
+    threadId: ThreadId,
+  ) => Effect.Effect<{ readonly ownerPrincipal?: string | undefined } | null>,
+) {
+  const session = yield* requireEnvironmentScopeForPrincipal(scope);
+  if (isDefaultPrincipal(session.subject)) return session;
+  const thread = yield* readOwner(threadId);
+  if (thread === null || !threadVisibleTo(principalOfSubject(session.subject), thread)) {
+    return yield* failEnvironmentNotFound("thread_not_found");
   }
   return session;
 });
