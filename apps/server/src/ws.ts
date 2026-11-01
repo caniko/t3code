@@ -2134,13 +2134,27 @@ export const layerWsRpc = (
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.searchThread]: (input) =>
-          threadManagement
-            .searchThread(input)
-            .pipe(Effect.mapError((cause) => new OrchestrationV2SearchThreadError({ cause }))),
+          whenThreadsVisible(
+            [input.threadId],
+            () => new OrchestrationV2SearchThreadError({ cause: "thread-not-visible" }),
+            threadManagement
+              .searchThread(input)
+              .pipe(Effect.mapError((cause) => new OrchestrationV2SearchThreadError({ cause }))),
+          ),
         [ORCHESTRATION_V2_WS_METHODS.searchThreadStream]: (input) =>
-          threadManagement
-            .searchThreadStream(input)
-            .pipe(Stream.mapError((cause) => new OrchestrationV2SearchThreadError({ cause }))),
+          Stream.unwrap(
+            whenThreadsVisible(
+              [input.threadId],
+              () => new OrchestrationV2SearchThreadError({ cause: "thread-not-visible" }),
+              Effect.succeed(
+                threadManagement
+                  .searchThreadStream(input)
+                  .pipe(
+                    Stream.mapError((cause) => new OrchestrationV2SearchThreadError({ cause })),
+                  ),
+              ),
+            ),
+          ),
         [ORCHESTRATION_V2_WS_METHODS.searchThreads]: (input) =>
           ThreadSearch.searchThreadsWithOlderSettledRows({
             request: input,

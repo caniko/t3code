@@ -3423,6 +3423,12 @@ describe("OrchestratorMcpService thread list", () => {
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadShell: (threadId) =>
+            Effect.succeed(shells.find((thread) => thread.id === threadId) ?? null),
+          getProjectThreadRecords: (input) =>
+            Effect.succeed({
+              thread: shells.find((thread) => thread.id === input.threadId),
+            } as never),
           listProjectThreads: (input) =>
             Effect.succeed(
               shells.filter(
@@ -3462,6 +3468,16 @@ describe("OrchestratorMcpService thread list", () => {
         ],
       );
       assert.equal(listed.total, 2);
+    }).pipe(Effect.provide(service)),
+  );
+
+  it.effect("refuses to wait on another principal's thread as if it were missing", () =>
+    Effect.gen(function* () {
+      const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const error = yield* mcp
+        .waitForThread(client, { threadId: ThreadId.make("thread:alice-snoozed") })
+        .pipe(Effect.flip);
+      assert.equal(error.code, "thread_not_found");
     }).pipe(Effect.provide(service)),
   );
 });
