@@ -1,4 +1,5 @@
 import { DEFAULT_PRINCIPAL_ID } from "@t3tools/contracts";
+import { threadVisibleTo } from "./ThreadOwnership.ts";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -434,6 +435,8 @@ export interface ThreadManagementServiceShape {
   readonly listProjectThreads: (input: {
     readonly projectId?: ProjectId | undefined;
     readonly includeSubagents: boolean;
+    /** Only this principal's threads, so callers paginate over what they may see. */
+    readonly ownerPrincipal?: string | undefined;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2ThreadShell>, ThreadManagementError>;
   readonly sendToThread: (
     input: ThreadManagementSendInput,
@@ -805,6 +808,10 @@ const make = Effect.gen(function* () {
         ),
         Effect.map((snapshot) =>
           snapshot.threads
+            .filter(
+              (thread) =>
+                input.ownerPrincipal === undefined || threadVisibleTo(input.ownerPrincipal, thread),
+            )
             .filter((thread) =>
               input.includeSubagents
                 ? thread.lineage.sideChat !== true
