@@ -1,5 +1,6 @@
 import {
   CLIENT_GUARDED_RPC_SCOPES,
+  DEFAULT_PRINCIPAL_ID,
   type DeviceListInput,
   clientRpcRequiredScopes,
   authScopeRequiredResponse,
@@ -272,6 +273,24 @@ const requiredScopesForRpcCall = (
   return [requiredScopeForRpcMethod(method)];
 };
 
+/** Everything else stays denied to a non-default principal: those methods act as the server's OS user or across all workspaces. */
+export const PRINCIPAL_RPC_METHODS: ReadonlySet<string> = new Set([
+  ORCHESTRATION_V2_WS_METHODS.subscribeShell,
+  ORCHESTRATION_V2_WS_METHODS.subscribeThread,
+  ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+  ORCHESTRATION_V2_WS_METHODS.launchThread,
+  ORCHESTRATION_V2_WS_METHODS.searchThread,
+  ORCHESTRATION_V2_WS_METHODS.searchThreadStream,
+  ORCHESTRATION_V2_WS_METHODS.getThreadProjection,
+  ORCHESTRATION_V2_WS_METHODS.getTurnItem,
+  ORCHESTRATION_V2_WS_METHODS.getOlderSettledThreads,
+  ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot,
+  WS_METHODS.serverProbe,
+  WS_METHODS.serverGetConfig,
+  WS_METHODS.subscribeServerConfig,
+  WS_METHODS.subscribeServerLifecycle,
+]);
+
 /**
  * `onAuthorized` runs once after an authorized request succeeds; for a stream
  * RPC, that is when the stream completes. Every RPC passes through here, so it
@@ -280,8 +299,17 @@ const requiredScopesForRpcCall = (
 export const layer = (
   scopes: ReadonlyArray<AuthEnvironmentScope>,
   onAuthorized?: (method: string, payload: unknown) => Effect.Effect<void>,
+  principal: string = DEFAULT_PRINCIPAL_ID,
 ) =>
   Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {
+    if (principal !== DEFAULT_PRINCIPAL_ID && !PRINCIPAL_RPC_METHODS.has(rpc._tag)) {
+      return Effect.fail(
+        new EnvironmentAuthorizationError({
+          message: `RPC method ${rpc._tag} is not available to this principal.`,
+          ...authScopeRequiredResponse(requiredScopeForRpcMethod(rpc._tag)),
+        }),
+      );
+    }
     const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);
     const requiredScope = requiredScopes.find((scope) => !scopes.includes(scope));
     if (requiredScope !== undefined) return Effect.fail(rpcAuthorizationError(requiredScope));

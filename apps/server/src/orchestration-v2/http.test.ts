@@ -97,7 +97,7 @@ const items = Schema.decodeUnknownSync(Schema.Array(OrchestrationV2TurnItem))(
 );
 
 // Serves the orchestration HTTP routes over real stores; `allowed` gates the read scope.
-const serveOrchestrationHttp = (allowed: () => boolean) =>
+const serveOrchestrationHttp = (allowed: () => boolean, subject = "test") =>
   Effect.gen(function* () {
     const runtime = ProviderReplayHarness.layerWithRegistry(
       { name: "thread-transcript" },
@@ -141,7 +141,7 @@ const serveOrchestrationHttp = (allowed: () => boolean) =>
             effect.pipe(
               Effect.provideService(EnvironmentAuthenticatedPrincipal, {
                 sessionId: AuthSessionId.make("test-session"),
-                subject: "test",
+                subject,
                 method: "bearer-access-token",
                 scopes: new Set<AuthEnvironmentScope>(allowed() ? ["orchestration:read"] : []),
               }),
@@ -247,6 +247,40 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
     expect((yield* read(ThreadId.make("missing"))).status).toBe(404);
     allowed = false;
     expect((yield* read(thread.id)).status).toBe(403);
+  }),
+);
+
+it.effect("shows a principal only its own threads over HTTP, as not-found otherwise", () =>
+  Effect.gen(function* () {
+    const { eventSink, handler } = yield* serveOrchestrationHttp(() => true, "principal:alice");
+    const get = (path: string) =>
+      Effect.promise(() =>
+        handler(
+          new Request(`http://localhost/api/orchestration/${path}`, {
+            headers: { [ORCHESTRATION_PROTOCOL_HEADER]: ORCHESTRATION_PROTOCOL_VERSION_TEXT },
+          }),
+        ),
+      );
+    const owned = ThreadId.make("alice-thread");
+    yield* eventSink.write({
+      events: [
+        {
+          id: EventId.make("create-alice-thread"),
+          type: "thread.created",
+          threadId: owned,
+          occurredAt: now,
+          payload: { ...thread, id: owned, ownerPrincipal: "alice" },
+        },
+      ],
+    });
+
+    expect((yield* get(`threads/${thread.id}/transcript`)).status).toBe(404);
+    expect((yield* get(`threads/${owned}/transcript`)).status).toBe(200);
+    const shellResponse = yield* get("shell");
+    const shell = (yield* Effect.promise(() => shellResponse.json())) as {
+      threads: ReadonlyArray<{ id: string }>;
+    };
+    expect(shell.threads.map(({ id }) => id)).toEqual([owned]);
   }),
 );
 

@@ -1,5 +1,6 @@
 import {
   type CommandId,
+  DEFAULT_PRINCIPAL_ID,
   type RuntimeRequestId,
   ThreadId,
   type OrchestrationV2ThreadProjection,
@@ -129,7 +130,11 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
       const scope = yield* McpInvocationContext.McpInvocationContext;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
       const { matches } = yield* threadSearch
-        .searchThreads({ ...input, projectId: input.projectId ?? caller?.projectId })
+        .searchThreads({
+          ...input,
+          projectId: input.projectId ?? caller?.projectId,
+          ownerPrincipal: caller?.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID,
+        })
         .pipe(Effect.mapError(unavailable));
       return {
         matches: matches.map((match) => ({

@@ -16,6 +16,7 @@ import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
+import { scopeShellStreamItem } from "./ThreadOwnership.ts";
 import {
   activeShellRowsForSubscriber,
   bufferShellLiveStream,
@@ -346,6 +347,51 @@ describe("shellStreamItemsFromInitialSnapshot", () => {
       resolvedRepositoryIdentityRoots: ["/workspace/a"],
     });
     expect(JSON.stringify(items[1]).length).toBeLessThan(JSON.stringify(items[0]).length);
+  });
+});
+
+describe("scopeShellStreamItem", () => {
+  const owned = shellFixture({ id: ThreadId.make("thread-alice"), ownerPrincipal: "alice" });
+  const unowned = shellFixture({ id: ThreadId.make("thread-owner") });
+  const snapshot = {
+    kind: "snapshot",
+    snapshot: {
+      ...emptyShellSnapshot,
+      threads: [owned, unowned],
+      archivedThreads: [owned, unowned],
+    },
+  } as const;
+
+  it("shows each principal only its own threads and the default principal only unowned ones", () => {
+    const idsFor = (principal: string) => {
+      const item = scopeShellStreamItem(principal, snapshot);
+      return item?.kind === "snapshot"
+        ? [item.snapshot.threads, item.snapshot.archivedThreads].map((threads) =>
+            threads.map((thread) => thread.id),
+          )
+        : [];
+    };
+    expect(idsFor("alice")).toEqual([["thread-alice"], ["thread-alice"]]);
+    expect(idsFor("bob")).toEqual([[], []]);
+    expect(idsFor("owner")).toEqual([["thread-owner"], ["thread-owner"]]);
+  });
+
+  it("drops live updates for other principals' threads but keeps removals", () => {
+    const updated = {
+      kind: "thread.updated",
+      sequence: 1,
+      location: "active",
+      thread: owned,
+    } as const;
+    const removed = {
+      kind: "thread.removed",
+      sequence: 2,
+      location: "active",
+      threadId: owned.id,
+    } as const;
+    expect(scopeShellStreamItem("alice", updated)).toBe(updated);
+    expect(scopeShellStreamItem("owner", updated)).toBeNull();
+    expect(scopeShellStreamItem("owner", removed)).toBe(removed);
   });
 });
 

@@ -1,5 +1,6 @@
 import {
   CommandId,
+  DEFAULT_PRINCIPAL_ID,
   type RunId,
   isProviderAvailable,
   MessageId,
@@ -117,7 +118,11 @@ import {
   runtimeModeRank,
   taskPrompt,
 } from "./delegatedTaskModes.ts";
-import { isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
+import {
+  assertThreadOwnedByCallerPrincipal,
+  isLiveCallerShell,
+  threadNotFound,
+} from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
@@ -1179,6 +1184,11 @@ const make = Effect.gen(function* () {
       caller.parent !== undefined && threadId === caller.parent.thread.id
         ? caller.parent
         : yield* loadTargetThread(threadId, includeHistory);
+    yield* assertThreadOwnedByCallerPrincipal(
+      caller.parent?.thread.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID,
+      target.thread,
+      () => threadNotFound(threadManagement, threadId, `Thread ${threadId} was not found.`),
+    );
     return { ...caller, target } as const;
   });
 
@@ -1244,6 +1254,12 @@ const make = Effect.gen(function* () {
         `Thread ${threadId} is no longer available.`,
       );
     }
+    yield* assertThreadOwnedByCallerPrincipal(
+      parent?.thread.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID,
+      shell,
+      () =>
+        threadNotFound(threadManagement, threadId, `Thread ${threadId} is no longer available.`),
+    );
     const input = { projectId: shell.projectId, threadId };
     // Transfers are needed only to acknowledge a caller's child-task result.
     const records =
@@ -2803,6 +2819,9 @@ const make = Effect.gen(function* () {
                   ...(parent.thread.linkOrigin === undefined
                     ? {}
                     : { linkOrigin: parent.thread.linkOrigin }),
+                  ...(parent.thread.ownerPrincipal === undefined
+                    ? {}
+                    : { ownerPrincipal: parent.thread.ownerPrincipal }),
                 })
                 .pipe(
                   Effect.mapError((error) =>
@@ -2902,6 +2921,7 @@ const make = Effect.gen(function* () {
         .listProjectThreads({
           projectId: projectId ?? undefined,
           includeSubagents: input.includeSubagents !== false,
+          ownerPrincipal: parent?.thread.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID,
         })
         .pipe(
           Effect.mapError((error) =>

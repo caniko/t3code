@@ -2,6 +2,9 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   AuthTokenExchangeGrantType,
   AuthEnvironmentBootstrapTokenType,
+  AuthSessionId,
+  EnvironmentAuthenticatedPrincipal,
+  type AuthEnvironmentScope,
   AuthAccessTokenType,
   EnvironmentHttpApi,
 } from "@t3tools/contracts";
@@ -154,4 +157,22 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
         Effect.promise(() => Promise.all([environmentA.dispose(), environmentB.dispose()])),
     );
   }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("fails closed on ordinary scoped routes for a non-default principal", () =>
+  Effect.gen(function* () {
+    const requireAs = (subject: string) =>
+      AuthHttp.requireEnvironmentScope("orchestration:read").pipe(
+        Effect.provideService(EnvironmentAuthenticatedPrincipal, {
+          sessionId: AuthSessionId.make("test-session"),
+          subject,
+          method: "bearer-access-token",
+          scopes: new Set<AuthEnvironmentScope>(["orchestration:read"]),
+        }),
+      );
+    expect((yield* requireAs("principal:alice").pipe(Effect.flip))._tag).toBe(
+      "EnvironmentScopeRequiredError",
+    );
+    expect((yield* requireAs("browser")).subject).toBe("browser");
+  }),
 );
