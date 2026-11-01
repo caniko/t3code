@@ -34,6 +34,9 @@ jobs:
 
       - uses: ./.github/actions/setup-ci-deps
 
+      - name: Install Chromium for server browser tests
+        run: node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
+
       - name: Typecheck
         run: vp run --filter @t3tools/contracts --filter t3 typecheck
 
