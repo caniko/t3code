@@ -414,9 +414,13 @@ describe("principal RPC allowlist", () => {
 
   it("keeps only allowlisted methods and gives owner-only methods no principal path", () => {
     expect(RpcAuthorization.PRINCIPAL_RPC_METHODS.has(WS_METHODS.serverProbe)).toBe(true);
-    expect(
-      RpcAuthorization.PRINCIPAL_RPC_METHODS.has(ORCHESTRATION_V2_WS_METHODS.launchThread),
-    ).toBe(true);
+    for (const method of [
+      ORCHESTRATION_V2_WS_METHODS.launchThread,
+      ORCHESTRATION_V2_WS_METHODS.searchThread,
+      ORCHESTRATION_V2_WS_METHODS.searchThreadStream,
+    ]) {
+      expect(RpcAuthorization.PRINCIPAL_RPC_METHODS.has(method)).toBe(true);
+    }
     for (const method of RpcAuthorization.PRINCIPAL_RPC_METHODS) {
       expect(Object.hasOwn(RPC_REQUIRED_SCOPES, method)).toBe(true);
     }
