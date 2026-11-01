@@ -1,5 +1,6 @@
 import {
   CommandId,
+  DEFAULT_PRINCIPAL_ID,
   type RunId,
   isProviderAvailable,
   MessageId,
@@ -123,7 +124,11 @@ import {
   runtimeModeRank,
   taskPrompt,
 } from "./delegatedTaskModes.ts";
-import { isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
+import {
+  assertThreadOwnedByCallerPrincipal,
+  isLiveCallerShell,
+  threadNotFound,
+} from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
@@ -1273,6 +1278,12 @@ const make = Effect.gen(function* () {
         `Thread ${threadId} is no longer available.`,
       );
     }
+    yield* assertThreadOwnedByCallerPrincipal(
+      parent?.thread.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID,
+      shell,
+      () =>
+        threadNotFound(threadManagement, threadId, `Thread ${threadId} is no longer available.`),
+    );
     const input = { projectId: shell.projectId, threadId };
     // Transfers are needed only to acknowledge a caller's child-task result.
     const records =

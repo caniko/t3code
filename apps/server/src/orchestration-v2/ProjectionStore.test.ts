@@ -1931,6 +1931,7 @@ it.effect("SQL list older settled threads below a cursor", () =>
       readonly subagent?: boolean;
       readonly archived?: boolean;
       readonly snoozedUntilDay?: number;
+      readonly ownerPrincipal?: string;
     }) =>
       store.apply({
         id: EventId.make(`event:older:${input.name}`),
@@ -1962,6 +1963,7 @@ it.effect("SQL list older settled threads below a cursor", () =>
           settledOverride: input.settledDay === null ? null : "settled",
           settledAt: input.settledDay === null ? null : at(input.settledDay),
           snoozedUntil: input.snoozedUntilDay === undefined ? null : at(input.snoozedUntilDay),
+          ...(input.ownerPrincipal === undefined ? {} : { ownerPrincipal: input.ownerPrincipal }),
           lastVisitedAt: null,
           deletedAt: null,
         },
@@ -2009,6 +2011,20 @@ it.effect("SQL list older settled threads below a cursor", () =>
       threadIds: [],
       counts: [{ projectId: ProjectId.make("project:b"), count: 1 }],
     });
+
+    yield* createThread({ name: "alices", settledDay: 9, ownerPrincipal: "alice" });
+    const forOwner = yield* store.listOlderSettledThreads({
+      before,
+      ownerPrincipal: "owner",
+      limit: 1,
+    });
+    assert.deepEqual(forOwner.threadIds, [id("a")]);
+    const forAlice = yield* store.listOlderSettledThreads({
+      before,
+      ownerPrincipal: "alice",
+      limit: 1,
+    });
+    assert.deepEqual(forAlice.threadIds, [id("alices")]);
   }).pipe(Effect.provide(layerTest)),
 );
 

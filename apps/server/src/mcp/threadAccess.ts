@@ -1,6 +1,7 @@
 import type { ProjectionRecordField } from "../orchestration-v2/ProjectionStore.ts";
 import {
   CommandId,
+  DEFAULT_PRINCIPAL_ID,
   OrchestratorMcpFailure,
   type ProjectId,
   type ProviderInstanceId,
@@ -15,6 +16,7 @@ import * as Effect from "effect/Effect";
 import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import { resolveInteractionMode, resolveRuntimeMode } from "./delegatedTaskModes.ts";
+import { threadVisibleTo } from "../orchestration-v2/ThreadOwnership.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 
 /**
@@ -37,6 +39,17 @@ export const threadNotFound = Effect.fn("OrchestratorMcpService.threadNotFound")
         : `${message} Did you mean \`${prefixed}\`?`,
   });
 });
+
+/** An agent acts as its thread's owner; a client outside any thread acts as the default principal. */
+export const callerPrincipal = (caller: Pick<Caller, "caller">) =>
+  caller.caller?.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID;
+
+/** A thread of another principal fails as a missing one. */
+export const assertThreadOwnedByCallerPrincipal = (
+  principal: string,
+  target: { readonly ownerPrincipal?: string | undefined },
+  fail: () => Effect.Effect<never, OrchestratorMcpFailure>,
+) => (threadVisibleTo(principal, target) ? Effect.void : fail());
 
 export const unavailable = () =>
   new OrchestratorMcpFailure({
@@ -188,6 +201,9 @@ export const readThread = Effect.fn("mcp.readThread")(function* <
   if (shell === null || shell.deletedAt !== null) {
     return yield* threadNotFound(context.threads, targetId, "The thread was not found.");
   }
+  yield* assertThreadOwnedByCallerPrincipal(callerPrincipal(context), shell, () =>
+    threadNotFound(context.threads, targetId, "The thread was not found."),
+  );
   const projection = yield* context.threads
     .getProjectThreadRecords({ projectId: shell.projectId, threadId: targetId }, fields, {
       turnItemTypes: ["user_input_request"],
