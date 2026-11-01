@@ -279,6 +279,8 @@ export const PRINCIPAL_RPC_METHODS: ReadonlySet<string> = new Set([
   ORCHESTRATION_V2_WS_METHODS.subscribeThread,
   ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
   ORCHESTRATION_V2_WS_METHODS.launchThread,
+  ORCHESTRATION_V2_WS_METHODS.searchThread,
+  ORCHESTRATION_V2_WS_METHODS.searchThreadStream,
   ORCHESTRATION_V2_WS_METHODS.getThreadProjection,
   ORCHESTRATION_V2_WS_METHODS.getTurnItem,
   ORCHESTRATION_V2_WS_METHODS.getOlderSettledThreads,

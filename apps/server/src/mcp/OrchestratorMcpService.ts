@@ -1184,6 +1184,11 @@ const make = Effect.gen(function* () {
       caller.parent !== undefined && threadId === caller.parent.thread.id
         ? caller.parent
         : yield* loadTargetThread(threadId, includeHistory);
+    yield* assertThreadOwnedByCallerPrincipal(
+      caller.parent?.thread.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID,
+      target.thread,
+      () => threadNotFound(threadManagement, threadId, `Thread ${threadId} was not found.`),
+    );
     return { ...caller, target } as const;
   });
 
