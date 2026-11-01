@@ -191,11 +191,13 @@ in between, is a separate later item.
 ## MCP and agents
 
 Agent tools resolve the calling thread (`McpInvocationContext`). The caller's
-principal is that thread's `ownerPrincipal`, and `threadAccess` must apply the
-same visibility helper to every thread a tool reads or changes. That includes
-`t3_thread_read`, `@thread` context references, `delegate_task` targets and
-scheduled tasks. Until it does, an agent can read across workspaces through
-tools. That is the main C1a gap.
+principal is that thread's `ownerPrincipal`; an outside MCP client acts as
+`owner`. Unlike client point reads, `owner` gets no exemption here, because its
+agents must not read a principal's threads either. Direct thread reads and
+writes, and thread listings, go through the same visibility helper in
+[threadAccess.ts](../../apps/server/src/mcp/threadAccess.ts), and listings filter
+before they paginate. Thread mentions in a message's context and
+`delegate_task` targets in another project still need the same check.
 
 ## Migration
 
@@ -234,7 +236,7 @@ Not defended against:
 
 Known gaps in the prototype:
 
-- **MCP tool reads** are not principal-filtered (see above).
+- **Thread mentions** in message context are not checked yet (see above).
 - **Project records** are not principal-filtered until migration 077 lands.
   Their names and paths are visible to every principal.
 - **Provider-native subagent threads** created from adapter paths that do not
