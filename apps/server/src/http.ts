@@ -46,6 +46,7 @@ import {
   failEnvironmentScopeRequired,
   failEnvironmentAuthInvalid,
   failEnvironmentInternal,
+  isDefaultPrincipal,
 } from "./auth/http.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import { WEBHOOK_ROUTE_PREFIX } from "./scheduledTasks/ScheduledTaskService.ts";
@@ -306,7 +307,7 @@ const authenticateRawRouteWithScope =
         failEnvironmentInternal("internal_error", error),
       ),
     );
-    if (!session.scopes.includes(scope)) {
+    if (!session.scopes.includes(scope) || !isDefaultPrincipal(session.subject)) {
       return yield* failEnvironmentScopeRequired(scope);
     }
   });

@@ -1,3 +1,4 @@
+import { DEFAULT_PRINCIPAL_ID } from "@t3tools/contracts";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -77,12 +78,22 @@ export interface ThreadManagementProvenance {
 export function withCreationProvenance(
   command: OrchestrationV2Command,
   provenance: ThreadManagementProvenance,
+  principal: string = DEFAULT_PRINCIPAL_ID,
 ): OrchestrationV2Command {
   switch (command.type) {
     case "thread.create": {
-      // Only the server stamps a link's origin, so a client cannot set one.
-      const { linkOrigin: _linkOrigin, delegatedFrom: _delegatedFrom, ...rest } = command;
-      return { ...rest, ...provenance };
+      // Only the server stamps a link's origin and a thread's owner, so a client cannot set either.
+      const {
+        linkOrigin: _linkOrigin,
+        delegatedFrom: _delegatedFrom,
+        ownerPrincipal: _ownerPrincipal,
+        ...rest
+      } = command;
+      return {
+        ...rest,
+        ...provenance,
+        ...(principal === DEFAULT_PRINCIPAL_ID ? {} : { ownerPrincipal: principal }),
+      };
     }
     case "message.dispatch":
     case "thread.fork":

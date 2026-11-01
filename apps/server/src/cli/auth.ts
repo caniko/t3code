@@ -1,4 +1,9 @@
-import { AuthSessionId, AuthStandardClientScopes } from "@t3tools/contracts";
+import {
+  type AuthGrantScope,
+  AuthSessionId,
+  AuthStandardClientScopes,
+  PrincipalId,
+} from "@t3tools/contracts";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -68,6 +73,25 @@ const subjectFlag = Flag.String("subject").pipe(
   Flag.optional,
 );
 
+const principalFlag = Flag.String("principal").pipe(
+  Flag.withSchema(PrincipalId),
+  Flag.withDescription(
+    "Bind the credential to a principal that sees only its own threads; limited to orchestration scopes.",
+  ),
+  Flag.optional,
+);
+
+// The flag substitutes the standard set when no scope is given; a principal then falls back to its own default.
+const scopeInput = (flags: {
+  readonly scopes: ReadonlyArray<AuthGrantScope>;
+  readonly principal: Option.Option<string>;
+}) =>
+  Option.isSome(flags.principal) &&
+  flags.scopes.length === AuthStandardClientScopes.length &&
+  AuthStandardClientScopes.every((scope) => flags.scopes.includes(scope))
+    ? {}
+    : { scopes: flags.scopes };
+
 const baseUrlFlag = Flag.String("base-url").pipe(
   Flag.withSchema(
     Schema.URLFromString.pipe(
@@ -92,6 +116,7 @@ const pairingCreateCommand = Command.make("create", {
   scopes: authScopesFlag(AuthStandardClientScopes),
   ttl: ttlFlag,
   label: labelFlag,
+  principal: principalFlag,
   baseUrl: baseUrlFlag,
   json: jsonFlag,
 }).pipe(
@@ -102,8 +127,9 @@ const pairingCreateCommand = Command.make("create", {
       (environmentAuth) =>
         Effect.gen(function* () {
           const issued = yield* environmentAuth.createPairingLink({
-            scopes: flags.scopes,
+            ...scopeInput(flags),
             subject: "one-time-token",
+            ...(Option.isSome(flags.principal) ? { principal: flags.principal.value } : {}),
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
           });
@@ -172,6 +198,7 @@ const sessionIssueCommand = Command.make("issue", {
   ttl: ttlFlag,
   label: labelFlag,
   subject: subjectFlag,
+  principal: principalFlag,
   tokenOnly: tokenOnlyFlag,
   json: jsonFlag,
 }).pipe(
@@ -182,10 +209,11 @@ const sessionIssueCommand = Command.make("issue", {
       (environmentAuth) =>
         Effect.gen(function* () {
           const issued = yield* environmentAuth.issueSession({
-            scopes: flags.scopes,
+            ...scopeInput(flags),
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
             ...(Option.isSome(flags.subject) ? { subject: flags.subject.value } : {}),
+            ...(Option.isSome(flags.principal) ? { principal: flags.principal.value } : {}),
           });
           yield* Console.log(
             formatIssuedSession(issued, {

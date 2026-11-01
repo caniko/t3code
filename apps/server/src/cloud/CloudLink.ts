@@ -1577,13 +1577,15 @@ const make = Effect.gen(function* () {
       }
 
       const keyPair = yield* getOrCreateEnvironmentKeyPairFromSecretStore(secrets);
-      const issued = yield* environmentAuth.createPairingLink({
-        scopes: AuthStandardClientScopes,
-        subject: "cloud-connect",
-        ttl: Duration.minutes(2),
-        label: "T3 Connect connect",
-        proofKeyThumbprint: proof.clientProofKeyThumbprint,
-      });
+      const issued = yield* environmentAuth
+        .createPairingLink({
+          scopes: AuthStandardClientScopes,
+          subject: "cloud-connect",
+          ttl: Duration.minutes(2),
+          label: "T3 Connect connect",
+          proofKeyThumbprint: proof.clientProofKeyThumbprint,
+        })
+        .pipe(Effect.catchTags({ ServerAuthScopeNotGrantedError: Effect.die }));
       const responsePayload = {
         iss: `t3-env:${environmentId}`,
         aud: normalizeRelayIssuer(relayIssuer),

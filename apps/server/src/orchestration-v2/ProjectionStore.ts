@@ -1517,6 +1517,9 @@ export function threadShellFromProjection(
     ...(projection.thread.linkOrigin === undefined
       ? {}
       : { linkOrigin: projection.thread.linkOrigin }),
+    ...(projection.thread.ownerPrincipal === undefined
+      ? {}
+      : { ownerPrincipal: projection.thread.ownerPrincipal }),
     ...(projection.thread.delegatedFrom === undefined
       ? {}
       : { delegatedFrom: projection.thread.delegatedFrom }),
@@ -1798,6 +1801,9 @@ function shellFromState(input: {
     ...(input.state.thread.linkOrigin === undefined
       ? {}
       : { linkOrigin: input.state.thread.linkOrigin }),
+    ...(input.state.thread.ownerPrincipal === undefined
+      ? {}
+      : { ownerPrincipal: input.state.thread.ownerPrincipal }),
     ...(input.state.thread.delegatedFrom === undefined
       ? {}
       : { delegatedFrom: input.state.thread.delegatedFrom }),

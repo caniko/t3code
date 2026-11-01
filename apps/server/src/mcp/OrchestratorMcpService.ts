@@ -2803,6 +2803,9 @@ const make = Effect.gen(function* () {
                   ...(parent.thread.linkOrigin === undefined
                     ? {}
                     : { linkOrigin: parent.thread.linkOrigin }),
+                  ...(parent.thread.ownerPrincipal === undefined
+                    ? {}
+                    : { ownerPrincipal: parent.thread.ownerPrincipal }),
                 })
                 .pipe(
                   Effect.mapError((error) =>
