@@ -2927,6 +2927,7 @@ const make = Effect.gen(function* () {
         .listProjectThreads({
           projectId: projectId ?? undefined,
           includeSubagents: input.includeSubagents !== false,
+          ownerPrincipal: parent?.thread.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID,
         })
         .pipe(
           Effect.mapError((error) =>

@@ -35,6 +35,7 @@ import {
 import { threadSearchPullRequests } from "@t3tools/shared/threadPullRequests";
 import { indexedMessageCondition, nonPlaceholderMessageCondition } from "./messageSearchIndex.ts";
 import { loadOlderSettledThreadsPage } from "./ShellStream.ts";
+import { threadVisibleTo } from "./ThreadOwnership.ts";
 
 // When the user last wrote in the thread aliased `threads`, as the clients
 // rank recency; agent notices in the user role do not count.
@@ -258,7 +259,11 @@ export class ThreadSearch extends Context.Service<
      * palette ranks them, then message matches for the remaining threads.
      */
     readonly searchThreads: (
-      input: OrchestrationSearchThreadsInput & { readonly projectId?: ProjectId | undefined },
+      input: OrchestrationSearchThreadsInput & {
+        readonly projectId?: ProjectId | undefined;
+        /** Only this principal's threads, applied before ranking and the message limit. */
+        readonly ownerPrincipal?: string | undefined;
+      },
     ) => Effect.Effect<{ readonly matches: ReadonlyArray<ThreadSearchHit> }, ThreadSearchError>;
     /**
      * The settled threads before `before` that clients omitting older settled threads should
@@ -521,7 +526,15 @@ export const make = Effect.gen(function* () {
     const now = DateTime.toEpochMillis(yield* DateTime.now);
     // Agents call this rarely, and a project has hundreds of threads, not
     // millions, so ranking every active thread in memory stays cheap.
-    const candidates = yield* read(titleCandidates({ projectId: input.projectId ?? null }));
+    const allCandidates = yield* read(titleCandidates({ projectId: input.projectId ?? null }));
+    const owner = input.ownerPrincipal;
+    const candidates =
+      owner === undefined
+        ? allCandidates
+        : allCandidates.filter((row) => threadVisibleTo(owner, row.thread));
+    const hidden = new Set(
+      allCandidates.filter((row) => !candidates.includes(row)).map((row) => row.thread.id),
+    );
     const subjectById = new Map(
       candidates.map((row): [ThreadId, ThreadSearchSubject] => [
         row.thread.id,
@@ -558,7 +571,7 @@ export const make = Effect.gen(function* () {
       query: input.query,
       limit: 50,
       projectId: input.projectId ?? null,
-      excludedThreadIds: shown,
+      excludedThreadIds: new Set([...shown, ...hidden]),
       picks: false,
     });
     const messageHits = matches
