@@ -1,4 +1,4 @@
-import { pendingGuestMessageCount } from "@t3tools/contracts";
+import { DEFAULT_PRINCIPAL_ID, pendingGuestMessageCount } from "@t3tools/contracts";
 import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
@@ -416,6 +416,8 @@ export interface ActiveShellIndexEntry extends Pick<
 export interface OlderSettledThreadsQuery {
   readonly before: OrchestrationV2OlderSettledCursor;
   readonly projectIds?: ReadonlyArray<ProjectId> | undefined;
+  /** Only this principal's threads, applied before the limit so pages fill. */
+  readonly ownerPrincipal?: string | undefined;
   readonly limit: number;
 }
 
@@ -6884,7 +6886,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const listOlderSettledThreads: ProjectionStoreV2Shape["listOlderSettledThreads"] = Effect.fn(
       "ProjectionStore.listOlderSettledThreads",
-    )(function* ({ before, projectIds, limit }) {
+    )(function* ({ before, projectIds, ownerPrincipal, limit }) {
       // ISO strings in one format, so string order is time order.
       const older = sql`
         SELECT t.thread_id, t.project_id,
@@ -6897,6 +6899,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           AND json_extract(t.payload_json, '$.settledOverride') = 'settled'
           AND json_extract(t.payload_json, '$.settledAt') IS NOT NULL${
             projectIds === undefined ? sql`` : sql` AND t.project_id IN ${sql.in(projectIds)}`
+          }${
+            // ponytail: unindexed json_extract over payload_json; add an owner column when it matters
+            ownerPrincipal === undefined
+              ? sql``
+              : sql` AND COALESCE(json_extract(t.payload_json, '$.ownerPrincipal'), ${DEFAULT_PRINCIPAL_ID}) = ${ownerPrincipal}`
           }
       `;
       const belowCursor =

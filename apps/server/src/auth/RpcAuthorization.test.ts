@@ -5,6 +5,7 @@ import {
   AuthProvidersManageScope,
   AuthSettingsWriteScope,
   DEFAULT_SERVER_SETTINGS,
+  ORCHESTRATION_V2_WS_METHODS,
   ProviderDriverKind,
   ProviderInstanceId,
   SecretProviderId,
@@ -413,6 +414,9 @@ describe("principal RPC allowlist", () => {
 
   it("keeps only allowlisted methods and gives owner-only methods no principal path", () => {
     expect(RpcAuthorization.PRINCIPAL_RPC_METHODS.has(WS_METHODS.serverProbe)).toBe(true);
+    expect(
+      RpcAuthorization.PRINCIPAL_RPC_METHODS.has(ORCHESTRATION_V2_WS_METHODS.launchThread),
+    ).toBe(true);
     for (const method of RpcAuthorization.PRINCIPAL_RPC_METHODS) {
       expect(Object.hasOwn(RPC_REQUIRED_SCOPES, method)).toBe(true);
     }

@@ -2064,12 +2064,14 @@ export const layerWsRpc = (
         [ORCHESTRATION_V2_WS_METHODS.getOlderSettledThreads]: (input) =>
           loadOlderSettledThreadsPage({
             sql,
-            listThreads: threadManagement.listOlderSettledThreads(input),
+            listThreads: threadManagement.listOlderSettledThreads({
+              ...input,
+              ownerPrincipal: principal,
+            }),
             readThreads: (threadIds) =>
               threadManagement.readShellSnapshot({ location: "active", threadIds }),
             latestSequence: applicationEvents.latestApplicationSequence,
           }).pipe(
-            Effect.map((page) => ({ ...page, threads: scopeThreadList(principal, page.threads) })),
             Effect.mapError(
               (cause) =>
                 new OrchestrationV2GetShellSnapshotError({
@@ -2120,95 +2122,108 @@ export const layerWsRpc = (
             "orchestration_v2.project_id": input.projectId,
           }).pipe(
             Effect.andThen(
-              startup
-                .enqueueCommand(
-                  ThreadMessageIntake.launchThread({
+              whenThreadsVisible(
+                input.reuseExistingThread === true && input.threadId !== undefined
+                  ? [input.threadId]
+                  : [],
+                () =>
+                  new OrchestrationV2ThreadLaunchError({
                     commandId: input.commandId,
-                    ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
-                    ...(input.reuseExistingThread === undefined
-                      ? {}
-                      : { reuseExistingThread: input.reuseExistingThread }),
                     projectId: input.projectId,
-                    title: input.title,
-                    ...(input.generateTitle === undefined
-                      ? {}
-                      : { generateTitle: input.generateTitle }),
-                    modelSelection: input.modelSelection,
-                    runtimeMode: input.runtimeMode,
-                    interactionMode: input.interactionMode,
-                    workspaceStrategy: input.workspaceStrategy,
-                    ...(input.initialMessage === undefined
-                      ? {}
-                      : {
-                          initialMessage: {
-                            ...(input.initialMessage.messageId === undefined
-                              ? {}
-                              : { messageId: input.initialMessage.messageId }),
-                            text: input.initialMessage.text,
-                            attachments: input.initialMessage.attachments,
-                            ...(input.initialMessage.context === undefined
-                              ? {}
-                              : { context: input.initialMessage.context }),
-                          },
-                        }),
-                    createdBy: "user",
-                    creationSource: input.creationSource ?? "web",
-                  }).pipe(Effect.provide(intakeContext)),
-                )
-                .pipe(
-                  // A resumed launch is a retry of one already counted.
-                  Effect.tap((result) =>
-                    result.resumed
-                      ? Effect.void
-                      : analytics
-                          .record("client.thread.started", {
-                            ...originProps,
-                            workspaceStrategy: input.workspaceStrategy.type,
-                          })
-                          .pipe(
-                            Effect.andThen(
-                              input.initialMessage === undefined
-                                ? Effect.void
-                                : analytics.record("client.turn.requested", originProps),
-                            ),
-                            Effect.ignore,
-                          ),
-                  ),
-                  Effect.map((result) => ({
-                    ...result,
-                    projection: projectThreadProjectionForWire(result.projection),
-                  })),
-                  Effect.catchTags({
-                    AttachmentClaimError: (cause) =>
-                      new OrchestrationV2ThreadLaunchError({
-                        commandId: input.commandId,
-                        projectId: input.projectId,
-                        message: cause.message,
-                        cause,
-                      }),
-                    ThreadLaunchError: (cause) =>
-                      new OrchestrationV2ThreadLaunchError({
-                        commandId: input.commandId,
-                        projectId: input.projectId,
-                        message: "Failed to launch thread",
-                        cause,
-                      }),
-                    ServerRuntimeStartupError: (cause) =>
-                      new OrchestrationV2ThreadLaunchError({
-                        commandId: input.commandId,
-                        projectId: input.projectId,
-                        message: "Failed to launch thread",
-                        cause,
-                      }),
-                    ThreadManagementProviderInstanceDisabledError: (cause) =>
-                      new OrchestrationV2ThreadLaunchError({
-                        commandId: input.commandId,
-                        projectId: input.projectId,
-                        message: cause.message,
-                        cause,
-                      }),
+                    message: "Thread not found",
+                    cause: "thread-not-visible",
                   }),
-                ),
+                startup
+                  .enqueueCommand(
+                    ThreadMessageIntake.launchThread({
+                      commandId: input.commandId,
+                      ...(principal === DEFAULT_PRINCIPAL_ID ? {} : { ownerPrincipal: principal }),
+                      ...(input.threadId === undefined ? {} : { threadId: input.threadId }),
+                      ...(input.reuseExistingThread === undefined
+                        ? {}
+                        : { reuseExistingThread: input.reuseExistingThread }),
+                      projectId: input.projectId,
+                      title: input.title,
+                      ...(input.generateTitle === undefined
+                        ? {}
+                        : { generateTitle: input.generateTitle }),
+                      modelSelection: input.modelSelection,
+                      runtimeMode: input.runtimeMode,
+                      interactionMode: input.interactionMode,
+                      workspaceStrategy: input.workspaceStrategy,
+                      ...(input.initialMessage === undefined
+                        ? {}
+                        : {
+                            initialMessage: {
+                              ...(input.initialMessage.messageId === undefined
+                                ? {}
+                                : { messageId: input.initialMessage.messageId }),
+                              text: input.initialMessage.text,
+                              attachments: input.initialMessage.attachments,
+                              ...(input.initialMessage.context === undefined
+                                ? {}
+                                : { context: input.initialMessage.context }),
+                            },
+                          }),
+                      createdBy: "user",
+                      creationSource: input.creationSource ?? "web",
+                    }).pipe(Effect.provide(intakeContext)),
+                  )
+                  .pipe(
+                    // A resumed launch is a retry of one already counted.
+                    Effect.tap((result) =>
+                      result.resumed
+                        ? Effect.void
+                        : analytics
+                            .record("client.thread.started", {
+                              ...originProps,
+                              workspaceStrategy: input.workspaceStrategy.type,
+                            })
+                            .pipe(
+                              Effect.andThen(
+                                input.initialMessage === undefined
+                                  ? Effect.void
+                                  : analytics.record("client.turn.requested", originProps),
+                              ),
+                              Effect.ignore,
+                            ),
+                    ),
+                    Effect.map((result) => ({
+                      ...result,
+                      projection: projectThreadProjectionForWire(result.projection),
+                    })),
+                    Effect.catchTags({
+                      AttachmentClaimError: (cause) =>
+                        new OrchestrationV2ThreadLaunchError({
+                          commandId: input.commandId,
+                          projectId: input.projectId,
+                          message: cause.message,
+                          cause,
+                        }),
+                      ThreadLaunchError: (cause) =>
+                        new OrchestrationV2ThreadLaunchError({
+                          commandId: input.commandId,
+                          projectId: input.projectId,
+                          message: "Failed to launch thread",
+                          cause,
+                        }),
+                      ServerRuntimeStartupError: (cause) =>
+                        new OrchestrationV2ThreadLaunchError({
+                          commandId: input.commandId,
+                          projectId: input.projectId,
+                          message: "Failed to launch thread",
+                          cause,
+                        }),
+                      ThreadManagementProviderInstanceDisabledError: (cause) =>
+                        new OrchestrationV2ThreadLaunchError({
+                          commandId: input.commandId,
+                          projectId: input.projectId,
+                          message: cause.message,
+                          cause,
+                        }),
+                    }),
+                  ),
+              ),
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: (input) =>
