@@ -147,6 +147,33 @@ const EnvServerConfig = Config.all({
         .filter((entry) => entry.length > 0),
     ),
   ),
+  oidcIssuer: Config.String("T3CODE_OIDC_ISSUER").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+  oidcClientId: Config.String("T3CODE_OIDC_CLIENT_ID").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+  oidcClientSecretFile: Config.String("T3CODE_OIDC_CLIENT_SECRET_FILE").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+  oidcAllowedGroup: Config.String("T3CODE_OIDC_ALLOWED_GROUP").pipe(
+    Config.withDefault("t3code_users"),
+  ),
+  oidcPrincipalClaim: Config.String("T3CODE_OIDC_PRINCIPAL_CLAIM").pipe(
+    Config.withDefault("preferred_username"),
+  ),
+  oidcPublicOrigins: Config.String("T3CODE_OIDC_PUBLIC_ORIGINS").pipe(
+    Config.withDefault(""),
+    Config.map((value) =>
+      value
+        .split(",")
+        .map((entry) => entry.trim().replace(/\/+$/, ""))
+        .filter((entry) => entry.length > 0),
+    ),
+  ),
   noBrowser: Config.Boolean("T3CODE_NO_BROWSER").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
@@ -193,6 +220,32 @@ const DevAuthTokenConfig = Config.Redacted("T3CODE_DEV_AUTH_TOKEN").pipe(
   Config.map(Option.filter((token) => Redacted.value(token).length > 0)),
   Config.map(Option.getOrUndefined),
 );
+
+const resolveOidcConfig = Effect.fn("cli.resolveOidcConfig")(function* (env: {
+  readonly oidcIssuer: string | undefined;
+  readonly oidcClientId: string | undefined;
+  readonly oidcClientSecretFile: string | undefined;
+  readonly oidcAllowedGroup: string;
+  readonly oidcPrincipalClaim: string;
+  readonly oidcPublicOrigins: ReadonlyArray<string>;
+}) {
+  const issuer = env.oidcIssuer?.trim().replace(/\/+$/, "");
+  if (!issuer) return undefined;
+  if (!env.oidcClientId || !env.oidcClientSecretFile || env.oidcPublicOrigins.length === 0) {
+    return yield* new CliError.UserError({
+      cause:
+        "T3CODE_OIDC_ISSUER also needs T3CODE_OIDC_CLIENT_ID, T3CODE_OIDC_CLIENT_SECRET_FILE and T3CODE_OIDC_PUBLIC_ORIGINS.",
+    });
+  }
+  return {
+    issuer,
+    clientId: env.oidcClientId,
+    clientSecretFile: env.oidcClientSecretFile,
+    allowedGroup: env.oidcAllowedGroup,
+    principalClaim: env.oidcPrincipalClaim,
+    publicOrigins: env.oidcPublicOrigins,
+  } satisfies ServerConfig.OidcConfig;
+});
 
 export interface CliServerFlags {
   readonly mode: Option.Option<ServerConfig.RuntimeMode>;
@@ -477,6 +530,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     },
   );
 
+  const oidc = yield* resolveOidcConfig(env);
   const config: ServerConfig.ServerConfig["Service"] = {
     logLevel,
     traceMinLevel: env.traceMinLevel,
@@ -509,6 +563,7 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     devUrl,
     ...(devAuthToken === undefined ? {} : { devAuthToken }),
     devAllowedOrigins: env.devAllowedOrigins,
+    ...(oidc === undefined ? {} : { oidc }),
     noBrowser,
     startupPresentation,
     desktopBootstrapToken,

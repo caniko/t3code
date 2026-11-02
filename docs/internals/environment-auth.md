@@ -27,6 +27,18 @@ model. DPoP binds a token to a client's proof key; an invalid proof must fail
 rather than fall back to bearer authentication. The OAuth token-exchange
 vocabulary gives these grants a familiar meaning.
 
+### Native OIDC sign-in
+
+A server started with `T3CODE_OIDC_ISSUER` (plus `_CLIENT_ID`, `_CLIENT_SECRET_FILE`,
+`_PUBLIC_ORIGINS`, and optionally `_ALLOWED_GROUP` and `_PRINCIPAL_CLAIM`) is a confidential OIDC
+client ([OidcLogin](../../apps/server/src/auth/OidcLogin.ts)). `/auth/oidc/start` and
+`/auth/oidc/callback` use authorization code with PKCE, `state` and `nonce`; pending logins live in
+process memory for ten minutes and are single use. The redirect URI is the request's origin plus
+`/auth/oidc/callback`, so every origin a client reaches the server by must be in
+`T3CODE_OIDC_PUBLIC_ORIGINS` and registered with the provider. A verified member of the allowed
+group becomes `principal:<claim>`: the web flow sets a browser-session cookie, the desktop flow
+redirects to `t3code://pair` with a two-minute principal pairing link.
+
 ### Guest links are not sessions
 
 A [guest link](../user/guest-links.md) gives one browser read access to one

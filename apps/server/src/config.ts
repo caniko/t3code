@@ -59,6 +59,16 @@ export interface DeriveServerPathsOptions {
   readonly baseDirIsExplicit?: boolean;
 }
 
+export interface OidcConfig {
+  readonly issuer: string;
+  readonly clientId: string;
+  readonly clientSecretFile: string;
+  readonly allowedGroup: string;
+  readonly principalClaim: string;
+  /** Origins that may host `/auth/oidc/callback`; the redirect URI is `<origin>/auth/oidc/callback`. */
+  readonly publicOrigins: ReadonlyArray<string>;
+}
+
 export class ServerConfig extends Context.Service<
   ServerConfig,
   ServerDerivedPaths & {
@@ -92,6 +102,7 @@ export class ServerConfig extends Context.Service<
     readonly devUrl: URL | undefined;
     readonly devAuthToken?: Redacted.Redacted<string> | undefined;
     readonly devAllowedOrigins: ReadonlyArray<string>;
+    readonly oidc?: OidcConfig | undefined;
     readonly noBrowser: boolean;
     readonly startupPresentation: StartupPresentation;
     readonly desktopBootstrapToken: string | undefined;
