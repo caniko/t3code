@@ -1,5 +1,6 @@
 import {
   authScopeRequiredResponse,
+  DEFAULT_PRINCIPAL_ID,
   principalOfSubject,
   AuthAccessWriteScope,
   AuthStandardClientScopes,
@@ -237,8 +238,11 @@ export const requireThreadAccess = Effect.fn("environment.auth.requireThreadAcce
   action: ThreadAction = "read",
 ) {
   const session = yield* requireEnvironmentScope(scope);
+  const principal = principalOfSubject(session.subject);
+  // The default principal reaches every thread; skip the owner read on its hot path.
+  if (principal === DEFAULT_PRINCIPAL_ID) return session;
   const thread = yield* readOwner(threadId);
-  if (thread === null || !canAccessThread(principalOfSubject(session.subject), thread, action)) {
+  if (thread === null || !canAccessThread(principal, thread, action)) {
     return yield* failEnvironmentNotFound("thread_not_found");
   }
   return session;
