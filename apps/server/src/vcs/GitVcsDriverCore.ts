@@ -1,4 +1,5 @@
 import * as Cache from "effect/Cache";
+import { PrincipalExecution } from "../runner/PrincipalExecution.ts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Data from "effect/Data";
@@ -941,6 +942,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const commandSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const principalExecution = yield* PrincipalExecution;
   const { worktreesDir } = yield* ServerConfig.ServerConfig;
   const isServerInternalPath = yield* makeIsServerInternalPath;
   const crypto = yield* Crypto.Crypto;
@@ -984,7 +986,17 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         const resolved = yield* resolveSpawnCommand("git", [], { env: spawnEnv });
         // cmd wrappers truncate multiline commits; leave git.cmd handling to Node lookup.
         const executable = resolved.shell ? "git" : resolved.command;
-        const child = yield* commandSpawner
+        const runnerSpawner = yield* principalExecution.spawnerForPath(commandInput.cwd).pipe(
+          Effect.mapError(
+            (cause) =>
+              new GitCommandError({
+                ...gitCommandContext(commandInput),
+                detail: cause.message,
+                cause,
+              }),
+          ),
+        );
+        const child = yield* (runnerSpawner ?? commandSpawner)
           .spawn(
             ChildProcess.make(executable, commandInput.args, {
               cwd: commandInput.cwd,

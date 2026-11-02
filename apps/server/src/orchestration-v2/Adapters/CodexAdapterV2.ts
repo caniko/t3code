@@ -99,6 +99,7 @@ import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import { PrincipalExecution, passthroughAgentScope } from "../../runner/PrincipalExecution.ts";
 
 import { resolveAttachmentPath, resolveAttachmentPathById } from "../../attachmentStore.ts";
 import * as PortScanner from "../../preview/PortScanner.ts";
@@ -1523,10 +1524,21 @@ export const layerAppServerClientFactory: Layer.Layer<
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const { native: nativeEventLogger } = yield* ProviderEventLoggers.ProviderEventLoggers;
     const agentScope = yield* AgentScope;
+    const execution = yield* PrincipalExecution;
 
     return CodexAppServerClientFactory.of({
       open: Effect.fn("CodexAdapterV2.open")(function* (input) {
         const scope = yield* Scope.Scope;
+        const runnerSpawner = yield* execution.spawnerFor(input.threadId).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapter.ProviderAdapterOpenSessionError({
+                driver: CODEX_PROVIDER,
+                providerSessionId: input.providerSessionId,
+                cause,
+              }),
+          ),
+        );
         const environment = {
           ...codexAppServerEnvironment(input.environment),
           ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
@@ -1538,8 +1550,10 @@ export const layerAppServerClientFactory: Layer.Layer<
           ),
           env: environment,
           threadId: input.threadId,
-        }).pipe(Effect.provideService(AgentScope, agentScope));
-        const handle = yield* spawner.spawn(command).pipe(
+        }).pipe(
+          Effect.provideService(AgentScope, runnerSpawner ? passthroughAgentScope : agentScope),
+        );
+        const handle = yield* (runnerSpawner ?? spawner).spawn(command).pipe(
           Effect.provideService(Scope.Scope, scope),
           Effect.mapError(
             (cause) =>

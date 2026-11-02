@@ -1,4 +1,5 @@
 import { AgentScope } from "@t3tools/shared/AgentScope";
+import { PrincipalExecution, requireRunnerSupport } from "../runner/PrincipalExecution.ts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import {
@@ -346,6 +347,7 @@ export const layerWithOptions = (
       const providerEventIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
       const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
       const agentScope = yield* AgentScope;
+      const principalExecution = yield* PrincipalExecution;
       const agentAccessSettings = Effect.fn("ProviderSessionManagerV2.agentAccessSettings")(
         function* (threadId: ThreadId) {
           if (Option.isNone(serverSettings)) return { browser: true, device: false };
@@ -2156,6 +2158,16 @@ export const layerWithOptions = (
               }
 
               const adapter = yield* registry.get(input.modelSelection.instanceId).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderSessionOpenError({
+                      instanceId: input.modelSelection.instanceId,
+                      providerSessionId: input.providerSessionId,
+                      cause,
+                    }),
+                ),
+              );
+              yield* requireRunnerSupport(principalExecution, input.threadId, adapter.driver).pipe(
                 Effect.mapError(
                   (cause) =>
                     new ProviderSessionOpenError({
