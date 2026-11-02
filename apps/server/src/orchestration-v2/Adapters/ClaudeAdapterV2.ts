@@ -141,6 +141,8 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import { PrincipalExecution } from "../../runner/PrincipalExecution.ts";
+import { spawnClaudeViaRunner } from "../../runner/RunnerClient.ts";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { resolveClaudeSdkExecutablePath } from "../../provider/Drivers/ClaudeExecutable.ts";
@@ -973,6 +975,7 @@ export const layerQueryRunner: Layer.Layer<
     const runFork = Effect.runForkWith(yield* Effect.context<never>());
     const hostEnvironment = yield* HostProcess.Environment;
     const portDiscovery = yield* PortScanner.PortDiscovery;
+    const execution = yield* PrincipalExecution;
 
     return ClaudeAgentSdkQueryRunner.of({
       allocateSessionId: random.uuidV4(),
@@ -1004,8 +1007,12 @@ export const layerQueryRunner: Layer.Layer<
             },
           };
           // The SDK can prepend a scope wrapper to native binaries; script entries run through node.
+          const runner = yield* execution
+            .runnerFor(input.threadId)
+            .pipe(Effect.mapError((cause) => queryRunnerError(cause, "runner")));
           const binaryPath = queryOptions.pathToClaudeCodeExecutable;
           const launch =
+            runner !== undefined ||
             binaryPath === undefined ||
             CLAUDE_SCRIPT_EXTENSIONS.some((ext) => binaryPath.endsWith(ext))
               ? undefined
@@ -1040,6 +1047,9 @@ export const layerQueryRunner: Layer.Layer<
           const spawnProcess =
             options.spawnClaudeCodeProcess ??
             ((spawnOptions: ClaudeSpawnOptions) => {
+              if (runner !== undefined) {
+                return spawnClaudeViaRunner(runner, spawnOptions, appendStderr) as ClaudeSpawnedProcess;
+              }
               if (platform !== "win32") {
                 // Node can report "exit" before it has read the stderr the CLI wrote.
                 let stderrDone = () => {};

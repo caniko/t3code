@@ -75,6 +75,7 @@ import * as PortScanner from "../preview/PortScanner.ts";
 import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
 import { terminalOutputStream } from "./OutputProtocol.ts";
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
+import { PrincipalExecution } from "../runner/PrincipalExecution.ts";
 
 export {
   TerminalCwdError,
@@ -1518,6 +1519,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const platform = yield* HostProcess.Platform;
   const architecture = yield* HostProcess.Architecture;
   const agentScope = yield* AgentScope;
+  const principalExecution = yield* PrincipalExecution;
   // Inherit the full environment minus createTerminalSpawnEnv's blocklist; allowlists silently drop user tooling variables.
   const baseEnv = options.env ?? process.env;
   const shellResolver = options.shellResolver ?? (() => defaultShellResolver(platform, baseEnv));
@@ -2363,15 +2365,21 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       );
     }
 
-    const launch = yield* agentScope.wrap({
-      command: candidate.shell,
-      args: candidate.args ?? [],
-      name: "terminal",
-      env: spawnEnv,
-      survivesRestart: true,
-    });
+    const runnerPty = yield* principalExecution.ptyFor(session.threadId).pipe(
+      Effect.mapError((cause) => new PtyAdapter.PtySpawnError({ adapter: "runner", cause })),
+    );
+    const launch =
+      runnerPty === undefined
+        ? yield* agentScope.wrap({
+            command: candidate.shell,
+            args: candidate.args ?? [],
+            name: "terminal",
+            env: spawnEnv,
+            survivesRestart: true,
+          })
+        : { command: candidate.shell, args: [] };
     const attempt = yield* Effect.result(
-      options.ptyAdapter.spawn({
+      (runnerPty ?? options.ptyAdapter).spawn({
         shell: launch.command,
         ...(launch.args.length > 0 ? { args: [...launch.args] } : {}),
         cwd: session.cwd,
