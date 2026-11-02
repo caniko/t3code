@@ -13,6 +13,7 @@ import { Link } from "@tanstack/react-router";
 import { useQuietThreadShell } from "../../state/entities";
 import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
+import { useViewerPrincipal } from "../../state/sessionAccess";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import { memo, use, useState, type ReactNode } from "react";
 import {
@@ -425,6 +426,11 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   const { onImageExpand, onFileOpen } = ctx;
   const coarsePointer = useMediaQuery({ pointer: "coarse" });
   const senderThreadId = row.message.senderThreadId;
+  const viewerPrincipal = useViewerPrincipal(ctx.activeThreadEnvironmentId);
+  const senderPrincipal =
+    row.message.senderPrincipal !== undefined && row.message.senderPrincipal !== viewerPrincipal
+      ? row.message.senderPrincipal
+      : null;
   const resources = selectMessageImageResources(row.message.attachments);
   const previewUrls = useAssetUrls(ctx.activeThreadEnvironmentId, resources);
   const [projectPreviews] = useState(createMessageAttachmentPreviewProjector);
@@ -785,6 +791,9 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
         <InlineButton onClick={() => ctx.onOpenThread(senderThreadId)} tone="muted">
           Open thread
         </InlineButton>
+      ) : null}
+      {senderPrincipal !== null ? (
+        <p className="text-muted-foreground text-xs font-medium">{senderPrincipal}</p>
       ) : null}
       <Tooltip>
         <TooltipTrigger render={<p className="text-muted-foreground text-xs tabular-nums" />}>

@@ -855,6 +855,9 @@ export const make = Effect.gen(function* () {
             ...authScopeResponse(session.scopes),
             sessionMethod: session.method,
             ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),
+            ...(principalOfSubject(session.subject) !== DEFAULT_PRINCIPAL_ID
+              ? { principal: principalOfSubject(session.subject) }
+              : {}),
           }) satisfies AuthSessionState,
       ),
       Effect.catchIf(isServerAuthCredentialError, () =>

@@ -228,6 +228,7 @@ import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../termina
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { useEnvironmentQuery } from "../state/query";
 import { useEnvironmentScope } from "~/state/session";
+import { useThreadAccessRole } from "~/state/sessionAccess";
 import {
   primaryServerAvailableEditorsAtom,
   primaryServerKeybindingsAtom,
@@ -424,7 +425,11 @@ export default function ChatView(props: ChatViewProps) {
     embedded: parentPanel,
   } = props;
   const embedded = parentPanel !== undefined;
-  const canOperateThread = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
+  const hasOperateScope = useEnvironmentScope(environmentId, AuthOrchestrationOperateScope);
+  const isSessionViewer =
+    useThreadAccessRole(routeKind === "server" ? scopeThreadRef(environmentId, threadId) : null) ===
+    "viewer";
+  const canOperateThread = hasOperateScope && !isSessionViewer;
   const canOperateTerminal = useEnvironmentScope(environmentId, AuthTerminalOperateScope);
   const draftId = routeKind === "draft" ? props.draftId : null;
   const handleNewThread = useNewThreadHandler();

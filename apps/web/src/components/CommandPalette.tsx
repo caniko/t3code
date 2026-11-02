@@ -245,6 +245,8 @@ import { ProjectFilePicker } from "./files/ProjectFilePicker";
 import { openLinkPullRequestDialog } from "./pullRequest/LinkPullRequestDialog";
 import { canShareWithGuestAtom } from "./chat/guestShareAvailability";
 import { openGuestShareDialog } from "./chat/guestShareDialogState";
+import { openShareThreadDialog } from "./chat/shareThreadDialogState";
+import { readCanShareThread } from "../state/sessionAccess";
 import { ProjectContentSearchDialog } from "./search/ProjectContentSearchDialog";
 import { settingsForThisPlatform, SETTINGS_SECTION_LABELS } from "./settings/settingsSearch";
 import { primaryServerKeybindingsAtom } from "../state/server";
@@ -1414,6 +1416,22 @@ function OpenCommandPaletteDialog(props: {
         openGuestShareDialog(threadRef);
       },
     });
+  }
+
+  if (activeThread !== null) {
+    const threadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
+    if (readCanShareThread(threadRef, activeThread.source.ownerPrincipal)) {
+      actionItems.push({
+        kind: "action",
+        value: "action:share-thread-with-principal",
+        searchTerms: ["share", "invite", "viewer", "participant", "session", "group"],
+        title: "Share…",
+        icon: <UserPlusIcon className={ITEM_ICON_CLASS} />,
+        run: async () => {
+          openShareThreadDialog(threadRef);
+        },
+      });
+    }
   }
 
   if (activeThread !== null) {

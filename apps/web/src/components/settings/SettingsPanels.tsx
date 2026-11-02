@@ -97,6 +97,7 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
+import { SessionAccessSettings } from "./SessionAccessSettings";
 import { searchableSetting } from "./settingsSearch";
 import { BackgroundActivitySettingsRow } from "./BackgroundActivitySettings";
 import { AdvancedSettings } from "./AdvancedSettings";
@@ -787,6 +788,7 @@ export function GeneralSettingsPanel() {
 
   return (
     <SettingsPageContainer>
+      <SessionAccessSettings />
       <SettingsSection id="notifications" title="Notifications">
         <NotificationSettings />
         <SettingsRow

@@ -118,6 +118,7 @@ import {
 } from "./composerContextUndo";
 import type { ThreadSyncPhase } from "../../threadSync";
 import { ComposerBanner } from "./ComposerBanner";
+import { ComposerSessionViewerBanner } from "./ComposerSessionViewerBanner";
 import { ComposerSurface } from "./ComposerSurface";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./ComposerBannerStack";
 import {
@@ -3190,6 +3191,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       <ComposerBanner.Dock>
         <ComposerBanner.Column>
           <ComposerBannerStack items={shelfItems} />
+          <ComposerSessionViewerBanner threadRef={routeThreadRef} />
           {showComposerTopDrawer ? (
             <ComposerBanner.Attachment>
               <ComposerBanner.Root data-chat-composer-top-drawer="true" variant="info">

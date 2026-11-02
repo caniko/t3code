@@ -1,7 +1,9 @@
-import type {
-  EnvironmentId,
-  ScopedProjectRef,
-  SidebarProjectGroupingMode,
+import {
+  DEFAULT_PRINCIPAL_ID,
+  type EnvironmentId,
+  type ScopedProjectRef,
+  type SessionAccessSnapshot,
+  type SidebarProjectGroupingMode,
 } from "@t3tools/contracts";
 import {
   buildProjectGroups,
@@ -245,4 +247,55 @@ export function buildSidebarProjectPickerEntries(input: {
   const rest = entries.filter((entry) => entry !== preferred);
   const pinnedCount = rest.filter((entry) => entry.group.pinned).length;
   return [...rest.slice(0, pinnedCount), preferred, ...rest.slice(pinnedCount)];
+}
+
+export interface SharedThreadSection<T> {
+  readonly ownerPrincipal: string;
+  /** `groupName` is null for threads shared directly rather than through a session group. */
+  readonly groups: ReadonlyArray<{ readonly groupName: string | null; readonly threads: T[] }>;
+}
+
+/**
+ * Splits threads into the viewer's own and those shared with it, grouped by owner and
+ * then session group. Environments absent from `principalByEnvironment` (the default
+ * principal sees every thread) keep all their threads in `mine`.
+ */
+export function partitionSharedThreads<
+  T extends {
+    readonly environmentId: EnvironmentId;
+    readonly id: string;
+    readonly source: { readonly ownerPrincipal?: string | undefined };
+  },
+>(input: {
+  threads: ReadonlyArray<T>;
+  principalByEnvironment: ReadonlyMap<EnvironmentId, string>;
+  snapshotByEnvironment: ReadonlyMap<EnvironmentId, SessionAccessSnapshot>;
+}): { mine: ReadonlyArray<T>; shared: ReadonlyArray<SharedThreadSection<T>> } {
+  if (input.principalByEnvironment.size === 0) return { mine: input.threads, shared: [] };
+  const mine: T[] = [];
+  const byOwner = new Map<string, Map<string | null, T[]>>();
+  for (const thread of input.threads) {
+    const principal = input.principalByEnvironment.get(thread.environmentId);
+    const owner = thread.source.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID;
+    if (principal === undefined || owner === principal) {
+      mine.push(thread);
+      continue;
+    }
+    const groupName =
+      input.snapshotByEnvironment
+        .get(thread.environmentId)
+        ?.groups.find((group) => group.threadIds.some((id) => id === thread.id))?.name ?? null;
+    const groups = byOwner.get(owner) ?? new Map<string | null, T[]>();
+    groups.set(groupName, [...(groups.get(groupName) ?? []), thread]);
+    byOwner.set(owner, groups);
+  }
+  const shared = [...byOwner]
+    .toSorted(([a], [b]) => a.localeCompare(b))
+    .map(([ownerPrincipal, groups]) => ({
+      ownerPrincipal,
+      groups: [...groups]
+        .toSorted(([a], [b]) => (a === null ? 1 : b === null ? -1 : a.localeCompare(b)))
+        .map(([groupName, threads]) => ({ groupName, threads })),
+    }));
+  return { mine, shared };
 }

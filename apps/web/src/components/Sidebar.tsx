@@ -113,6 +113,7 @@ import {
   projectGroupsSpanEnvironments,
   resolveSidebarProjectScopeKeys,
   getSidebarProjectSettingsKey,
+  partitionSharedThreads,
   type SidebarProjectSnapshot,
 } from "../sidebarProjectGrouping";
 import { resolveProjectExpanded, useUiStateStore } from "../uiStateStore";
@@ -129,6 +130,8 @@ import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useOrderWhileOpen } from "../hooks/useOrderWhileOpen";
 import { useProjectPin } from "../hooks/useProjectGroupUpdate";
 import { useSidebarProjectGroups } from "../hooks/useSidebarProjectGroups";
+import { readCanShareThread, useSharedSidebarInput } from "../state/sessionAccess";
+import { SidebarSharedThreads } from "./sidebar/SidebarSharedThreads";
 import { useTerminalFocus } from "../hooks/useTerminalFocus";
 import { isCommandPaletteOpen, openCommandPalette } from "../commandPaletteBus";
 import { registerSettleAndAdvance } from "../settleAndAdvance";
@@ -163,6 +166,7 @@ import { readEnvironmentScope, useEnvironmentScope } from "../state/session";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { canShareWithGuestAtom } from "./chat/guestShareAvailability";
 import { openGuestShareDialog } from "./chat/guestShareDialogState";
+import { openShareThreadDialog } from "./chat/shareThreadDialogState";
 import {
   buildThreadRouteParams,
   resolveActiveThreadRouteRef,
@@ -1117,7 +1121,11 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
             ),
           ),
         );
-  const threads = useQuietThreadShells();
+  const allThreads = useQuietThreadShells();
+  const { mine: threads, shared: sharedThreadSections } = partitionSharedThreads({
+    threads: allThreads,
+    ...useSharedSidebarInput(useEnvironmentIdentities().map(({ environmentId }) => environmentId)),
+  });
   const routeRowThreadKey =
     routeThreadRef === null
       ? null
@@ -2645,6 +2653,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               canShareWithGuest: appAtomRegistry.get(
                 canShareWithGuestAtom(threadRef.environmentId),
               ),
+              canShareSession: readCanShareThread(threadRef, thread.source.ownerPrincipal),
               canTurnIntoProject: canTurnThreadIntoProject(threadRef),
               supports: {
                 settlement: configLoaded,
@@ -2766,6 +2775,9 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           }
           case "rename":
             startThreadRename(threadRef, thread.title);
+            return;
+          case "share-session":
+            openShareThreadDialog(threadRef);
             return;
           case "share-guest":
             openGuestShareDialog(threadRef);
@@ -3639,6 +3651,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                 "No threads yet"
               )}
             </div>
+          ) : null}
+          {!isSearchingThreads ? (
+            <SidebarSharedThreads
+              sections={sharedThreadSections}
+              routeThreadKey={routeRowThreadKey}
+              onOpenThread={navigateToThread}
+            />
           ) : null}
         </SidebarGroup>
       </SidebarContent>
