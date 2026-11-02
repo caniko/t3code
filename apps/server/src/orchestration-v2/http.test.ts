@@ -36,6 +36,7 @@ import { ProjectEnrichmentService } from "../project/ProjectEnrichmentService.ts
 import * as OrchestrationHttp from "./http.ts";
 import { EventSinkV2 } from "./EventSink.ts";
 import * as ProjectStore from "./ProjectStore.ts";
+import * as SessionAccess from "./SessionAccess.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
@@ -151,6 +152,7 @@ const serveOrchestrationHttp = (allowed: () => boolean, subject = "test") =>
       ),
       Layer.provide(Layer.succeedContext(services)),
       Layer.provide(Layer.mock(ProjectEnrichmentService)({})),
+      Layer.provide(Layer.mock(SessionAccess.SessionAccess)({ grantsFor: () => Effect.succeed(new Map()) })),
       Layer.provide(HttpPlatform.layer),
       Layer.provide(Etag.layerWeak),
       Layer.provide(NodeServices.layer),

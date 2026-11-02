@@ -180,6 +180,7 @@ import {
 import { dedupeSnapshotBodies } from "@t3tools/shared/orchestrationV2DedupedBodies";
 import * as ProjectStore from "./orchestration-v2/ProjectStore.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
+import * as SessionAccess from "./orchestration-v2/SessionAccess.ts";
 import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.ts";
 import { userFacingDispatchErrorMessage } from "./orchestration-v2/UserFacingErrors.ts";
 import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
@@ -1301,6 +1302,7 @@ export const layerWsRpc = (
       const scratchThreadPromotion = yield* ScratchThreadPromotion.ScratchThreadPromotion;
       const eventLoopMonitor = yield* EventLoopMonitor.EventLoopMonitor;
       const threadSearch = yield* ThreadSearch.ThreadSearch;
+      const sessionAccess = yield* SessionAccess.SessionAccess;
 
       const providerSessionsV2 = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const mcpAppRequests = yield* McpAppRequests.McpAppRequests;
@@ -1917,7 +1919,8 @@ export const layerWsRpc = (
               (cause) => new OrchestrationV2GetShellSnapshotError({ message, cause }),
             ),
           );
-          return { snapshotSequence, threads: scopeThreadList(principal, threads.threads) };
+          const grants = yield* sessionAccess.grantsFor(principal);
+          return { snapshotSequence, threads: scopeThreadList(principal, threads.threads, grants) };
         },
       );
 
@@ -1930,7 +1933,13 @@ export const layerWsRpc = (
         action: ThreadAction,
       ) {
         const found = yield* threadManagement.getThreadRecords(threadId, []).pipe(Effect.option);
-        return Option.isSome(found) && canAccessThread(principal, found.value.thread, action);
+        if (Option.isNone(found)) return false;
+        return canAccessThread(
+          principal,
+          found.value.thread,
+          action,
+          yield* sessionAccess.grantsFor(principal),
+        );
       });
       const threadVisible = (threadId: ThreadId) => threadAllowed(threadId, "read");
       const scopeSearchResult = Effect.fn("ws.scopeSearchResult")(function* <
@@ -1940,6 +1949,7 @@ export const layerWsRpc = (
         },
       >(result: R) {
         if (threadOwnerScope(principal) === undefined) return result;
+        const grants = yield* sessionAccess.grantsFor(principal);
         const visible = yield* Effect.forEach(result.matches, (match) =>
           threadVisible(match.threadId),
         );
@@ -1948,7 +1958,7 @@ export const layerWsRpc = (
           matches: result.matches.filter((_, index) => visible[index]),
           ...(result.threads === undefined
             ? {}
-            : { threads: scopeThreadList(principal, result.threads) }),
+            : { threads: scopeThreadList(principal, result.threads, grants) }),
         };
       });
       const threadAccessDenied = () =>
@@ -2152,10 +2162,14 @@ export const layerWsRpc = (
           ),
         [ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot]: (_input) =>
           getOrchestrationV2ArchivedShellSnapshot.pipe(
-            Effect.map((snapshot) => ({
-              ...snapshot,
-              threads: scopeThreadList(principal, snapshot.threads),
-            })),
+            Effect.flatMap((snapshot) =>
+              sessionAccess.grantsFor(principal).pipe(
+                Effect.map((grants) => ({
+                  ...snapshot,
+                  threads: scopeThreadList(principal, snapshot.threads, grants),
+                })),
+              ),
+            ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.getThreadFamily]: (input) =>
           readOmittableShellRows({ familyOf: input.threadId }, "Failed to load the thread family"),
@@ -2326,10 +2340,14 @@ export const layerWsRpc = (
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: (input) =>
           Stream.unwrap(subscribeOrchestrationV2Shell(input)).pipe(
-            Stream.flatMap((item) => {
-              const scoped = scopeShellStreamItem(principal, item);
-              return scoped === null ? Stream.empty : Stream.succeed(scoped);
-            }),
+            Stream.flatMap((item) =>
+              Stream.fromEffect(sessionAccess.grantsFor(principal)).pipe(
+                Stream.flatMap((grants) => {
+                  const scoped = scopeShellStreamItem(principal, item, grants);
+                  return scoped === null ? Stream.empty : Stream.succeed(scoped);
+                }),
+              ),
+            ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input) =>
           Stream.unwrap(
@@ -2718,6 +2736,12 @@ export const layerWsRpc = (
         [WS_METHODS.serverRunStorageCleanup]: () => storageCleanup.runNow,
         [WS_METHODS.serverGetStorageCleanupReport]: () => storageCleanup.reports,
         [WS_METHODS.serverGetDatabaseStorage]: () => databaseStorage.status,
+        [WS_METHODS.sessionAccessList]: (_input) => sessionAccess.snapshot(principal),
+        [WS_METHODS.sessionAccessThreadShares]: (input) =>
+          sessionAccess
+            .threadShares(principal, input.threadId)
+            .pipe(Effect.map((shares) => ({ shares }))),
+        [WS_METHODS.sessionAccessMutate]: (input) => sessionAccess.mutate(principal, input),
         [WS_METHODS.peerLinksList]: (_input) =>
           peerLinks.list.pipe(Effect.map((links) => ({ links }))),
         [WS_METHODS.peerLinksLink]: (input) => peerLinks.link(input),
@@ -3509,6 +3533,7 @@ export const layer = Layer.unwrap(
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
     const peerLinks = yield* PeerLinks.PeerLinks;
     const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
+    const sessionAccess = yield* SessionAccess.SessionAccess;
     const sql = yield* SqlClient.SqlClient;
     return HttpRouter.add(
       "GET",
@@ -3594,6 +3619,7 @@ export const layer = Layer.unwrap(
                   reviewGuides,
                 ),
               ),
+              Layer.provide(Layer.succeed(SessionAccess.SessionAccess, sessionAccess)),
               Layer.provide(Layer.succeed(PeerLinks.PeerLinks, peerLinks)),
               Layer.provide(Layer.succeed(PeerLinkRequests.PeerLinkRequests, peerLinkRequests)),
               Layer.provide(

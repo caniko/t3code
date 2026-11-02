@@ -34,7 +34,11 @@ import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
-import { canAccessThread, type ThreadAction } from "../orchestration-v2/ThreadOwnership.ts";
+import {
+  canAccessThread,
+  type ThreadAction,
+  type ThreadGrants,
+} from "../orchestration-v2/ThreadOwnership.ts";
 import * as SessionStore from "./SessionStore.ts";
 import { traceAuthenticatedRelayRequest, traceRelayRequest } from "../cloud/traceRelayRequest.ts";
 import { deriveAuthClientMetadata } from "./utils.ts";
@@ -232,9 +236,11 @@ export const requireEnvironmentScope = Effect.fn("environment.auth.requireScope"
 export const requireThreadAccess = Effect.fn("environment.auth.requireThreadAccess")(function* (
   scope: AuthEnvironmentScope,
   threadId: ThreadId,
-  readOwner: (
-    threadId: ThreadId,
-  ) => Effect.Effect<{ readonly ownerPrincipal?: string | undefined } | null>,
+  readOwner: (threadId: ThreadId) => Effect.Effect<{
+    readonly id: string;
+    readonly ownerPrincipal?: string | undefined;
+  } | null>,
+  grantsFor: (principal: string) => Effect.Effect<ThreadGrants>,
   action: ThreadAction = "read",
 ) {
   const session = yield* requireEnvironmentScope(scope);
@@ -242,7 +248,7 @@ export const requireThreadAccess = Effect.fn("environment.auth.requireThreadAcce
   // The default principal reaches every thread; skip the owner read on its hot path.
   if (principal === DEFAULT_PRINCIPAL_ID) return session;
   const thread = yield* readOwner(threadId);
-  if (thread === null || !canAccessThread(principal, thread, action)) {
+  if (thread === null || !canAccessThread(principal, thread, action, yield* grantsFor(principal))) {
     return yield* failEnvironmentNotFound("thread_not_found");
   }
   return session;

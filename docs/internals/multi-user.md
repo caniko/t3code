@@ -80,8 +80,20 @@ not revealed. [`canAccessThread`](../../apps/server/src/orchestration-v2/ThreadO
 is the one rule, asked with `read` or `write` (dispatch, launch into an
 existing thread, stop, and MCP writes need `write`). Today it admits the owner
 and the default `owner` principal, which administers the environment and sees
-every thread; sharing extends this function and `threadOwnerScope`, its SQL
-counterpart, and nothing else.
+every thread. Sharing extends it with `grants` (see below) and the
+`listOlderSettledThreads` subqueries, its SQL counterpart, and nothing else.
+
+**Groups and shares.** Migration `078` adds `session_groups`,
+`session_group_members`, `session_group_threads` (a thread is in at most one
+group, owned by the group's owner) and `session_shares`, plain tables managed by
+`SessionAccess` rather than thread events, because they span threads and must not
+follow a thread's history. `grantsFor(principal)` returns the role (`viewer` or
+`participant`) the principal holds on other principals' threads, read once per
+request. `viewer` reads; `participant` also writes. Only a group's owner manages
+it and only a thread's owner shares it. A participant's message carries
+`senderPrincipal`, stamped from the session; the turn still runs for the thread's
+owner. RPCs: `sessionAccess.list|threadShares|mutate`. CLI: `t3 group ...`,
+`t3 share`, `t3 unshare`. MCP calls still see only the owner's own threads.
 
 **Server administration.** A principal's scopes (`AuthPrincipalScopes`) cover
 working in the app: threads, projects, terminals, files, source control,

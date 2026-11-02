@@ -96,7 +96,15 @@ export function withCreationProvenance(
         ...(principal === DEFAULT_PRINCIPAL_ID ? {} : { ownerPrincipal: principal }),
       };
     }
-    case "message.dispatch":
+    case "message.dispatch": {
+      // The sender is the session's principal, never a client claim; the turn still runs as the thread owner.
+      const { senderPrincipal: _senderPrincipal, ...rest } = command;
+      return {
+        ...rest,
+        ...provenance,
+        ...(principal === DEFAULT_PRINCIPAL_ID ? {} : { senderPrincipal: principal }),
+      };
+    }
     case "thread.fork":
     case "thread.merge_back":
     case "delegated_task.request":

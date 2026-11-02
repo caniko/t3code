@@ -20,6 +20,7 @@ import {
   requireEnvironmentScope,
   requireThreadAccess,
 } from "../auth/http.ts";
+import * as SessionAccess from "./SessionAccess.ts";
 import { scopeThreadList } from "./ThreadOwnership.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { traceLocalHandlerWork } from "../cloud/traceRelayRequest.ts";
@@ -61,6 +62,7 @@ export const layer = HttpApiBuilder.group(
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
     const projectStore = yield* ProjectStore.ProjectStoreV2;
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+    const sessionAccess = yield* SessionAccess.SessionAccess;
 
     const readThread = (threadId: ThreadId) =>
       threadManagement.getThreadRecords(threadId, []).pipe(
@@ -179,11 +181,15 @@ export const layer = HttpApiBuilder.group(
             omitIdleSubagents: args.query.omitIdleSubagents === "1",
             omitOlderSettled: args.query.omitOlderSettled === "1",
           }).pipe(
-            Effect.map((snapshot) => ({
-              ...snapshot,
-              threads: scopeThreadList(principal, snapshot.threads),
-              archivedThreads: scopeThreadList(principal, snapshot.archivedThreads),
-            })),
+            Effect.flatMap((snapshot) =>
+              sessionAccess.grantsFor(principal).pipe(
+                Effect.map((grants) => ({
+                  ...snapshot,
+                  threads: scopeThreadList(principal, snapshot.threads, grants),
+                  archivedThreads: scopeThreadList(principal, snapshot.archivedThreads, grants),
+                })),
+              ),
+            ),
             traceLocalHandlerWork,
             Effect.catch((cause) =>
               failEnvironmentInternal("orchestration_snapshot_failed", cause),
@@ -195,7 +201,12 @@ export const layer = HttpApiBuilder.group(
         "threadSnapshot",
         Effect.fn("environment.orchestration.threadSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireThreadAccess(AuthOrchestrationReadScope, args.params.threadId, readThread);
+          yield* requireThreadAccess(
+            AuthOrchestrationReadScope,
+            args.params.threadId,
+            readThread,
+            sessionAccess.grantsFor,
+          );
           const snapshot = yield* loadThreadSnapshot(
             args.params.threadId,
             "orchestration_thread_snapshot_failed",
@@ -210,7 +221,12 @@ export const layer = HttpApiBuilder.group(
         "threadTranscript",
         Effect.fn("environment.orchestration.threadTranscript")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireThreadAccess(AuthOrchestrationReadScope, args.params.threadId, readThread);
+          yield* requireThreadAccess(
+            AuthOrchestrationReadScope,
+            args.params.threadId,
+            readThread,
+            sessionAccess.grantsFor,
+          );
           return yield* threadManagement.getThreadTranscript(args.params.threadId).pipe(
             Effect.provideService(ServerEnvironment.ServerEnvironmentIdentity, environment),
             traceLocalHandlerWork,
@@ -235,7 +251,12 @@ export const layer = HttpApiBuilder.group(
         "threadBoundedSnapshot",
         Effect.fn("environment.orchestration.threadBoundedSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireThreadAccess(AuthOrchestrationReadScope, args.params.threadId, readThread);
+          yield* requireThreadAccess(
+            AuthOrchestrationReadScope,
+            args.params.threadId,
+            readThread,
+            sessionAccess.grantsFor,
+          );
           const snapshot = yield* loadThreadSnapshotWindow(
             args.params.threadId,
             undefined,
@@ -261,7 +282,12 @@ export const layer = HttpApiBuilder.group(
         "threadHistoryPage",
         Effect.fn("environment.orchestration.threadHistoryPage")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireThreadAccess(AuthOrchestrationReadScope, args.params.threadId, readThread);
+          yield* requireThreadAccess(
+            AuthOrchestrationReadScope,
+            args.params.threadId,
+            readThread,
+            sessionAccess.grantsFor,
+          );
           const decoded = yield* Effect.try(() =>
             decodeThreadHistoryCursor(args.query.cursor),
           ).pipe(Effect.result);

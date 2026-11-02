@@ -6951,7 +6951,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             // ponytail: unindexed json_extract over payload_json; add an owner column when it matters
             ownerPrincipal === undefined
               ? sql``
-              : sql` AND COALESCE(json_extract(t.payload_json, '$.ownerPrincipal'), ${DEFAULT_PRINCIPAL_ID}) = ${ownerPrincipal}`
+              : sql` AND (COALESCE(json_extract(t.payload_json, '$.ownerPrincipal'), ${DEFAULT_PRINCIPAL_ID}) = ${ownerPrincipal}
+                  OR t.thread_id IN (SELECT thread_id FROM session_shares WHERE principal = ${ownerPrincipal})
+                  OR t.thread_id IN (
+                    SELECT gt.thread_id FROM session_group_threads gt
+                    JOIN session_group_members m ON m.group_id = gt.group_id
+                    WHERE m.principal = ${ownerPrincipal}))`
           }
       `;
       const belowCursor =
