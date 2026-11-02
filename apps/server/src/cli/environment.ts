@@ -1,4 +1,9 @@
-import { AuthMcpClientAccess, EnvironmentId, type PeerLinkSummary } from "@t3tools/contracts";
+import {
+  AuthMcpClientAccess,
+  DEFAULT_PRINCIPAL_ID,
+  EnvironmentId,
+  type PeerLinkSummary,
+} from "@t3tools/contracts";
 import * as Console from "effect/Console";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -68,6 +73,11 @@ const jsonFlag = Flag.Boolean("json").pipe(
   Flag.withDefault(false),
 );
 
+const principalFlag = Flag.String("principal").pipe(
+  Flag.withDescription("The principal whose agents use the link. Defaults to the owner."),
+  Flag.withDefault(DEFAULT_PRINCIPAL_ID),
+);
+
 const encodeLinks = Schema.encodeEffect(
   Schema.fromJsonString(Schema.Array(Schema.toEncoded(Schema.Unknown))),
 );
@@ -84,6 +94,7 @@ const formatLinks = (links: ReadonlyArray<PeerLinkSummary>) =>
 
 const environmentLinkCommand = Command.make("link", {
   ...authLocationFlags,
+  principal: principalFlag,
   url: Argument.String("url").pipe(
     Argument.withDescription(
       "Where the other environment answers: its T3 Connect, Tailscale, LAN or loopback address.",
@@ -109,7 +120,7 @@ const environmentLinkCommand = Command.make("link", {
   Command.withHandler((flags) =>
     runWithPeerLinks(flags, (links) =>
       Effect.gen(function* () {
-        const linked = yield* links.link({
+        const linked = yield* links.link(flags.principal, {
           url: flags.url,
           alternateUrls: flags.alternateUrl,
           pairingCode: flags.pairingCode,
@@ -123,14 +134,18 @@ const environmentLinkCommand = Command.make("link", {
   ),
 );
 
-const environmentListCommand = Command.make("list", { ...authLocationFlags, json: jsonFlag }).pipe(
+const environmentListCommand = Command.make("list", {
+  ...authLocationFlags,
+  principal: principalFlag,
+  json: jsonFlag,
+}).pipe(
   Command.withDescription("List linked environments and whether each answers now."),
   Command.withHandler((flags) =>
     runWithPeerLinks(
       flags,
       (links) =>
         Effect.gen(function* () {
-          const listed = yield* links.list;
+          const listed = yield* links.list(flags.principal);
           yield* Console.log(flags.json ? `${yield* encodeLinks(listed)}\n` : formatLinks(listed));
         }),
       { quietLogs: flags.json },
@@ -140,6 +155,7 @@ const environmentListCommand = Command.make("list", { ...authLocationFlags, json
 
 const environmentUnlinkCommand = Command.make("unlink", {
   ...authLocationFlags,
+  principal: principalFlag,
   environmentId: Argument.String("environment-id").pipe(
     Argument.withDescription("The linked environment's id, from `t3 environment list`."),
   ),
@@ -150,7 +166,10 @@ const environmentUnlinkCommand = Command.make("unlink", {
   Command.withHandler((flags) =>
     runWithPeerLinks(flags, (links) =>
       Effect.gen(function* () {
-        const removed = yield* links.unlink(EnvironmentId.make(flags.environmentId));
+        const removed = yield* links.unlink(
+          flags.principal,
+          EnvironmentId.make(flags.environmentId),
+        );
         yield* Console.log(
           removed
             ? `Forgot ${flags.environmentId}. Revoke it in that environment's Connections to end its session there.\n`

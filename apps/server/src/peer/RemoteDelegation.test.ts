@@ -1473,7 +1473,7 @@ it.effect("fails the task when its thread there is gone, or the link here is", (
           clientRequestId: "forgotten",
         })
         .pipe(Effect.map((result) => result.structuredContent as { taskId: NodeId }));
-      yield* a.links.unlink(box.environmentId);
+      yield* a.links.unlink("owner", box.environmentId);
       yield* Ref.set(thread.status, "completed");
       yield* Deferred.succeed(thread.finished, undefined);
       const unlinked = yield* taskResult(a, forgotten.taskId);
@@ -1497,7 +1497,7 @@ it.effect("cancel ends the task here even when the link is gone", () =>
       yield* seedParent(a);
 
       const delegated = yield* delegateToBox(a);
-      yield* a.links.unlink(box.environmentId);
+      yield* a.links.unlink("owner", box.environmentId);
       const cancel = yield* a.call("task_cancel", { taskId: delegated.taskId });
       expect(cancel.structuredContent).toEqual({
         taskId: delegated.taskId,

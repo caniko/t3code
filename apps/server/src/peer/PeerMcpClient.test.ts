@@ -77,6 +77,7 @@ it.effect.each([false, true])(
         yield* linkTo(links, b);
         const held = yield* client
           .call({
+            principal: "owner",
             environmentId: box.environmentId,
             tool: "hold",
             arguments: {},
@@ -89,6 +90,7 @@ it.effect.each([false, true])(
         const before = (yield* Ref.get(b.bearers)).length;
         expect(
           yield* client.call({
+            principal: "owner",
             environmentId: box.environmentId,
             tool: "probe",
             arguments: {},
@@ -206,6 +208,7 @@ it.effect("renews a missing peer session once and reuses its replacement", () =>
     for (let call = 0; call < 2; call++) {
       expect(
         yield* client.call({
+          principal: "owner",
           environmentId: box.environmentId,
           tool: "probe",
           arguments: {},

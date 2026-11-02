@@ -6,6 +6,7 @@
  */
 import {
   CommandId,
+  DEFAULT_PRINCIPAL_ID,
   type EnvironmentId,
   MessageId,
   type NodeId,
@@ -106,12 +107,18 @@ const make = Effect.gen(function* () {
    * The stored link to `environmentId`, or nothing once it has expired: an
    * expired link needs a new pairing code, which only the card asks for.
    */
-  const usableLink = (environmentId: EnvironmentId) =>
-    Effect.all([peerLinks.get(environmentId), DateTime.now]).pipe(
+  const usableLink = (principal: string, environmentId: EnvironmentId) =>
+    Effect.all([peerLinks.get(principal, environmentId), DateTime.now]).pipe(
       Effect.map(([linked, now]) =>
         Option.filter(linked, (link) => DateTime.isGreaterThan(link.expiresAt, now)),
       ),
     );
+
+  /** Links belong to the principal that owns the thread whose agent will use them. */
+  const ownerOf = (threadId: ThreadId) =>
+    threadManagement
+      .getThreadShell(threadId)
+      .pipe(Effect.map((shell) => shell?.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID));
 
   const record = (
     card: LinkRequestAsk,
@@ -200,7 +207,8 @@ const make = Effect.gen(function* () {
       }
       // A machine already linked needs no card: the agent can use it now.
       if (input.environmentId !== undefined) {
-        const linked = yield* usableLink(input.environmentId).pipe(
+        const principal = yield* ownerOf(threadId).pipe(Effect.mapError(unreadable));
+        const linked = yield* usableLink(principal, input.environmentId).pipe(
           Effect.mapError(
             (error) =>
               new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
@@ -293,13 +301,14 @@ const make = Effect.gen(function* () {
 
   /** Links the machine the user picked, or finds the link they chose to keep. */
   const answerOutcome = (
+    principal: string,
     answer: PeerLinkRequestAnswerInput["answer"],
   ): Effect.Effect<LinkRequestOutcome> => {
     switch (answer.type) {
       case "decline":
         return Effect.succeed({ linkStatus: "declined" });
       case "use-existing":
-        return usableLink(answer.environmentId).pipe(
+        return usableLink(principal, answer.environmentId).pipe(
           Effect.flatMap(
             Option.match({
               onNone: () =>
@@ -320,7 +329,7 @@ const make = Effect.gen(function* () {
       case "link": {
         const [url, ...alternateUrls] = answer.urls;
         return peerLinks
-          .link({
+          .link(principal, {
             url,
             ...(alternateUrls.length === 0 ? {} : { alternateUrls }),
             pairingCode: answer.pairingCode,
@@ -357,7 +366,10 @@ const make = Effect.gen(function* () {
       if (card.linkStatus !== "pending") {
         return yield* new PeerLinkRequestError({ reason: "already_answered" });
       }
-      const outcome = yield* answerOutcome(input.answer);
+      const principal = yield* ownerOf(input.threadId).pipe(
+        Effect.mapError((cause) => new PeerLinkRequestError({ reason: "load_failed", cause })),
+      );
+      const outcome = yield* answerOutcome(principal, input.answer);
       // If Stop closed the card while linking, the card keeps that; the link
       // itself stands and Settings lists it.
       yield* record(

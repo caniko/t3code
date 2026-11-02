@@ -292,12 +292,17 @@ const makeLaptop = Effect.gen(function* () {
                   // Work another environment's link started on this laptop.
                   linkOrigin: { sessionId: "session:desk", label: "T3 Code · Desk" },
                 }
-              : liveThreadShell(
-                  threadId,
-                  threadId === ThreadId.make("thread:laptop-plan")
-                    ? { runtimeMode: "full-access", interactionMode: "plan" }
-                    : { runtimeMode: "full-access" },
-                ),
+              : threadId === ThreadId.make("thread:laptop-alice")
+                ? {
+                    ...liveThreadShell(threadId, { runtimeMode: "full-access" }),
+                    ownerPrincipal: "principal:alice",
+                  }
+                : liveThreadShell(
+                    threadId,
+                    threadId === ThreadId.make("thread:laptop-plan")
+                      ? { runtimeMode: "full-access", interactionMode: "plan" }
+                      : { runtimeMode: "full-access" },
+                  ),
           ),
         getProjectThreadRecords: ({ threadId }) =>
           Effect.succeed({
@@ -688,6 +693,42 @@ it.effect("refuses what a linked environment cannot take before anything leaves"
         expect(failureOf(relayed), name).toMatchObject({ code: "capability_denied" });
       }
       expect(yield* Ref.get(b.bearers)).toEqual([]);
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("an agent forwards over the link of the principal that owns its thread", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const seen = yield* Ref.make<Seen>(nothingSeen);
+      const linkSession = yield* Ref.make("");
+      const b = yield* serveBox(seen, linkSession);
+      const a = yield* makeLaptop;
+      yield* linkTo(a.links, b, "auto");
+      yield* linkTo(a.links, b, "read-only", "principal:alice");
+
+      const accessSeenBy = (caller: string) =>
+        a
+          .call(caller, "t3_environment_links", {})
+          .pipe(
+            Effect.map((result) =>
+              (result.structuredContent as { links: ReadonlyArray<{ access: string }> }).links.map(
+                (link) => link.access,
+              ),
+            ),
+          );
+      expect(yield* accessSeenBy("thread:laptop-full")).toEqual(["auto"]);
+      expect(yield* accessSeenBy("thread:laptop-alice")).toEqual(["read-only"]);
+
+      // Alice's agent reaches the box with her read-only credential, so the
+      // box refuses the send the owner's `auto` link would have carried.
+      const sent = yield* a.call("thread:laptop-alice", "t3_thread_send", {
+        environmentId: box.environmentId,
+        threadId: boxThread,
+        message: "Carry on there.",
+      });
+      expect(sent.isError).toBe(true);
+      expect((yield* Ref.get(seen)).sends).toHaveLength(0);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

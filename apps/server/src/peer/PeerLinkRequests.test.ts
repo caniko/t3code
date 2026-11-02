@@ -541,7 +541,7 @@ it.live("the agent asks without waiting, and the user links the box after its tu
         answer: { type: "link", urls: [b.url], access: "auto", pairingCode: pairing.credential },
       });
 
-      const link = yield* a.links.get(box.environmentId);
+      const link = yield* a.links.get("owner", box.environmentId);
       expect(Option.getOrUndefined(link)?.access).toBe("auto");
       expect(yield* cardOf(a)).toMatchObject({
         status: "completed",
@@ -635,7 +635,7 @@ it.live("a declined request links nothing and tells the agent", () =>
       yield* a.call({ url: b.url });
       const card = yield* pendingCard(a);
       yield* a.requests.answer({ threadId, turnItemId: card.id, answer: { type: "decline" } });
-      expect(Option.isNone(yield* a.links.get(box.environmentId))).toBe(true);
+      expect(Option.isNone(yield* a.links.get("owner", box.environmentId))).toBe(true);
       expect(yield* cardOf(a)).toMatchObject({ status: "cancelled", linkStatus: "declined" });
       const { messages } = yield* outcomeMessages(a);
       expect(messages).toHaveLength(1);
@@ -667,7 +667,7 @@ it.live("stopping the thread closes its open card, which then takes no answer", 
         })
         .pipe(Effect.flip);
       expect(late.reason).toBe("already_answered");
-      expect(Option.isNone(yield* a.links.get(box.environmentId))).toBe(true);
+      expect(Option.isNone(yield* a.links.get("owner", box.environmentId))).toBe(true);
       // An answer already linking when Stop landed keeps the card closed and wakes nobody.
       yield* a.orchestrator.dispatch({
         type: "link_request.record",
@@ -863,7 +863,7 @@ it.live("a code the box refuses fails the request with its reason, and links not
       const { messages } = yield* outcomeMessages(a);
       expect(messages[0]).toMatchObject({ notification: { outcome: "failed" } });
       expect(messages[0]!.text).toContain(reason);
-      expect(Option.isNone(yield* a.links.get(box.environmentId))).toBe(true);
+      expect(Option.isNone(yield* a.links.get("owner", box.environmentId))).toBe(true);
       expect(yield* storedText(a)).not.toContain("not-a-real-code");
     }),
   ),
@@ -919,10 +919,12 @@ it.live(
             pairingCode: pairing.credential,
           },
         });
-        expect(Option.getOrUndefined(yield* a.links.get(box.environmentId))).toMatchObject({
-          urls: [b.url],
-          access: "auto",
-        });
+        expect(Option.getOrUndefined(yield* a.links.get("owner", box.environmentId))).toMatchObject(
+          {
+            urls: [b.url],
+            access: "auto",
+          },
+        );
         expect(yield* cardOf(a)).toMatchObject({
           linkStatus: "linked",
           linkedEnvironmentId: box.environmentId,
@@ -937,7 +939,7 @@ it.live("naming a machine that is already linked returns the link at once, with 
     Effect.gen(function* () {
       yield* seedThread(a);
       const pairing = yield* b.auth.issuePairingCredential();
-      yield* a.links.link({ url: b.url, pairingCode: pairing.credential, access: "auto" });
+      yield* a.links.link("owner", { url: b.url, pairingCode: pairing.credential, access: "auto" });
       const asked = yield* a.call({ environmentId: box.environmentId });
       expect(asked.structuredContent).toEqual({
         status: "linked",
@@ -962,7 +964,7 @@ it.live("a retry naming a machine linked meanwhile closes the card it left as li
       yield* pendingCard(a);
       // Linked from Settings meanwhile, not through the card.
       const pairing = yield* b.auth.issuePairingCredential();
-      yield* a.links.link({ url: b.url, pairingCode: pairing.credential, access: "auto" });
+      yield* a.links.link("owner", { url: b.url, pairingCode: pairing.credential, access: "auto" });
 
       const retried = yield* a.call({
         environmentId: box.environmentId,
@@ -1030,7 +1032,11 @@ it.live(
         expect(card.environmentId).toBe(box.environmentId);
         // Linked from Settings meanwhile; the card answers with that link.
         const pairing = yield* b.auth.issuePairingCredential();
-        yield* a.links.link({ url: b.url, pairingCode: pairing.credential, access: "read-only" });
+        yield* a.links.link("owner", {
+          url: b.url,
+          pairingCode: pairing.credential,
+          access: "read-only",
+        });
         yield* a.requests.answer({
           threadId,
           turnItemId: card.id,

@@ -2808,10 +2808,10 @@ export const layerWsRpc = (
             .pipe(Effect.map((shares) => ({ shares }))),
         [WS_METHODS.sessionAccessMutate]: (input) => sessionAccess.mutate(principal, input),
         [WS_METHODS.peerLinksList]: (_input) =>
-          peerLinks.list.pipe(Effect.map((links) => ({ links }))),
-        [WS_METHODS.peerLinksLink]: (input) => peerLinks.link(input),
+          peerLinks.list(principal).pipe(Effect.map((links) => ({ links }))),
+        [WS_METHODS.peerLinksLink]: (input) => peerLinks.link(principal, input),
         [WS_METHODS.peerLinksUnlink]: ({ environmentId }) =>
-          peerLinks.unlink(environmentId).pipe(Effect.map((removed) => ({ removed }))),
+          peerLinks.unlink(principal, environmentId).pipe(Effect.map((removed) => ({ removed }))),
         [WS_METHODS.peerLinksAnswerRequest]: (input) =>
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
             Effect.andThen(peerLinkRequests.answer(input)),

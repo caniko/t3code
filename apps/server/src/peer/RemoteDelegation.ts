@@ -1,6 +1,7 @@
 import {
   CommandId,
   type EnvironmentId,
+  DEFAULT_PRINCIPAL_ID,
   NodeId,
   OrchestratorMcpFailure,
   type OrchestratorMcpDelegateTaskInput,
@@ -278,10 +279,12 @@ const make = Effect.gen(function* () {
           },
         },
       );
-      const link = yield* links.get(target.environmentId).pipe(
-        Effect.map(Option.getOrUndefined),
-        Effect.orElseSucceed(() => undefined),
-      );
+      const link = yield* links
+        .get(parent.thread.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID, target.environmentId)
+        .pipe(
+          Effect.map(Option.getOrUndefined),
+          Effect.orElseSucceed(() => undefined),
+        );
       const commandId = CommandId.make(
         `command:mcp:${encodeURIComponent(scope.requestNamespace)}:remote-delegate:${encodeURIComponent(key)}`,
       );
@@ -493,10 +496,10 @@ const make = Effect.gen(function* () {
     function* (parentThreadId: ThreadId, taskId: NodeId, error: OrchestratorMcpFailure) {
       if (isFinal(error)) return error.message;
       if (error.code !== "invalid_request") return undefined;
-      const { task } = yield* readTask(parentThreadId, taskId);
+      const { thread, task } = yield* readTask(parentThreadId, taskId);
       const environmentId = task?.remoteChild?.environmentId;
       if (environmentId === undefined) return error.message;
-      const link = yield* links.get(environmentId);
+      const link = yield* links.get(thread.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID, environmentId);
       return Option.isSome(link) ? undefined : error.message;
     },
     Effect.orElseSucceed(() => undefined),

@@ -185,11 +185,12 @@ export const linkTo = (
   links: PeerLinks.PeerLinks["Service"],
   peer: ServedPeer,
   access: AuthMcpClientAccess = "auto",
+  principal = "owner",
 ) =>
   peer.auth
     .issuePairingCredential()
     .pipe(
       Effect.flatMap((pairing) =>
-        links.link({ url: peer.url, pairingCode: pairing.credential, access }),
+        links.link(principal, { url: peer.url, pairingCode: pairing.credential, access }),
       ),
     );

@@ -100,8 +100,10 @@ const probe = (
   a: Effect.Success<ReturnType<typeof makeA>>,
   limits: PeerMcpClient.PeerCallLimits = { runtimeMode: "full-access", interactionMode: "default" },
   tool = "probe",
+  principal = "owner",
 ) =>
   a.peer.call({
+    principal,
     environmentId: box.environmentId,
     tool,
     arguments: {},
@@ -165,13 +167,13 @@ it.effect("links with a pairing code, and the peer holds its agents to the limit
       const a = yield* makeA(laptop);
 
       const refused = yield* a.links
-        .link({ url: b.url, pairingCode: "not-a-code", access: "auto" })
+        .link("owner", { url: b.url, pairingCode: "not-a-code", access: "auto" })
         .pipe(Effect.flip);
       expect(refused.reason).toBe("pairing_rejected");
       expect(yield* linkedSessions(b)).toEqual([]);
 
       const pairing = yield* b.auth.issuePairingCredential();
-      const linked = yield* a.links.link({
+      const linked = yield* a.links.link("owner", {
         url: b.url,
         pairingCode: pairing.credential,
         access: "auto",
@@ -187,7 +189,7 @@ it.effect("links with a pairing code, and the peer holds its agents to the limit
         "T3 Code · Laptop",
       ]);
       expect(
-        (yield* a.links.list).map(({ environmentId, status }) => [environmentId, status]),
+        (yield* a.links.list("owner")).map(({ environmentId, status }) => [environmentId, status]),
       ).toEqual([[box.environmentId, "reachable"]]);
 
       // The caller's limits narrow the link's access; they never widen it.
@@ -211,7 +213,11 @@ it.effect(
         const b = yield* serveB(box);
         const a = yield* makeA(laptop);
         const pairing = yield* b.auth.issuePairingCredential();
-        const link = a.links.link({ url: b.url, pairingCode: pairing.credential, access: "auto" });
+        const link = a.links.link("owner", {
+          url: b.url,
+          pairingCode: pairing.credential,
+          access: "auto",
+        });
 
         yield* a.settings.updateSettings({ linkedEnvironmentsEnabled: false });
         expect(yield* link.pipe(Effect.flip)).toMatchObject({
@@ -272,7 +278,7 @@ it.effect("a link whose row cannot be stored keeps none of its token", () =>
       `;
       const pairing = yield* b.auth.issuePairingCredential();
       const failed = yield* a.links
-        .link({ url: b.url, pairingCode: pairing.credential, access: "auto" })
+        .link("owner", { url: b.url, pairingCode: pairing.credential, access: "auto" })
         .pipe(Effect.flip);
       expect(failed.reason).toBe("storage");
       expect(yield* Ref.get(held)).toEqual(new Set());
@@ -291,12 +297,16 @@ it.effect("two links racing to one peer leave the stored access matching the tok
       );
       yield* Effect.all(
         [
-          a.links.link({ url: b.url, pairingCode: first.credential, access: "read-only" }),
-          a.links.link({ url: b.url, pairingCode: second.credential, access: "full-access" }),
+          a.links.link("owner", { url: b.url, pairingCode: first.credential, access: "read-only" }),
+          a.links.link("owner", {
+            url: b.url,
+            pairingCode: second.credential,
+            access: "full-access",
+          }),
         ],
         { concurrency: 2 },
       );
-      const [stored] = yield* a.links.list;
+      const [stored] = yield* a.links.list("owner");
       // The token sent is the one issued with the access the row records.
       const { modes } = yield* probe(a);
       expect(modes).toBe(
@@ -356,10 +366,10 @@ it.effect("never follows a peer's redirect with the pairing code", () =>
       const a = yield* makeA(laptop);
       const pairing = yield* b.auth.issuePairingCredential();
       yield* a.links
-        .link({ url: front, pairingCode: pairing.credential, access: "auto" })
+        .link("owner", { url: front, pairingCode: pairing.credential, access: "auto" })
         .pipe(Effect.flip);
       expect(yield* Ref.get(received)).toEqual([]);
-      expect(yield* a.links.list).toEqual([]);
+      expect(yield* a.links.list("owner")).toEqual([]);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
@@ -370,7 +380,7 @@ it.effect("never sends a link's token to an address that stops answering as that
       const b = yield* serveB(box);
       const a = yield* makeA(laptop);
       const pairing = yield* b.auth.issuePairingCredential();
-      yield* a.links.link({ url: b.url, pairingCode: pairing.credential, access: "auto" });
+      yield* a.links.link("owner", { url: b.url, pairingCode: pairing.credential, access: "auto" });
       yield* probe(a);
       expect((yield* Ref.get(b.bearers)).length).toBeGreaterThan(0);
 
@@ -380,7 +390,7 @@ it.effect("never sends a link's token to an address that stops answering as that
       const failed = yield* probe(a).pipe(Effect.flip);
       expect(failed.message).toContain("Box did not answer");
       expect(yield* Ref.get(b.bearers)).toEqual([]);
-      expect((yield* a.links.list).map((link) => link.status)).toEqual(["unreachable"]);
+      expect((yield* a.links.list("owner")).map((link) => link.status)).toEqual(["unreachable"]);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
@@ -418,18 +428,18 @@ it.effect("cancelling a descriptor probe aborts its request and leaves later res
       );
       const a = yield* makeA(laptop);
       const pairing = yield* b.auth.issuePairingCredential();
-      yield* a.links.link({ url: b.url, pairingCode: pairing.credential, access: "auto" });
+      yield* a.links.link("owner", { url: b.url, pairingCode: pairing.credential, access: "auto" });
       yield* Ref.set(b.bearers, []);
       yield* Ref.set(requests, 0);
       yield* Ref.set(hold, true);
 
-      const resolving = yield* a.links.resolve(box.environmentId).pipe(Effect.forkScoped);
+      const resolving = yield* a.links.resolve("owner", box.environmentId).pipe(Effect.forkScoped);
       yield* Deferred.await(entered);
       yield* Fiber.interrupt(resolving);
       yield* Deferred.await(interrupted);
 
       yield* Ref.set(hold, false);
-      expect((yield* a.links.resolve(box.environmentId)).url).toBe(b.url);
+      expect((yield* a.links.resolve("owner", box.environmentId)).url).toBe(b.url);
       expect(yield* Ref.get(requests)).toBe(2);
       expect(yield* Ref.get(b.bearers)).toEqual([]);
     }),
@@ -442,12 +452,12 @@ it.effect("reads one stored link without asking the peer", () =>
       const b = yield* serveB(box);
       const a = yield* makeA(laptop);
       const pairing = yield* b.auth.issuePairingCredential();
-      yield* a.links.link({ url: b.url, pairingCode: pairing.credential, access: "auto" });
+      yield* a.links.link("owner", { url: b.url, pairingCode: pairing.credential, access: "auto" });
       yield* Ref.set(b.probes, 0);
 
-      const stored = yield* a.links.get(box.environmentId);
+      const stored = yield* a.links.get("owner", box.environmentId);
       expect(Option.map(stored, (link) => link.label)).toEqual(Option.some("Box"));
-      expect(Option.isNone(yield* a.links.get(laptop.environmentId))).toBe(true);
+      expect(Option.isNone(yield* a.links.get("owner", laptop.environmentId))).toBe(true);
       expect(yield* Ref.get(b.probes)).toBe(0);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
@@ -480,7 +490,7 @@ it.effect("tells the agent to link again once the peer revokes the link or it ex
       const b = yield* serveB(box);
       const a = yield* makeA(laptop);
       const pairing = yield* b.auth.issuePairingCredential();
-      yield* a.links.link({ url: b.url, pairingCode: pairing.credential, access: "auto" });
+      yield* a.links.link("owner", { url: b.url, pairingCode: pairing.credential, access: "auto" });
       yield* probe(a);
 
       const [session] = yield* linkedSessions(b);
@@ -489,7 +499,7 @@ it.effect("tells the agent to link again once the peer revokes the link or it ex
       expect(revoked.code).toBe("capability_denied");
       expect(revoked.message).toContain("revoked there");
 
-      yield* a.links.link({
+      yield* a.links.link("owner", {
         url: b.url,
         pairingCode: (yield* b.auth.issuePairingCredential()).credential,
         access: "auto",
@@ -508,12 +518,12 @@ it.effect("tells the agent to link again once the peer revokes the link or it ex
       // link's, so the peer would not fence its work even though it can.
       yield* a.sql`UPDATE peer_environment_links SET fenced = 0`;
       // Linking again is its only way back, as for an expired link.
-      expect((yield* a.links.list).map((link) => link.status)).toEqual(["expired"]);
+      expect((yield* a.links.list("owner")).map((link) => link.status)).toEqual(["expired"]);
       const legacy = yield* probe(a).pipe(Effect.flip);
       expect(legacy.code).toBe("capability_denied");
       expect(legacy.message).toContain("Link it again");
       expect(yield* Ref.get(b.bearers)).toEqual([]);
-      yield* a.links.link({
+      yield* a.links.link("owner", {
         url: b.url,
         pairingCode: (yield* b.auth.issuePairingCredential()).credential,
         access: "auto",
@@ -521,7 +531,7 @@ it.effect("tells the agent to link again once the peer revokes the link or it ex
       yield* probe(a);
 
       yield* TestClock.adjust(Duration.days(31));
-      expect((yield* a.links.list).map((link) => link.status)).toEqual(["expired"]);
+      expect((yield* a.links.list("owner")).map((link) => link.status)).toEqual(["expired"]);
       yield* Ref.set(b.bearers, []);
       const expired = yield* probe(a).pipe(Effect.flip);
       expect(expired.code).toBe("capability_denied");
@@ -542,19 +552,19 @@ it.effect(
         const a = yield* makeA(laptop);
         const pairing = yield* b.auth.issuePairingCredential();
         const older = yield* a.links
-          .link({ url: b.url, pairingCode: pairing.credential, access: "auto" })
+          .link("owner", { url: b.url, pairingCode: pairing.credential, access: "auto" })
           .pipe(Effect.flip);
         expect(older.reason).toBe("incompatible");
         // Nor one whose link's work could reach the user's own threads there.
         yield* Ref.set(b.descriptor, descriptorOf("environment-box", "Box", { linkFence: false }));
         const unfenced = yield* a.links
-          .link({ url: b.url, pairingCode: pairing.credential, access: "auto" })
+          .link("owner", { url: b.url, pairingCode: pairing.credential, access: "auto" })
           .pipe(Effect.flip);
         expect(unfenced.reason).toBe("incompatible");
 
         // Plain http to a LAN address would carry the code and token in clear.
         const lan = yield* a.links
-          .link({
+          .link("owner", {
             url: "http://192.168.1.20:3773",
             pairingCode: pairing.credential,
             access: "auto",
@@ -562,7 +572,7 @@ it.effect(
           .pipe(Effect.flip);
         expect(lan.message).toContain("plain http");
         const lanAlternate = yield* a.links
-          .link({
+          .link("owner", {
             url: b.url,
             alternateUrls: ["http://192.168.1.20:3773"],
             pairingCode: pairing.credential,
@@ -573,7 +583,7 @@ it.effect(
 
         yield* Ref.set(b.descriptor, laptop);
         const self = yield* a.links
-          .link({ url: b.url, pairingCode: pairing.credential, access: "auto" })
+          .link("owner", { url: b.url, pairingCode: pairing.credential, access: "auto" })
           .pipe(Effect.flip);
         expect(self.reason).toBe("self");
         // Neither attempt spent the pairing code on a session.
@@ -591,7 +601,7 @@ it.effect(
         const b = yield* serveB(box);
         const a = yield* makeA(laptop);
         const pairing = yield* b.auth.issuePairingCredential();
-        const linked = yield* a.links.link({
+        const linked = yield* a.links.link("owner", {
           url: impostor.url,
           alternateUrls: [b.url],
           pairingCode: pairing.credential,
@@ -613,7 +623,7 @@ it.effect("linking a picked machine that answers nowhere names it and links noth
       const impostor = yield* serveApart(descriptorOf("environment-impostor", "Impostor"));
       const a = yield* makeA(laptop);
       const failed = yield* a.links
-        .link({
+        .link("owner", {
           url: impostor.url,
           alternateUrls: ["http://192.168.1.20:3773"],
           pairingCode: "unused",
@@ -626,12 +636,12 @@ it.effect("linking a picked machine that answers nowhere names it and links noth
       expect(failed.message).toBe(
         `This environment could not reach Box at ${impostor.url}, http://192.168.1.20:3773.`,
       );
-      expect(yield* a.links.list).toEqual([]);
+      expect(yield* a.links.list("owner")).toEqual([]);
       expect(yield* linkedSessions(impostor)).toEqual([]);
 
       // Every address refused: the message says why.
       const refused = yield* a.links
-        .link({
+        .link("owner", {
           url: "http://192.168.1.20:3773",
           pairingCode: "unused",
           access: "auto",
@@ -641,6 +651,49 @@ it.effect("linking a picked machine that answers nowhere names it and links noth
         .pipe(Effect.flip);
       expect(refused.message).toContain("could not reach Box");
       expect(refused.message).toContain("plain http");
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("keeps each principal's links to itself", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const b = yield* serveB(box);
+      const a = yield* makeA(laptop);
+      const linkAs = (principal: string) =>
+        b.auth
+          .issuePairingCredential()
+          .pipe(
+            Effect.flatMap((pairing) =>
+              a.links.link(principal, {
+                url: b.url,
+                pairingCode: pairing.credential,
+                access: "auto",
+              }),
+            ),
+          );
+      yield* linkAs("owner");
+      yield* linkAs("principal:alice");
+
+      expect((yield* a.links.list("owner")).length).toBe(1);
+      expect((yield* a.links.list("principal:alice")).length).toBe(1);
+      expect(yield* a.links.list("principal:bob")).toEqual([]);
+      expect(Option.isNone(yield* a.links.get("principal:bob", box.environmentId))).toBe(true);
+      const unknown = yield* a.links.resolve("principal:bob", box.environmentId).pipe(Effect.flip);
+      expect(unknown.reason).toBe("unknown_link");
+      const ownerToken = (yield* a.links.resolve("owner", box.environmentId)).token;
+      const aliceToken = (yield* a.links.resolve("principal:alice", box.environmentId)).token;
+      expect(aliceToken).not.toBe(ownerToken);
+
+      // Calls carry the principal's own credential.
+      yield* probe(a, undefined, undefined, "principal:alice");
+      expect((yield* Ref.get(b.bearers)).at(-1)).toBe(`Bearer ${aliceToken}`);
+
+      // Unlinking one principal's link leaves the others'.
+      expect(yield* a.links.unlink("principal:bob", box.environmentId)).toBe(false);
+      expect(yield* a.links.unlink("principal:alice", box.environmentId)).toBe(true);
+      expect((yield* a.links.list("owner")).length).toBe(1);
+      expect(yield* a.links.list("principal:alice")).toEqual([]);
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

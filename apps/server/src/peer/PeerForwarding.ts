@@ -20,7 +20,7 @@ import type * as Tool from "effect/ai/Tool";
 
 import { assertNotLinked } from "../mcp/linkOrigin.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
-import { readCaller, unavailable } from "../mcp/threadAccess.ts";
+import { callerPrincipal, readCaller, unavailable } from "../mcp/threadAccess.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import * as PeerLinks from "./PeerLinks.ts";
 import * as PeerMcpClient from "./PeerMcpClient.ts";
@@ -106,7 +106,7 @@ const make = Effect.gen(function* () {
   const callerLimits = (scope: Scope) =>
     readCaller().pipe(
       Effect.tap((caller) => assertNotLinked(caller, "use this environment's links")),
-      Effect.map((caller) => caller.limits),
+      Effect.map((caller) => ({ limits: caller.limits, principal: callerPrincipal(caller) })),
       Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
       Effect.provideService(ThreadManagement.ThreadManagementService, threads),
     );
@@ -131,7 +131,7 @@ const make = Effect.gen(function* () {
     environmentId: EnvironmentId,
     params: unknown,
   ) {
-    const limits = yield* callerLimits(scope);
+    const { limits, principal } = yield* callerLimits(scope);
     const encoded = (yield* Schema.encodeUnknownEffect(parameters as Schema.Encoder<unknown>)(
       params,
     ).pipe(Effect.mapError(unavailable))) as Record<string, unknown>;
@@ -147,6 +147,7 @@ const make = Effect.gen(function* () {
       args.clientRequestId = yield* scopedRequestId(scope.requestNamespace, args.clientRequestId);
     }
     return yield* peers.call({
+      principal,
       environmentId,
       tool: toolName,
       arguments: args,
@@ -240,14 +241,16 @@ const make = Effect.gen(function* () {
 
   const listLinks: PeerForwarding["Service"]["links"] = Effect.fn("PeerForwarding.listLinks")(
     function* (scope) {
-      yield* callerLimits(scope);
+      const { principal } = yield* callerLimits(scope);
       yield* requireEnabled;
-      const listed = yield* links.list.pipe(
-        Effect.mapError(
-          (error) =>
-            new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
-        ),
-      );
+      const listed = yield* links
+        .list(principal)
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
+          ),
+        );
       return {
         environmentId: scope.environmentId,
         links: listed.map((link) => ({

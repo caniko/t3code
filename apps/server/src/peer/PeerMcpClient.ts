@@ -37,6 +37,8 @@ export class PeerMcpClient extends Context.Service<
   {
     /** Calls `tool` on the peer and decodes its structured result with `success`. */
     readonly call: <S extends Schema.Decoder<unknown>>(input: {
+      /** Whose link carries the call: the principal owning the calling thread. */
+      readonly principal: string;
       readonly environmentId: EnvironmentId;
       readonly tool: string;
       readonly arguments: Record<string, unknown>;
@@ -156,12 +158,12 @@ const make = Effect.gen(function* () {
   const call: PeerMcpClient["Service"]["call"] = Effect.fn("PeerMcpClient.call")(
     function* (input) {
       const resolved = yield* links
-        .resolve(input.environmentId)
+        .resolve(input.principal, input.environmentId)
         .pipe(Effect.mapError(fromLinkError));
       const limitHeader = {
         [McpInvocationContext.MODE_LIMIT_HEADER]: `${input.limits.runtimeMode}/${input.limits.interactionMode}`,
       };
-      const sessionKey = `${input.environmentId} ${resolved.url}`;
+      const sessionKey = `${input.principal} ${input.environmentId} ${resolved.url}`;
       const callOnce = (sessionId: string) =>
         post(
           resolved.url,
@@ -254,10 +256,12 @@ const make = Effect.gen(function* () {
     (effect, input) =>
       effect.pipe(
         Effect.tapError((error) =>
-          links.recordOutcome(input.environmentId, { error: error.message }),
+          links.recordOutcome(input.principal, input.environmentId, { error: error.message }),
         ),
         // A refusal is still an answer: the link works, so only this call fails.
-        Effect.tap(() => links.recordOutcome(input.environmentId, { error: null })),
+        Effect.tap(() =>
+          links.recordOutcome(input.principal, input.environmentId, { error: null }),
+        ),
         // Recorded above with the transport's own message; the agent hears it plainly.
         Effect.catchTags({
           HttpClientError: () =>
