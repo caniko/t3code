@@ -1,4 +1,5 @@
 import * as Context from "effect/Context";
+import { PrincipalExecution } from "./runner/PrincipalExecution.ts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -390,8 +391,32 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
 export const make = Effect.fn("ProcessRunner.make")(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
+  const execution = yield* PrincipalExecution;
+
   const run: ProcessRunner["Service"]["run"] = (input) =>
-    finalizeRunProcess(runProcessCore(spawner, input), input);
+    finalizeRunProcess(
+      Effect.gen(function* () {
+        const cwd = input.spawnCwd ?? input.cwd;
+        const runnerSpawner = cwd === undefined ? undefined : yield* execution.spawnerForPath(cwd);
+        return yield* runProcessCore(runnerSpawner ?? spawner, input);
+      }).pipe(
+        Effect.catchTag("RunnerUnavailableError", (cause) =>
+          Effect.fail(
+            new ProcessSpawnError({
+              command: input.command,
+              argumentCount: input.args.length,
+              cwd: input.cwd,
+              spawnCwd: input.spawnCwd,
+              resolvedCommand: input.command,
+              resolvedArgumentCount: input.args.length,
+              shell: false,
+              cause,
+            }),
+          ),
+        ),
+      ),
+      input,
+    );
 
   return ProcessRunner.of({
     run,

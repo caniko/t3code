@@ -31,16 +31,32 @@ export interface PrincipalExecutionShape {
     threadId: string,
   ) => Effect.Effect<PtyAdapter.PtyAdapter["Service"] | undefined, RunnerUnavailableError>;
   readonly runnerFor: (threadId: string) => Effect.Effect<RunnerEndpoint | undefined, RunnerUnavailableError>;
+  /** Work inside a non-default principal's thread worktree belongs to that principal's runner. */
+  readonly spawnerForPath: (
+    cwd: string,
+  ) => Effect.Effect<ChildProcessSpawner.ChildProcessSpawner["Service"] | undefined, RunnerUnavailableError>;
 }
 
-/** Unwired code (and single-user installs) keep spawning in-process. */
+const unwired: PrincipalExecutionShape = {
+  spawnerFor: () => Effect.undefined,
+  ptyFor: () => Effect.undefined,
+  runnerFor: () => Effect.undefined,
+  spawnerForPath: () => Effect.undefined,
+};
+
+// ponytail: one server per process, so the live layer installs itself here; layers memoized
+// outside its scope still reach it. Unwired code and single-user installs spawn in-process.
+let installed: PrincipalExecutionShape | undefined;
+const current = () => installed ?? unwired;
+
 export const PrincipalExecution = Context.Reference<PrincipalExecutionShape>(
   "t3/runner/PrincipalExecution",
   {
     defaultValue: () => ({
-      spawnerFor: () => Effect.undefined,
-      ptyFor: () => Effect.undefined,
-      runnerFor: () => Effect.undefined,
+      spawnerFor: (threadId) => current().spawnerFor(threadId),
+      ptyFor: (threadId) => current().ptyFor(threadId),
+      runnerFor: (threadId) => current().runnerFor(threadId),
+      spawnerForPath: (cwd) => current().spawnerForPath(cwd),
     }),
   },
 );
@@ -61,22 +77,18 @@ export const passthroughAgentScope: AgentScopeShape = {
 
 export const makePrincipalExecution = (input: {
   readonly ownerOf: (threadId: string) => Effect.Effect<string | undefined, ProjectionStore.ProjectionStoreV2Error>;
+  readonly ownersOfPath: (cwd: string) => Effect.Effect<ReadonlyArray<string>, ProjectionStore.ProjectionStoreV2Error>;
   readonly socketExists: (socketPath: string) => Effect.Effect<boolean>;
   readonly socketTemplate: string;
   readonly serverEnv: NodeJS.ProcessEnv;
 }): PrincipalExecutionShape => {
-  const runnerFor = Effect.fn("PrincipalExecution.runnerFor")(function* (threadId: string) {
-    const owner = yield* input.ownerOf(threadId).pipe(
-      Effect.mapError(
-        (cause) =>
-          new RunnerUnavailableError({
-            principal: "unknown",
-            socketPath: input.socketTemplate,
-            reason: `could not read the thread owner (${String(cause)})`,
-          }),
-      ),
-    );
-    const principal = owner ?? DEFAULT_PRINCIPAL_ID;
+  const unreadable = (cause: unknown) =>
+    new RunnerUnavailableError({
+      principal: "unknown",
+      socketPath: input.socketTemplate,
+      reason: `could not read the owner (${String(cause)})`,
+    });
+  const endpointFor = Effect.fn("PrincipalExecution.endpointFor")(function* (principal: string) {
     if (principal === DEFAULT_PRINCIPAL_ID) return undefined;
     const socketPath = runnerSocketPath(input.socketTemplate, USERNAME.test(principal) ? principal : "invalid");
     if (!USERNAME.test(principal)) {
@@ -85,7 +97,23 @@ export const makePrincipalExecution = (input: {
     if (!(yield* input.socketExists(socketPath))) {
       return yield* new RunnerUnavailableError({ principal, socketPath, reason: "no runner socket" });
     }
-    return { socketPath, serverEnv: input.serverEnv } satisfies RunnerEndpoint;
+    return { socketPath, serverEnv: input.serverEnv, principal } satisfies RunnerEndpoint;
+  });
+  const runnerFor = Effect.fn("PrincipalExecution.runnerFor")(function* (threadId: string) {
+    const owner = yield* input.ownerOf(threadId).pipe(Effect.mapError(unreadable));
+    return yield* endpointFor(owner ?? DEFAULT_PRINCIPAL_ID);
+  });
+  const runnerForPath = Effect.fn("PrincipalExecution.runnerForPath")(function* (cwd: string) {
+    const owners = yield* input.ownersOfPath(cwd).pipe(Effect.mapError(unreadable));
+    if (owners.length === 0) return undefined;
+    if (owners.length > 1) {
+      return yield* new RunnerUnavailableError({
+        principal: owners.join(","),
+        socketPath: cwd,
+        reason: "several principals own threads in this directory",
+      });
+    }
+    return yield* endpointFor(owners[0]!);
   });
   return {
     runnerFor,
@@ -93,6 +121,8 @@ export const makePrincipalExecution = (input: {
       runnerFor(threadId).pipe(Effect.map((endpoint) => endpoint && makeRunnerSpawner(endpoint))),
     ptyFor: (threadId) =>
       runnerFor(threadId).pipe(Effect.map((endpoint) => endpoint && makeRunnerPtyAdapter(endpoint))),
+    spawnerForPath: (cwd) =>
+      runnerForPath(cwd).pipe(Effect.map((endpoint) => endpoint && makeRunnerSpawner(endpoint))),
   };
 };
 
@@ -105,7 +135,8 @@ export const layer = Layer.effect(
     const socketTemplate = yield* Config.String("T3CODE_RUNNER_SOCKET_TEMPLATE").pipe(
       Config.withDefault("/run/t3code/runner-%u.sock"),
     );
-    return makePrincipalExecution({
+    const shape = makePrincipalExecution({
+      ownersOfPath: store.getWorktreeOwners,
       ownerOf: (threadId) =>
         store.getThreadShell(threadId as never).pipe(
           Effect.map((shell) => shell?.ownerPrincipal),
@@ -118,5 +149,34 @@ export const layer = Layer.effect(
       socketTemplate,
       serverEnv,
     });
+    yield* Effect.acquireRelease(
+      Effect.sync(() => void (installed = shape)),
+      () => Effect.sync(() => void (installed = undefined)),
+    );
+    return shape;
   }),
 );
+
+export class ProviderRunnerUnsupportedError extends Schema.TaggedError<ProviderRunnerUnsupportedError>()(
+  "ProviderRunnerUnsupportedError",
+  { driver: Schema.String, principal: Schema.String },
+) {
+  override get message(): string {
+    return `Provider '${this.driver}' is not supported for signed-in users yet: it would run as the server user instead of '${this.principal}'.`;
+  }
+}
+
+/** Drivers whose processes go through the runner; every other driver spawns in-process and so must not serve a runner principal. */
+const RUNNER_DRIVERS: ReadonlySet<string> = new Set(["codex", "claudeAgent", "remote"]);
+
+export const requireRunnerSupport = Effect.fn("PrincipalExecution.requireRunnerSupport")(function* (
+  execution: PrincipalExecutionShape,
+  threadId: string,
+  driver: string,
+) {
+  if (RUNNER_DRIVERS.has(driver)) return;
+  const runner = yield* execution.runnerFor(threadId);
+  if (runner !== undefined) {
+    return yield* new ProviderRunnerUnsupportedError({ driver, principal: runner.principal ?? "unknown" });
+  }
+});
