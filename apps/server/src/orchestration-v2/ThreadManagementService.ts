@@ -1,3 +1,5 @@
+import { DEFAULT_PRINCIPAL_ID } from "@t3tools/contracts";
+import { canAccessThread } from "./ThreadOwnership.ts";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -77,14 +79,32 @@ export interface ThreadManagementProvenance {
 export function withCreationProvenance(
   command: OrchestrationV2Command,
   provenance: ThreadManagementProvenance,
+  principal: string = DEFAULT_PRINCIPAL_ID,
 ): OrchestrationV2Command {
   switch (command.type) {
     case "thread.create": {
-      // Only the server stamps a link's origin, so a client cannot set one.
-      const { linkOrigin: _linkOrigin, delegatedFrom: _delegatedFrom, ...rest } = command;
-      return { ...rest, ...provenance };
+      // Only the server stamps a link's origin and a thread's owner, so a client cannot set either.
+      const {
+        linkOrigin: _linkOrigin,
+        delegatedFrom: _delegatedFrom,
+        ownerPrincipal: _ownerPrincipal,
+        ...rest
+      } = command;
+      return {
+        ...rest,
+        ...provenance,
+        ...(principal === DEFAULT_PRINCIPAL_ID ? {} : { ownerPrincipal: principal }),
+      };
     }
-    case "message.dispatch":
+    case "message.dispatch": {
+      // The sender is the session's principal, never a client claim; the turn still runs as the thread owner.
+      const { senderPrincipal: _senderPrincipal, ...rest } = command;
+      return {
+        ...rest,
+        ...provenance,
+        ...(principal === DEFAULT_PRINCIPAL_ID ? {} : { senderPrincipal: principal }),
+      };
+    }
     case "thread.fork":
     case "thread.merge_back":
     case "delegated_task.request":
@@ -423,6 +443,8 @@ export interface ThreadManagementServiceShape {
   readonly listProjectThreads: (input: {
     readonly projectId?: ProjectId | undefined;
     readonly includeSubagents: boolean;
+    /** Only this principal's threads, so callers paginate over what they may see. */
+    readonly ownerPrincipal?: string | undefined;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2ThreadShell>, ThreadManagementError>;
   readonly sendToThread: (
     input: ThreadManagementSendInput,
@@ -794,6 +816,11 @@ const make = Effect.gen(function* () {
         ),
         Effect.map((snapshot) =>
           snapshot.threads
+            .filter(
+              (thread) =>
+                input.ownerPrincipal === undefined ||
+                canAccessThread(input.ownerPrincipal, thread, "read"),
+            )
             .filter((thread) =>
               input.includeSubagents
                 ? thread.lineage.sideChat !== true

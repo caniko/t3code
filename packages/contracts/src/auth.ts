@@ -146,6 +146,37 @@ export function sessionHasLegacyPermissions(session: SessionGrantInput): boolean
   );
 }
 
+export const DEFAULT_PRINCIPAL_ID = "owner";
+
+export const PrincipalId = Schema.String.check(Schema.isPattern(/^[a-z0-9][a-z0-9-]{0,31}$/));
+export type PrincipalId = typeof PrincipalId.Type;
+
+const PRINCIPAL_SUBJECT_PREFIX = "principal:";
+
+export const principalSubject = (id: string) => `${PRINCIPAL_SUBJECT_PREFIX}${id}`;
+
+/** Subjects without the prefix predate principals and act as the default one; a malformed id never widens to it. */
+export const principalOfSubject = (subject: string): string =>
+  subject.startsWith(PRINCIPAL_SUBJECT_PREFIX)
+    ? subject.slice(PRINCIPAL_SUBJECT_PREFIX.length)
+    : DEFAULT_PRINCIPAL_ID;
+
+/**
+ * What a signed-in person holds: everything for working in the app except server administration
+ * (server settings, updates, diagnostics, T3 Connect, and access management).
+ */
+export const AuthPrincipalScopes = [
+  AuthOrchestrationReadScope,
+  AuthOrchestrationOperateScope,
+  AuthProvidersManageScope,
+  AuthPreviewOperateScope,
+  AuthTerminalReadScope,
+  AuthTerminalOperateScope,
+  AuthSourceControlWriteScope,
+  AuthFilesystemReadScope,
+  AuthFilesystemWriteScope,
+] as const;
+
 // Shell and full-access agent scopes already confer access and relay authority.
 export const AuthStandardClientScopes = [
   AuthOrchestrationReadScope,
@@ -179,6 +210,8 @@ export const ServerAuthDescriptor = Schema.Struct({
   sessionCookieName: TrimmedNonEmptyString,
   /** Older servers omit this and authorize self-updates with orchestration:operate. */
   serverUpdateScope: Schema.optionalKey(Schema.Literal(AuthEnvironmentMaintainScope)),
+  /** Present when the server signs people in through its OIDC provider at `/auth/oidc/start`. */
+  oidcSignIn: Schema.optionalKey(Schema.Literal(true)),
 });
 export type ServerAuthDescriptor = typeof ServerAuthDescriptor.Type;
 

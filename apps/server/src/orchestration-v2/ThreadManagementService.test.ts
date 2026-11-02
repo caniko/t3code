@@ -56,6 +56,7 @@ it("stamps authoritative provenance on commands that create threads or messages"
     branch: null,
     worktreePath: null,
     // A client cannot claim a linked environment's origin, or a parent there.
+    ownerPrincipal: "forged",
     linkOrigin: { sessionId: "forged", label: "Somewhere else" },
     delegatedFrom: {
       environmentId: EnvironmentId.make("environment:elsewhere"),
@@ -74,6 +75,34 @@ it("stamps authoritative provenance on commands that create threads or messages"
   });
   expect(stamped).not.toHaveProperty("linkOrigin");
   expect(stamped).not.toHaveProperty("delegatedFrom");
+  expect(stamped).not.toHaveProperty("ownerPrincipal");
+  expect(
+    ThreadManagementService.withCreationProvenance(
+      command,
+      { createdBy: "user", creationSource: "web" },
+      "alice",
+    ),
+  ).toMatchObject({ ownerPrincipal: "alice" });
+});
+
+it("stamps a message's sender from the session and discards a client-supplied one", () => {
+  const message = {
+    type: "message.dispatch",
+    commandId: "c",
+    threadId: "t",
+    messageId: "m",
+    text: "hi",
+    attachments: [],
+    senderPrincipal: "mallory",
+    dispatchMode: { type: "start_immediately" },
+  } as unknown as Parameters<typeof ThreadManagementService.withCreationProvenance>[0];
+  const provenance = { createdBy: "user", creationSource: "web" } as const;
+  expect(ThreadManagementService.withCreationProvenance(message, provenance, "bob")).toMatchObject({
+    senderPrincipal: "bob",
+  });
+  expect(ThreadManagementService.withCreationProvenance(message, provenance)).not.toHaveProperty(
+    "senderPrincipal",
+  );
 });
 
 const layerReceiptsTest = CommandReceiptStore.layer.pipe(

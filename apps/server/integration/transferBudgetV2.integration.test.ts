@@ -47,6 +47,7 @@ import * as EventSink from "../src/orchestration-v2/EventSink.ts";
 import * as ProjectionStore from "../src/orchestration-v2/ProjectionStore.ts";
 import * as ThreadManagementService from "../src/orchestration-v2/ThreadManagementService.ts";
 import * as ProjectStore from "../src/orchestration-v2/ProjectStore.ts";
+import * as SessionAccess from "../src/orchestration-v2/SessionAccess.ts";
 import * as ProjectService from "../src/project/ProjectService.ts";
 import * as ProjectEnrichmentService from "../src/project/ProjectEnrichmentService.ts";
 import * as OrchestrationHttp from "../src/orchestration-v2/http.ts";
@@ -148,6 +149,7 @@ const layerServices = layerManagement.pipe(
     }),
   ),
   Layer.provideMerge(ProjectStore.layer),
+  Layer.provideMerge(SessionAccess.layer),
   Layer.provideMerge(Layer.mock(ProjectService.ProjectService)({})),
   Layer.provideMerge(layerEnrichment),
   Layer.provideMerge(layerPersistence),

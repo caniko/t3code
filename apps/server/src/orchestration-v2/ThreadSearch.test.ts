@@ -68,6 +68,7 @@ const thread = (
     readonly subagentOf?: ThreadId;
     readonly sideChatOf?: ThreadId;
     readonly title?: string;
+    readonly ownerPrincipal?: string;
     readonly settledAt?: DateTime.Utc;
     readonly linkedPullRequest?: ThreadLinkedPullRequest;
     readonly branchPullRequest?: ThreadLinkedPullRequest;
@@ -113,6 +114,7 @@ const thread = (
     archivedAt: overrides.archivedAt ?? null,
     settledOverride: overrides.settledAt === undefined ? null : "settled",
     settledAt: overrides.settledAt ?? null,
+    ...(overrides.ownerPrincipal === undefined ? {} : { ownerPrincipal: overrides.ownerPrincipal }),
     lastVisitedAt: null,
     deletedAt: overrides.deletedAt ?? null,
   },
@@ -987,6 +989,32 @@ it.layer(layerTest)("ThreadSearch.searchThreads", (it) => {
         matches.map((match) => match.threadId),
         messageOnly,
       );
+    }),
+  );
+
+  it.effect("ranks only the asking principal's threads, title and message hits alike", () =>
+    Effect.gen(function* () {
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const search = yield* ThreadSearch.ThreadSearch;
+      const project = ProjectId.make("project:owned");
+      yield* createProject(project);
+      const mine = ThreadId.make("thread:ibis-owner");
+      const theirs = ThreadId.make("thread:ibis-alice");
+      yield* Effect.forEach(
+        [
+          thread(mine, project, { title: "Ibis" }),
+          thread(theirs, project, { title: "Ibis", ownerPrincipal: "alice" }),
+          message(theirs, "ibis-theirs", "user", "ibis note", { minute: 1 }),
+        ],
+        projections.apply,
+        { discard: true },
+      );
+      const idsFor = (ownerPrincipal: string) =>
+        search
+          .searchThreads({ query: "ibis", limit: 1, ownerPrincipal })
+          .pipe(Effect.map(({ matches }) => matches.map((match) => match.threadId)));
+      assert.deepEqual(yield* idsFor("owner"), [mine]);
+      assert.deepEqual(yield* idsFor("alice"), [theirs]);
     }),
   );
 

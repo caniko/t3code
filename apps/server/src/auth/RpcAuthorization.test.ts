@@ -5,6 +5,7 @@ import {
   AuthProvidersManageScope,
   AuthSettingsWriteScope,
   DEFAULT_SERVER_SETTINGS,
+  ORCHESTRATION_V2_WS_METHODS,
   ProviderDriverKind,
   ProviderInstanceId,
   SecretProviderId,
@@ -401,3 +402,49 @@ it.effect("denies manual cleanup before the handler without settings permission"
     expect(handled).toBe(false);
   }).pipe(Effect.scoped),
 );
+
+describe("principal RPC deny-list", () => {
+  const tested = [WS_METHODS.serverProbe, WS_METHODS.agentSessionsScan] as const;
+  const group = WsRpcGroup.omit(
+    ...[...WsRpcGroup.requests.keys()].filter(
+      (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, (typeof tested)[number]> =>
+        !(tested as ReadonlyArray<string>).includes(tag),
+    ),
+  );
+
+  it("names only declared methods and leaves everyday ones reachable", () => {
+    for (const method of RpcAuthorization.PRINCIPAL_DENIED_RPC_METHODS) {
+      expect(Object.hasOwn(RPC_REQUIRED_SCOPES, method)).toBe(true);
+    }
+    for (const method of [
+      WS_METHODS.terminalOpen,
+      WS_METHODS.projectsMutate,
+      WS_METHODS.providerAuthStart,
+      ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+    ]) {
+      expect(RpcAuthorization.PRINCIPAL_DENIED_RPC_METHODS.has(method)).toBe(false);
+    }
+  });
+
+  it.effect("refuses a denied method despite its scope, and runs the rest", () =>
+    Effect.gen(function* () {
+      const handled: Array<string> = [];
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            group.toLayerHandler(WS_METHODS.serverProbe, () => Effect.succeed({})),
+            group.toLayerHandler(WS_METHODS.agentSessionsScan, () =>
+              Effect.sync(() => handled.push("storage")).pipe(Effect.andThen(Effect.never)),
+            ),
+            RpcAuthorization.layer([AuthOrchestrationReadScope], undefined, "alice"),
+          ),
+        ),
+      );
+      expect(yield* client[WS_METHODS.serverProbe]({})).toEqual({});
+      expect(yield* client[WS_METHODS.agentSessionsScan]({}).pipe(Effect.flip)).toMatchObject({
+        _tag: "EnvironmentAuthorizationError",
+      });
+      expect(handled).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
+});

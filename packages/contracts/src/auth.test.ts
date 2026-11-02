@@ -9,6 +9,8 @@ import {
   AuthStandardClientScopes,
   authScopeResponse,
   AuthSessionState,
+  principalOfSubject,
+  principalSubject,
   sessionGrantsScope,
 } from "./auth.ts";
 
@@ -129,4 +131,16 @@ describe("authorization grants", () => {
   ] as const)("sessionGrantsScope accepts $label", ({ session, scope, expected }) => {
     expect(sessionGrantsScope(session, scope)).toBe(expected);
   });
+});
+
+it.each([
+  { subject: "principal:alice", expected: "alice" },
+  { subject: principalSubject("bob-2"), expected: "bob-2" },
+  { subject: "principal:", expected: "" },
+  { subject: "browser", expected: "owner" },
+  { subject: "one-time-token", expected: "owner" },
+  { subject: "mcp-client", expected: "owner" },
+  { subject: "xprincipal:alice", expected: "owner" },
+])("principalOfSubject maps $subject to $expected", ({ subject, expected }) => {
+  expect(principalOfSubject(subject)).toBe(expected);
 });

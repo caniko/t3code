@@ -2,6 +2,10 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   AuthTokenExchangeGrantType,
   AuthEnvironmentBootstrapTokenType,
+  AuthSessionId,
+  ThreadId,
+  EnvironmentAuthenticatedPrincipal,
+  type AuthEnvironmentScope,
   AuthAccessTokenType,
   EnvironmentHttpApi,
 } from "@t3tools/contracts";
@@ -156,4 +160,27 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
         Effect.promise(() => Promise.all([environmentA.dispose(), environmentB.dispose()])),
     );
   }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "lets a principal reach only its own threads over HTTP, and the default principal all",
+  () =>
+    Effect.gen(function* () {
+      const accessAs = (subject: string, ownerPrincipal: string | undefined) =>
+        AuthHttp.requireThreadAccess("orchestration:read", ThreadId.make("thread-1"), () =>
+          Effect.succeed({ id: "thread-1", ownerPrincipal }),
+          () => Effect.succeed(new Map()),
+        ).pipe(
+          Effect.provideService(EnvironmentAuthenticatedPrincipal, {
+            sessionId: AuthSessionId.make("test-session"),
+            subject,
+            method: "bearer-access-token",
+            scopes: new Set<AuthEnvironmentScope>(["orchestration:read"]),
+          }),
+          Effect.result,
+        );
+      expect((yield* accessAs("principal:alice", "alice"))._tag).toBe("Success");
+      expect((yield* accessAs("principal:bob", "alice"))._tag).toBe("Failure");
+      expect((yield* accessAs("browser", "alice"))._tag).toBe("Success");
+    }),
 );

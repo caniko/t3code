@@ -1,0 +1,47 @@
+# Fork-only qualification for the multi-user principals branch. Upstream's
+# ci.yml needs Blacksmith runners, which this fork does not have, so this one
+# job runs typecheck and the full contracts and server suites on a hosted runner.
+name: Fork principals
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-principals-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    if: github.repository == 'caniko/t3code'
+    name: Typecheck and test (contracts, server)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+            !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
+          sparse-checkout-cone-mode: false
+
+      - uses: ./.github/actions/setup-ci-deps
+
+      - name: Install Chromium for server browser tests
+        run: node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
+
+      - name: Typecheck
+        run: vp run --filter @t3tools/contracts --filter t3 typecheck
+
+      - name: Test contracts
+        run: vp run --filter @t3tools/contracts test
+
+      - name: Test server
+        run: vp run --filter t3 test

@@ -38,3 +38,46 @@ it.effect("points a bare uuid at the mcp: thread it belongs to", () =>
     expect(error.message).toBe(`The thread was not found. Did you mean \`mcp:${bareId}\`?`);
   }),
 );
+
+it.effect.each([
+  { caller: undefined, owner: "alice", visible: true },
+  { caller: "bob", owner: "alice", visible: false },
+  { caller: "alice", owner: undefined, visible: false },
+  { caller: "alice", owner: "alice", visible: true },
+])(
+  "hides a thread of another principal from $caller callers like a missing one",
+  ({ caller, owner, visible }) =>
+    Effect.gen(function* () {
+      const target = ThreadId.make("thread:owned");
+      const callerThread = ThreadId.make("thread:caller");
+      const shells = new Map([
+        [
+          target,
+          { ...liveThreadShell(target), ...(owner === undefined ? {} : { ownerPrincipal: owner }) },
+        ],
+        [
+          callerThread,
+          {
+            ...liveThreadShell(callerThread),
+            ...(caller === undefined ? {} : { ownerPrincipal: caller }),
+          },
+        ],
+      ]);
+      const result = yield* readThread(target).pipe(
+        Effect.result,
+        Effect.provideService(McpInvocationContext.McpInvocationContext, {
+          ...client,
+          thread: caller === undefined ? undefined : { threadId: callerThread },
+        } as McpInvocationContext.McpInvocationScope),
+        Effect.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (threadId) => Effect.succeed(shells.get(threadId) ?? null),
+            getProjectThreadRecords: () => Effect.succeed({ thread: shells.get(target) } as never),
+          }),
+        ),
+      );
+      expect(result._tag).toBe(visible ? "Success" : "Failure");
+      if (!visible && result._tag === "Failure")
+        expect(result.failure.code).toBe("thread_not_found");
+    }),
+);

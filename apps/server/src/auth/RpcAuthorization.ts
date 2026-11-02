@@ -1,5 +1,6 @@
 import {
   CLIENT_GUARDED_RPC_SCOPES,
+  DEFAULT_PRINCIPAL_ID,
   type DeviceListInput,
   clientRpcRequiredScopes,
   authScopeRequiredResponse,
@@ -274,6 +275,22 @@ const requiredScopesForRpcCall = (
 };
 
 /**
+ * Server-wide or server-account methods that stay refused to a principal even though its scopes
+ * pass them. Add any new such method here.
+ */
+export const PRINCIPAL_DENIED_RPC_METHODS: ReadonlySet<string> = new Set([
+  WS_METHODS.serverGetStorageCleanupReport,
+  WS_METHODS.serverGetDatabaseStorage,
+  WS_METHODS.scheduledTasksListWebhookDeliveries,
+  WS_METHODS.scheduledTasksGetWebhookDelivery,
+  WS_METHODS.agentSessionsScan,
+  WS_METHODS.agentSessionsImport,
+  WS_METHODS.serverListAcpRegistrySessions,
+  WS_METHODS.serverImportAcpRegistrySession,
+  WS_METHODS.serverDeleteAcpRegistrySession,
+]);
+
+/**
  * `onAuthorized` runs once after an authorized request succeeds; for a stream
  * RPC, that is when the stream completes. Every RPC passes through here, so it
  * is the one place to observe requests without wrapping each handler.
@@ -281,8 +298,17 @@ const requiredScopesForRpcCall = (
 export const layer = (
   scopes: ReadonlyArray<AuthEnvironmentScope>,
   onAuthorized?: (method: string, payload: unknown) => Effect.Effect<void>,
+  principal: string = DEFAULT_PRINCIPAL_ID,
 ) =>
   Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {
+    if (principal !== DEFAULT_PRINCIPAL_ID && PRINCIPAL_DENIED_RPC_METHODS.has(rpc._tag)) {
+      return Effect.fail(
+        new EnvironmentAuthorizationError({
+          message: `RPC method ${rpc._tag} is not available to this principal.`,
+          ...authScopeRequiredResponse(requiredScopeForRpcMethod(rpc._tag)),
+        }),
+      );
+    }
     const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);
     const requiredScope = requiredScopes.find((scope) => !scopes.includes(scope));
     if (requiredScope !== undefined) return Effect.fail(rpcAuthorizationError(requiredScope));

@@ -28,9 +28,12 @@ import {
   assertFullAccess,
   assertLiveCaller,
   assertTargetWithinLimits,
+  assertThreadOwnedByCallerPrincipal,
   type Caller,
+  callerPrincipal,
   loadCaller,
   readCaller,
+  threadNotFound,
   unavailable,
 } from "./threadAccess.ts";
 
@@ -187,6 +190,12 @@ export const writesThreads = <P, A, E, R>(
             .getThreadShell(threadId)
             .pipe(Effect.mapError(unavailable));
           if (target !== null && target.deletedAt === null) {
+            yield* assertThreadOwnedByCallerPrincipal(
+              callerPrincipal(caller),
+              target,
+              () => threadNotFound(caller.threads, threadId, "The thread was not found."),
+              "write",
+            );
             yield* assertTargetWithinLimits(caller.limits, target);
             yield* assertSameLink(caller, target);
           }
