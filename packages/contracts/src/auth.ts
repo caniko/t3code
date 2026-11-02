@@ -200,6 +200,8 @@ export const ServerAuthDescriptor = Schema.Struct({
   sessionCookieName: TrimmedNonEmptyString,
   /** Older servers omit this and authorize self-updates with orchestration:operate. */
   serverUpdateScope: Schema.optionalKey(Schema.Literal(AuthEnvironmentMaintainScope)),
+  /** Present when the server signs people in through its OIDC provider at `/auth/oidc/start`. */
+  oidcSignIn: Schema.optionalKey(Schema.Literal(true)),
 });
 export type ServerAuthDescriptor = typeof ServerAuthDescriptor.Type;
 

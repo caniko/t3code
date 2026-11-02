@@ -473,6 +473,17 @@ export class EnvironmentAuth extends Context.Service<
       },
       ServerAuthInvalidCredentialError | ServerAuthInternalError
     >;
+    readonly issuePrincipalBrowserSession: (
+      principal: string,
+      requestMetadata: AuthClientMetadata,
+    ) => Effect.Effect<
+      {
+        readonly sessionToken: string;
+        readonly cookieName: string;
+        readonly expiresAt: DateTime.Utc;
+      },
+      ServerAuthInternalError
+    >;
     readonly exchangeBootstrapCredentialForAccessToken: (
       credential: string,
       requestedScopes: ReadonlyArray<AuthEnvironmentScope> | undefined,
@@ -916,6 +927,25 @@ export const make = Effect.gen(function* () {
     } satisfies BootstrapExchangeResult;
   });
 
+  const issuePrincipalBrowserSession: EnvironmentAuth["Service"]["issuePrincipalBrowserSession"] =
+    Effect.fn("EnvironmentAuth.issuePrincipalBrowserSession")(
+      function* (principal, client) {
+        const { subject, scopes } = yield* resolveIssuance({ principal }, DEFAULT_SESSION_SUBJECT);
+        const session = yield* sessions.issue({
+          method: "browser-session-cookie",
+          subject,
+          scopes,
+          client,
+        });
+        return {
+          sessionToken: session.token,
+          cookieName: sessions.cookieName,
+          expiresAt: DateTime.toUtc(session.expiresAt),
+        };
+      },
+      Effect.mapError((cause) => new ServerAuthAuthenticatedSessionIssueError({ cause })),
+    );
+
   type ResolvedBootstrapGrant = Pick<
     PairingGrantStore.BootstrapGrant,
     "scopes" | "subject" | "label"
@@ -1179,6 +1209,8 @@ export const make = Effect.gen(function* () {
       subject: "one-time-token",
       ...(input?.label ? { label: input.label } : {}),
     }).pipe(
+      // A non-principal subject cannot be refused principal scopes.
+      Effect.catchTags({ ServerAuthScopeNotGrantedError: Effect.die }),
       Effect.map(toPairingCredential),
       Effect.withSpan("EnvironmentAuth.issuePairingCredential"),
     );
@@ -1190,7 +1222,10 @@ export const make = Effect.gen(function* () {
         scopes: AuthStandardClientScopes,
         subject: INTERNAL_ADMINISTRATIVE_BOOTSTRAP_SUBJECT,
         purpose: "startup",
-      }).pipe(Effect.map(toPairingCredential));
+      }).pipe(
+        Effect.catchTags({ ServerAuthScopeNotGrantedError: Effect.die }),
+        Effect.map(toPairingCredential),
+      );
       if (!devAuth) {
         return fallback.pipe(Effect.withSpan("EnvironmentAuth.issueStartupPairingCredential"));
       }
@@ -1431,6 +1466,7 @@ export const make = Effect.gen(function* () {
     }),
     getSessionState,
     createBrowserSession,
+    issuePrincipalBrowserSession,
     exchangeBootstrapCredentialForAccessToken,
     createPairingLink,
     issuePairingCredential,
