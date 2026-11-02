@@ -47,6 +47,7 @@ jobs:
         run: vp run --filter t3 test
 
       - name: Test session-sharing web and client-runtime code
+        if: ${{ !cancelled() }}
         run: |
           (cd packages/client-runtime && vp test run src/state/sessionAccess.test.ts)
           (cd apps/web && vp test run src/sidebarProjectGrouping.test.ts src/components/chat/ShareThreadDialog.browser.test.tsx)
