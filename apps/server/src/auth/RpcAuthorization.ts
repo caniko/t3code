@@ -274,22 +274,20 @@ const requiredScopesForRpcCall = (
   return [requiredScopeForRpcMethod(method)];
 };
 
-/** Everything else stays denied to a non-default principal: those methods act as the server's OS user or across all workspaces. */
-export const PRINCIPAL_RPC_METHODS: ReadonlySet<string> = new Set([
-  ORCHESTRATION_V2_WS_METHODS.subscribeShell,
-  ORCHESTRATION_V2_WS_METHODS.subscribeThread,
-  ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
-  ORCHESTRATION_V2_WS_METHODS.launchThread,
-  ORCHESTRATION_V2_WS_METHODS.searchThread,
-  ORCHESTRATION_V2_WS_METHODS.searchThreadStream,
-  ORCHESTRATION_V2_WS_METHODS.getThreadProjection,
-  ORCHESTRATION_V2_WS_METHODS.getTurnItem,
-  ORCHESTRATION_V2_WS_METHODS.getOlderSettledThreads,
-  ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot,
-  WS_METHODS.serverProbe,
-  WS_METHODS.serverGetConfig,
-  WS_METHODS.subscribeServerConfig,
-  WS_METHODS.subscribeServerLifecycle,
+/**
+ * Server-wide or server-account methods that stay refused to a principal even though its scopes
+ * pass them. Add any new such method here.
+ */
+export const PRINCIPAL_DENIED_RPC_METHODS: ReadonlySet<string> = new Set([
+  WS_METHODS.serverGetStorageCleanupReport,
+  WS_METHODS.serverGetDatabaseStorage,
+  WS_METHODS.scheduledTasksListWebhookDeliveries,
+  WS_METHODS.scheduledTasksGetWebhookDelivery,
+  WS_METHODS.agentSessionsScan,
+  WS_METHODS.agentSessionsImport,
+  WS_METHODS.serverListAcpRegistrySessions,
+  WS_METHODS.serverImportAcpRegistrySession,
+  WS_METHODS.serverDeleteAcpRegistrySession,
 ]);
 
 /**
@@ -303,7 +301,7 @@ export const layer = (
   principal: string = DEFAULT_PRINCIPAL_ID,
 ) =>
   Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {
-    if (principal !== DEFAULT_PRINCIPAL_ID && !PRINCIPAL_RPC_METHODS.has(rpc._tag)) {
+    if (principal !== DEFAULT_PRINCIPAL_ID && PRINCIPAL_DENIED_RPC_METHODS.has(rpc._tag)) {
       return Effect.fail(
         new EnvironmentAuthorizationError({
           message: `RPC method ${rpc._tag} is not available to this principal.`,

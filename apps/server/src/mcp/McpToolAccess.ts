@@ -190,8 +190,11 @@ export const writesThreads = <P, A, E, R>(
             .getThreadShell(threadId)
             .pipe(Effect.mapError(unavailable));
           if (target !== null && target.deletedAt === null) {
-            yield* assertThreadOwnedByCallerPrincipal(callerPrincipal(caller), target, () =>
-              threadNotFound(caller.threads, threadId, "The thread was not found."),
+            yield* assertThreadOwnedByCallerPrincipal(
+              callerPrincipal(caller),
+              target,
+              () => threadNotFound(caller.threads, threadId, "The thread was not found."),
+              "write",
             );
             yield* assertTargetWithinLimits(caller.limits, target);
             yield* assertSameLink(caller, target);

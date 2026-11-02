@@ -16,7 +16,7 @@ import * as Effect from "effect/Effect";
 import type { OrchestratorV2Error } from "../orchestration-v2/Orchestrator.ts";
 import * as ThreadManagement from "../orchestration-v2/ThreadManagementService.ts";
 import { resolveInteractionMode, resolveRuntimeMode } from "./delegatedTaskModes.ts";
-import { threadVisibleTo } from "../orchestration-v2/ThreadOwnership.ts";
+import { canAccessThread, type ThreadAction } from "../orchestration-v2/ThreadOwnership.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 
 /**
@@ -49,7 +49,8 @@ export const assertThreadOwnedByCallerPrincipal = (
   principal: string,
   target: { readonly ownerPrincipal?: string | undefined },
   fail: () => Effect.Effect<never, OrchestratorMcpFailure>,
-) => (threadVisibleTo(principal, target) ? Effect.void : fail());
+  action: ThreadAction = "read",
+) => (canAccessThread(principal, target, action) ? Effect.void : fail());
 
 export const unavailable = () =>
   new OrchestratorMcpFailure({

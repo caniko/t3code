@@ -24,13 +24,17 @@ import {
   existingThreadIdsOfCommand,
   scopeShellStreamItem,
   scopeThreadList,
-  threadVisibleTo,
+  canAccessThread,
+  threadOwnerScope,
+  type ThreadAction,
 } from "./orchestration-v2/ThreadOwnership.ts";
 import { subscribeChatGptHandoff } from "./provider/CodexChatGptHandoff.ts";
 import {
   AcpRegistryOperationError,
   CommandId,
   DEFAULT_PRINCIPAL_ID,
+  authScopeRequiredResponse,
+  AuthOrchestrationReadScope,
   principalOfSubject,
   authScopeResponse,
   AuthAccessStreamError,
@@ -69,6 +73,7 @@ import {
   OrchestrationV2GetThreadProjectionError,
   OrchestrationV2ThreadLaunchError,
   type OrchestrationProjectShell,
+  type OrchestrationV2ThreadShell,
   type OrchestrationV2ShellSnapshot,
   type OrchestrationV2ThreadStreamItem,
   type ApplicationStoredEvent,
@@ -1912,7 +1917,7 @@ export const layerWsRpc = (
               (cause) => new OrchestrationV2GetShellSnapshotError({ message, cause }),
             ),
           );
-          return { snapshotSequence, threads: threads.threads };
+          return { snapshotSequence, threads: scopeThreadList(principal, threads.threads) };
         },
       );
 
@@ -1920,10 +1925,37 @@ export const layerWsRpc = (
         return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation);
       });
 
-      const threadVisible = Effect.fn("ws.threadVisibleToSession")(function* (threadId: ThreadId) {
+      const threadAllowed = Effect.fn("ws.threadAccessForSession")(function* (
+        threadId: ThreadId,
+        action: ThreadAction,
+      ) {
         const found = yield* threadManagement.getThreadRecords(threadId, []).pipe(Effect.option);
-        return Option.isSome(found) && threadVisibleTo(principal, found.value.thread);
+        return Option.isSome(found) && canAccessThread(principal, found.value.thread, action);
       });
+      const threadVisible = (threadId: ThreadId) => threadAllowed(threadId, "read");
+      const scopeSearchResult = Effect.fn("ws.scopeSearchResult")(function* <
+        R extends {
+          readonly matches: ReadonlyArray<{ readonly threadId: ThreadId }>;
+          readonly threads?: ReadonlyArray<OrchestrationV2ThreadShell> | undefined;
+        },
+      >(result: R) {
+        if (threadOwnerScope(principal) === undefined) return result;
+        const visible = yield* Effect.forEach(result.matches, (match) =>
+          threadVisible(match.threadId),
+        );
+        return {
+          ...result,
+          matches: result.matches.filter((_, index) => visible[index]),
+          ...(result.threads === undefined
+            ? {}
+            : { threads: scopeThreadList(principal, result.threads) }),
+        };
+      });
+      const threadAccessDenied = () =>
+        new EnvironmentAuthorizationError({
+          message: "Thread not found",
+          ...authScopeRequiredResponse(AuthOrchestrationReadScope),
+        });
       const threadNotFound = (threadId: ThreadId) =>
         new OrchestrationV2GetThreadProjectionError({
           threadId,
@@ -1934,11 +1966,11 @@ export const layerWsRpc = (
         threadIds: ReadonlyArray<ThreadId> | null,
         notFound: () => E2,
         effect: Effect.Effect<A, E, R>,
+        action: ThreadAction = "read",
       ) {
-        // The default principal administers the environment, so its point reads skip the lookup.
-        if (principal === DEFAULT_PRINCIPAL_ID) return yield* effect;
+        if (threadOwnerScope(principal) === undefined) return yield* effect;
         if (threadIds === null) return yield* Effect.fail(notFound());
-        const visible = yield* Effect.forEach(threadIds, threadVisible);
+        const visible = yield* Effect.forEach(threadIds, (id) => threadAllowed(id, action));
         return visible.every(Boolean) ? yield* effect : yield* Effect.fail(notFound());
       });
 
@@ -2004,16 +2036,36 @@ export const layerWsRpc = (
                       });
                     }),
                   ),
+                "write",
               ),
             ),
           ),
-        [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: (input) => threadManagement.stopWorkflow(input),
+        [ORCHESTRATION_V2_WS_METHODS.stopWorkflow]: (input) =>
+          whenThreadsVisible(
+            [input.threadId],
+            threadAccessDenied,
+            threadManagement.stopWorkflow(input),
+            "write",
+          ),
         [ORCHESTRATION_V2_WS_METHODS.forceStopThread]: (input) =>
-          threadManagement.forceStopThread(input),
+          whenThreadsVisible(
+            [input.threadId],
+            threadAccessDenied,
+            threadManagement.forceStopThread(input),
+            "write",
+          ),
         [ORCHESTRATION_V2_WS_METHODS.getWorkflowScript]: (input) =>
-          readWorkflowScript({ scriptPath: input.scriptPath }),
+          whenThreadsVisible(
+            [input.threadId],
+            threadAccessDenied,
+            readWorkflowScript({ scriptPath: input.scriptPath }),
+          ),
         [ORCHESTRATION_V2_WS_METHODS.getNativeChildWork]: (input) =>
-          nativeChildWork.getNativeChildWork(input),
+          whenThreadsVisible(
+            [input.threadId],
+            threadAccessDenied,
+            nativeChildWork.getNativeChildWork(input),
+          ),
         [ORCHESTRATION_V2_WS_METHODS.getTurnItem]: (input) =>
           whenThreadsVisible(
             [input.threadId],
@@ -2030,23 +2082,31 @@ export const layerWsRpc = (
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.getTurnDiff]: (input) =>
-          checkpointDiffQuery.getTurnDiff(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new OrchestrationGetTurnDiffError({
-                  message: "Failed to load turn diff",
-                  cause,
-                }),
+          whenThreadsVisible(
+            [input.threadId],
+            threadAccessDenied,
+            checkpointDiffQuery.getTurnDiff(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationGetTurnDiffError({
+                    message: "Failed to load turn diff",
+                    cause,
+                  }),
+              ),
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.getFullThreadDiff]: (input) =>
-          checkpointDiffQuery.getFullThreadDiff(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new OrchestrationGetFullThreadDiffError({
-                  message: "Failed to load full thread diff",
-                  cause,
-                }),
+          whenThreadsVisible(
+            [input.threadId],
+            threadAccessDenied,
+            checkpointDiffQuery.getFullThreadDiff(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationGetFullThreadDiffError({
+                    message: "Failed to load full thread diff",
+                    cause,
+                  }),
+              ),
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.searchThread]: (input) =>
@@ -2088,6 +2148,7 @@ export const layerWsRpc = (
                   cause,
                 }),
             ),
+            Effect.flatMap(scopeSearchResult),
           ),
         [ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot]: (_input) =>
           getOrchestrationV2ArchivedShellSnapshot.pipe(
@@ -2103,7 +2164,7 @@ export const layerWsRpc = (
             sql,
             listThreads: threadManagement.listOlderSettledThreads({
               ...input,
-              ownerPrincipal: principal,
+              ownerPrincipal: threadOwnerScope(principal),
             }),
             readThreads: (threadIds) =>
               threadManagement.readShellSnapshot({ location: "active", threadIds }),
@@ -2285,7 +2346,13 @@ export const layerWsRpc = (
         [ORCHESTRATION_V2_WS_METHODS.subscribeCommandOutput]: (input) =>
           Stream.unwrap(
             Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
-              Effect.as(commandOutputHub.subscribe(input)),
+              Effect.andThen(
+                whenThreadsVisible(
+                  [input.threadId],
+                  threadAccessDenied,
+                  Effect.succeed(commandOutputHub.subscribe(input)),
+                ),
+              ),
             ),
           ),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>

@@ -17,7 +17,7 @@ import {
   failEnvironmentInternal,
   failEnvironmentInvalidRequest,
   failEnvironmentNotFound,
-  requireEnvironmentScopeForPrincipal,
+  requireEnvironmentScope,
   requireThreadAccess,
 } from "../auth/http.ts";
 import { scopeThreadList } from "./ThreadOwnership.ts";
@@ -173,7 +173,7 @@ export const layer = HttpApiBuilder.group(
         "shellSnapshot",
         Effect.fn("environment.orchestration.shellSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          const session = yield* requireEnvironmentScopeForPrincipal(AuthOrchestrationReadScope);
+          const session = yield* requireEnvironmentScope(AuthOrchestrationReadScope);
           const principal = principalOfSubject(session.subject);
           return yield* loadShellSnapshot({
             omitIdleSubagents: args.query.omitIdleSubagents === "1",

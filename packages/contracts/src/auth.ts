@@ -161,10 +161,20 @@ export const principalOfSubject = (subject: string): string =>
     ? subject.slice(PRINCIPAL_SUBJECT_PREFIX.length)
     : DEFAULT_PRINCIPAL_ID;
 
-/** The most a non-default principal may hold: terminal, filesystem, settings, provider and access scopes act as the server's OS user or across the whole environment. */
+/**
+ * What a signed-in person holds: everything for working in the app except server administration
+ * (server settings, updates, diagnostics, T3 Connect, and access management).
+ */
 export const AuthPrincipalScopes = [
   AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
+  AuthProvidersManageScope,
+  AuthPreviewOperateScope,
+  AuthTerminalReadScope,
+  AuthTerminalOperateScope,
+  AuthSourceControlWriteScope,
+  AuthFilesystemReadScope,
+  AuthFilesystemWriteScope,
 ] as const;
 
 // Shell and full-access agent scopes already confer access and relay authority.

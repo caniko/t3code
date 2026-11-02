@@ -3,6 +3,7 @@ import {
   AuthTokenExchangeGrantType,
   AuthEnvironmentBootstrapTokenType,
   AuthSessionId,
+  ThreadId,
   EnvironmentAuthenticatedPrincipal,
   type AuthEnvironmentScope,
   AuthAccessTokenType,
@@ -161,20 +162,24 @@ it.effect("sets the selected browser session cookies through the HTTP route", ()
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-it.effect("fails closed on ordinary scoped routes for a non-default principal", () =>
-  Effect.gen(function* () {
-    const requireAs = (subject: string) =>
-      AuthHttp.requireEnvironmentScope("orchestration:read").pipe(
-        Effect.provideService(EnvironmentAuthenticatedPrincipal, {
-          sessionId: AuthSessionId.make("test-session"),
-          subject,
-          method: "bearer-access-token",
-          scopes: new Set<AuthEnvironmentScope>(["orchestration:read"]),
-        }),
-      );
-    expect((yield* requireAs("principal:alice").pipe(Effect.flip))._tag).toBe(
-      "EnvironmentScopeRequiredError",
-    );
-    expect((yield* requireAs("browser")).subject).toBe("browser");
-  }),
+it.effect(
+  "lets a principal reach only its own threads over HTTP, and the default principal all",
+  () =>
+    Effect.gen(function* () {
+      const accessAs = (subject: string, ownerPrincipal: string | undefined) =>
+        AuthHttp.requireThreadAccess("orchestration:read", ThreadId.make("thread-1"), () =>
+          Effect.succeed({ ownerPrincipal }),
+        ).pipe(
+          Effect.provideService(EnvironmentAuthenticatedPrincipal, {
+            sessionId: AuthSessionId.make("test-session"),
+            subject,
+            method: "bearer-access-token",
+            scopes: new Set<AuthEnvironmentScope>(["orchestration:read"]),
+          }),
+          Effect.result,
+        );
+      expect((yield* accessAs("principal:alice", "alice"))._tag).toBe("Success");
+      expect((yield* accessAs("principal:bob", "alice"))._tag).toBe("Failure");
+      expect((yield* accessAs("browser", "alice"))._tag).toBe("Success");
+    }),
 );

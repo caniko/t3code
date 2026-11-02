@@ -433,7 +433,7 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
   );
 
   it.effect(
-    "caps a principal's credentials at orchestration scopes and keeps them out of MCP",
+    "caps a principal's credentials below server administration and keeps them out of MCP",
     () =>
       Effect.gen(function* () {
         const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
@@ -445,7 +445,7 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
         const session = yield* serverAuth.issueSession({ principal: "alice" });
         expect(session).toMatchObject({ subject: "principal:alice", scopes: AuthPrincipalScopes });
 
-        const tooWide = ["orchestration:read", "terminal:operate"] as const;
+        const tooWide = ["orchestration:read", "access:write"] as const;
         expect(
           yield* serverAuth
             .createPairingLink({ principal: "alice", scopes: tooWide })

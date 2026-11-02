@@ -6,13 +6,26 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 
-export const threadVisibleTo = (
+export type ThreadAction = "read" | "write";
+
+/**
+ * The one rule for who may touch a thread: its owner, or the default principal that administers
+ * the environment. Members and shares extend this function and `threadOwnerScope` together.
+ */
+export const canAccessThread = (
   principal: string,
   thread: { readonly ownerPrincipal?: string | undefined },
-) => (thread.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID) === principal;
+  _action: ThreadAction,
+) =>
+  principal === DEFAULT_PRINCIPAL_ID ||
+  (thread.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID) === principal;
+
+/** The owner a SQL query filters on to match `canAccessThread`; undefined means no filter. */
+export const threadOwnerScope = (principal: string) =>
+  principal === DEFAULT_PRINCIPAL_ID ? undefined : principal;
 
 const visibleThreads = (principal: string, threads: ReadonlyArray<OrchestrationV2ThreadShell>) =>
-  threads.filter((thread) => threadVisibleTo(principal, thread));
+  threads.filter((thread) => canAccessThread(principal, thread, "read"));
 
 /** Project and thread-removal items carry no thread content, so they pass through. */
 export const scopeShellStreamItem = (
@@ -30,7 +43,7 @@ export const scopeShellStreamItem = (
         },
       };
     case "thread.updated":
-      return threadVisibleTo(principal, item.thread) ? item : null;
+      return canAccessThread(principal, item.thread, "read") ? item : null;
     default:
       return item;
   }

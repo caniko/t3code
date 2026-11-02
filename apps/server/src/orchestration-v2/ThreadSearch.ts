@@ -35,7 +35,7 @@ import {
 import { threadSearchPullRequests } from "@t3tools/shared/threadPullRequests";
 import { indexedMessageCondition, nonPlaceholderMessageCondition } from "./messageSearchIndex.ts";
 import { loadOlderSettledThreadsPage } from "./ShellStream.ts";
-import { threadVisibleTo } from "./ThreadOwnership.ts";
+import { canAccessThread } from "./ThreadOwnership.ts";
 
 // When the user last wrote in the thread aliased `threads`, as the clients
 // rank recency; agent notices in the user role do not count.
@@ -531,7 +531,7 @@ export const make = Effect.gen(function* () {
     const candidates =
       owner === undefined
         ? allCandidates
-        : allCandidates.filter((row) => threadVisibleTo(owner, row.thread));
+        : allCandidates.filter((row) => canAccessThread(owner, row.thread, "read"));
     const hidden = new Set(
       allCandidates.filter((row) => !candidates.includes(row)).map((row) => row.thread.id),
     );

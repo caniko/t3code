@@ -1,5 +1,5 @@
 import { DEFAULT_PRINCIPAL_ID } from "@t3tools/contracts";
-import { threadVisibleTo } from "./ThreadOwnership.ts";
+import { canAccessThread } from "./ThreadOwnership.ts";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -810,7 +810,8 @@ const make = Effect.gen(function* () {
           snapshot.threads
             .filter(
               (thread) =>
-                input.ownerPrincipal === undefined || threadVisibleTo(input.ownerPrincipal, thread),
+                input.ownerPrincipal === undefined ||
+                canAccessThread(input.ownerPrincipal, thread, "read"),
             )
             .filter((thread) =>
               input.includeSubagents
