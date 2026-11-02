@@ -4,7 +4,7 @@ name: Fork Nix prebuild
 
 on:
   push:
-    branches: [main, feat/nix-flake]
+    branches: [main, feat/nix-flake, feat/fleet-build]
     paths: [flake.nix, flake.lock, pnpm-lock.yaml, pnpm-workspace.yaml, "apps/**", "packages/**", "patches/**", "native/**", "scripts/**", ".github/workflows/fork-nix-prebuild.yml"]
   workflow_dispatch:
 
