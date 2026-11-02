@@ -16,7 +16,7 @@ import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
-import { scopeShellStreamItem } from "./ThreadOwnership.ts";
+import { canAccessThread, scopeShellStreamItem } from "./ThreadOwnership.ts";
 import {
   activeShellRowsForSubscriber,
   bufferShellLiveStream,
@@ -362,7 +362,22 @@ describe("scopeShellStreamItem", () => {
     },
   } as const;
 
-  it("shows each principal only its own threads and the default principal only unowned ones", () => {
+  it.each([
+    { principal: "alice", ownerPrincipal: "alice", read: true, write: true },
+    { principal: "bob", ownerPrincipal: "alice", read: false, write: false },
+    { principal: "owner", ownerPrincipal: "alice", read: true, write: true },
+    { principal: "alice", ownerPrincipal: undefined, read: false, write: false },
+    { principal: "owner", ownerPrincipal: undefined, read: true, write: true },
+  ])(
+    "$principal on a thread owned by $ownerPrincipal: read $read, write $write",
+    ({ principal, ownerPrincipal, read, write }) => {
+      const thread = { ownerPrincipal };
+      expect(canAccessThread(principal, thread, "read")).toBe(read);
+      expect(canAccessThread(principal, thread, "write")).toBe(write);
+    },
+  );
+
+  it("shows each principal its own threads and the default principal all of them", () => {
     const idsFor = (principal: string) => {
       const item = scopeShellStreamItem(principal, snapshot);
       return item?.kind === "snapshot"
@@ -373,7 +388,10 @@ describe("scopeShellStreamItem", () => {
     };
     expect(idsFor("alice")).toEqual([["thread-alice"], ["thread-alice"]]);
     expect(idsFor("bob")).toEqual([[], []]);
-    expect(idsFor("owner")).toEqual([["thread-owner"], ["thread-owner"]]);
+    expect(idsFor("owner")).toEqual([
+      ["thread-alice", "thread-owner"],
+      ["thread-alice", "thread-owner"],
+    ]);
   });
 
   it("drops live updates for other principals' threads but keeps removals", () => {
@@ -390,8 +408,9 @@ describe("scopeShellStreamItem", () => {
       threadId: owned.id,
     } as const;
     expect(scopeShellStreamItem("alice", updated)).toBe(updated);
-    expect(scopeShellStreamItem("owner", updated)).toBeNull();
-    expect(scopeShellStreamItem("owner", removed)).toBe(removed);
+    expect(scopeShellStreamItem("bob", updated)).toBeNull();
+    expect(scopeShellStreamItem("owner", updated)).toBe(updated);
+    expect(scopeShellStreamItem("bob", removed)).toBe(removed);
   });
 });
 

@@ -40,7 +40,8 @@ it.effect("points a bare uuid at the mcp: thread it belongs to", () =>
 );
 
 it.effect.each([
-  { caller: undefined, owner: "alice", visible: false },
+  { caller: undefined, owner: "alice", visible: true },
+  { caller: "bob", owner: "alice", visible: false },
   { caller: "alice", owner: undefined, visible: false },
   { caller: "alice", owner: "alice", visible: true },
 ])(

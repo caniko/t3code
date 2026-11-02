@@ -76,22 +76,24 @@ Every read and write that names a thread goes through that helper:
 - `dispatchCommand` for every thread the command names.
 
 A thread another principal cannot see fails as not found, so its existence is
-not revealed. `owner` skips the per-thread lookup on point reads: it already
-holds environment-wide authority, so a check there would add latency without
-creating a boundary. Its shell is still filtered, so its sidebar shows only its
-own workspace.
+not revealed. [`canAccessThread`](../../apps/server/src/orchestration-v2/ThreadOwnership.ts)
+is the one rule, asked with `read` or `write` (dispatch, launch into an
+existing thread, stop, and MCP writes need `write`). Today it admits the owner
+and the default `owner` principal, which administers the environment and sees
+every thread; sharing extends this function and `threadOwnerScope`, its SQL
+counterpart, and nothing else.
 
-**Fail-closed surface.** A non-`owner` session may call only an explicit
-allowlist of WebSocket RPCs (`PRINCIPAL_RPC_METHODS` in
-[RpcAuthorization.ts](../../apps/server/src/auth/RpcAuthorization.ts)). Every
-other RPC and every scoped HTTP route is refused for it unless the route has its
-own principal-aware check. New RPCs therefore start out unavailable to
-principals instead of starting out leaky.
-
-**Scope ceiling.** Until C1b, a principal holds at most `orchestration:read` and
-`orchestration:operate`. Terminal, filesystem, settings, provider, access and
-maintenance scopes act as the server's OS user or across the whole environment,
-so they would cross workspaces. Issuance rejects them for a principal.
+**Server administration.** A principal's scopes (`AuthPrincipalScopes`) cover
+working in the app: threads, projects, terminals, files, source control,
+previews and provider management. They omit settings, environment maintenance,
+diagnostics, relay and access scopes, so server-wide administration is refused by
+the scope check on RPC and HTTP alike. `PRINCIPAL_DENIED_RPC_METHODS` in
+[RpcAuthorization.ts](../../apps/server/src/auth/RpcAuthorization.ts) lists the
+few methods under scopes a principal holds that still read server-wide state or
+the server account's own agent sessions. A new server-wide method under such a
+scope must be added there. Terminals, files, previews and provider credentials
+are not owner-filtered and run as the server's OS user until per-principal
+execution lands.
 
 **Projects.** Projects need the same treatment: a nullable `owner_principal`
 column on `projection_projects` (migration `077`), stamping on `project.create`,
