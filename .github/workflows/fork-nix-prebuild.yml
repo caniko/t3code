@@ -1,0 +1,42 @@
+# Fork-only: build the Nix package and publish its closure to the canix Attic cache.
+# Requires repository secret ATTIC_TOKEN (canix cache binary token new t3code --cache canix --push --github caniko/t3code).
+name: Fork Nix prebuild
+
+on:
+  push:
+    branches: [main, feat/nix-flake]
+    paths: [flake.nix, flake.lock, pnpm-lock.yaml, pnpm-workspace.yaml, "apps/**", "packages/**", "patches/**", "native/**", "scripts/**", ".github/workflows/fork-nix-prebuild.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-nix-prebuild-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.repository == 'caniko/t3code'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: cachix/install-nix-action@630ae543ea3a38a9a4166f03376c02c50f408342 # v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            substituters = https://attic.candee.baby/canix https://cache.nixos.org
+            trusted-public-keys = canix:lPzPzKrmYqW5Rxa5r0uQWvCqD3S5nx0h2eCy7XD5JM8= cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+      - name: Build t3code
+        run: nix build '.#t3code' --out-link result-t3code
+      - name: Push closure to Attic
+        if: github.event_name != 'pull_request'
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$ATTIC_TOKEN" ]; then echo "::warning::ATTIC_TOKEN not set; skipping push"; exit 0; fi
+          nix profile install 'nixpkgs#attic-client'
+          attic login canix https://attic.candee.baby "$ATTIC_TOKEN"
+          nix path-info --recursive ./result-t3code | attic push canix --stdin
