@@ -377,6 +377,29 @@ describe("scopeShellStreamItem", () => {
     },
   );
 
+  it.each([
+    { role: "viewer", read: true, write: false },
+    { role: "participant", read: true, write: true },
+    { role: undefined, read: false, write: false },
+  ] as const)(
+    "a grant of $role on alice's thread: read $read, write $write",
+    ({ role, read, write }) => {
+      const grants = new Map(role === undefined ? [] : [["thread-alice", role] as const]);
+      const thread = { id: "thread-alice", ownerPrincipal: "alice" };
+      expect(canAccessThread("bob", thread, "read", grants)).toBe(read);
+      expect(canAccessThread("bob", thread, "write", grants)).toBe(write);
+      // A grant on another thread opens nothing here.
+      expect(canAccessThread("bob", { ...thread, id: "thread-other" }, "read", grants)).toBe(false);
+    },
+  );
+
+  it("shows a granted thread in the grantee's snapshot", () => {
+    const item = scopeShellStreamItem("bob", snapshot, new Map([["thread-alice", "viewer"]]));
+    expect(item?.kind === "snapshot" && item.snapshot.threads.map((t) => t.id)).toEqual([
+      "thread-alice",
+    ]);
+  });
+
   it("shows each principal its own threads and the default principal all of them", () => {
     const idsFor = (principal: string) => {
       const item = scopeShellStreamItem(principal, snapshot);

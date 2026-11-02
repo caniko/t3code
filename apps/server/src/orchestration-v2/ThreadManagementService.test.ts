@@ -85,6 +85,26 @@ it("stamps authoritative provenance on commands that create threads or messages"
   ).toMatchObject({ ownerPrincipal: "alice" });
 });
 
+it("stamps a message's sender from the session and discards a client-supplied one", () => {
+  const message = {
+    type: "message.dispatch",
+    commandId: "c",
+    threadId: "t",
+    messageId: "m",
+    text: "hi",
+    attachments: [],
+    senderPrincipal: "mallory",
+    dispatchMode: { type: "start_immediately" },
+  } as unknown as Parameters<typeof ThreadManagementService.withCreationProvenance>[0];
+  const provenance = { createdBy: "user", creationSource: "web" } as const;
+  expect(ThreadManagementService.withCreationProvenance(message, provenance, "bob")).toMatchObject({
+    senderPrincipal: "bob",
+  });
+  expect(ThreadManagementService.withCreationProvenance(message, provenance)).not.toHaveProperty(
+    "senderPrincipal",
+  );
+});
+
 const layerReceiptsTest = CommandReceiptStore.layer.pipe(
   Layer.provide(SqlitePersistence.layerMemory),
 );

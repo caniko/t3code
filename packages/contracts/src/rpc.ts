@@ -27,6 +27,13 @@ import {
   PeerLinkSummary,
 } from "./peerLink.ts";
 import {
+  SessionAccessError,
+  SessionAccessMutation,
+  SessionAccessSnapshot,
+  SessionAccessThreadSharesInput,
+  SessionThreadShare,
+} from "./sessionAccess.ts";
+import {
   ChatGptReconnectProfileInput,
   ChatGptReconnectProfile,
   ChatGptImportProfileInput,
@@ -512,6 +519,9 @@ export const WS_METHODS = {
   peerLinksLink: "peerLinks.link",
   peerLinksUnlink: "peerLinks.unlink",
   peerLinksAnswerRequest: "peerLinks.answerRequest",
+  sessionAccessList: "sessionAccess.list",
+  sessionAccessThreadShares: "sessionAccess.threadShares",
+  sessionAccessMutate: "sessionAccess.mutate",
   serverUpdateSettings: "server.updateSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverSearchAcpRegistry: "server.searchAcpRegistry",
@@ -818,6 +828,23 @@ const WsPeerLinksUnlinkRpc = Rpc.make(WS_METHODS.peerLinksUnlink, {
 const WsPeerLinksAnswerRequestRpc = Rpc.make(WS_METHODS.peerLinksAnswerRequest, {
   payload: PeerLinkRequestAnswerInput,
   error: Schema.Union([PeerLinkRequestError, EnvironmentAuthorizationError]),
+});
+
+const WsSessionAccessListRpc = Rpc.make(WS_METHODS.sessionAccessList, {
+  payload: Schema.Struct({}),
+  success: SessionAccessSnapshot,
+  error: Schema.Union([SessionAccessError, EnvironmentAuthorizationError]),
+});
+
+const WsSessionAccessThreadSharesRpc = Rpc.make(WS_METHODS.sessionAccessThreadShares, {
+  payload: SessionAccessThreadSharesInput,
+  success: Schema.Struct({ shares: Schema.Array(SessionThreadShare) }),
+  error: Schema.Union([SessionAccessError, EnvironmentAuthorizationError]),
+});
+
+const WsSessionAccessMutateRpc = Rpc.make(WS_METHODS.sessionAccessMutate, {
+  payload: SessionAccessMutation,
+  error: Schema.Union([SessionAccessError, EnvironmentAuthorizationError]),
 });
 
 const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
@@ -2021,6 +2048,9 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerLinksLinkRpc,
   WsPeerLinksUnlinkRpc,
   WsPeerLinksAnswerRequestRpc,
+  WsSessionAccessListRpc,
+  WsSessionAccessThreadSharesRpc,
+  WsSessionAccessMutateRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerSearchAcpRegistryRpc,
   WsServerPrepareAcpRegistryAgentRpc,

@@ -169,7 +169,8 @@ it.effect(
     Effect.gen(function* () {
       const accessAs = (subject: string, ownerPrincipal: string | undefined) =>
         AuthHttp.requireThreadAccess("orchestration:read", ThreadId.make("thread-1"), () =>
-          Effect.succeed({ ownerPrincipal }),
+          Effect.succeed({ id: "thread-1", ownerPrincipal }),
+          () => Effect.succeed(new Map()),
         ).pipe(
           Effect.provideService(EnvironmentAuthenticatedPrincipal, {
             sessionId: AuthSessionId.make("test-session"),
