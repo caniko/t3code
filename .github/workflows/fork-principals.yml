@@ -5,7 +5,7 @@ name: Fork principals
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, "feat/**"]
   workflow_dispatch:
 
 permissions:
@@ -38,10 +38,16 @@ jobs:
         run: node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
 
       - name: Typecheck
-        run: vp run --filter @t3tools/contracts --filter t3 typecheck
+        run: vp run --filter @t3tools/contracts --filter @t3tools/client-runtime --filter @t3tools/web --filter t3 typecheck
 
       - name: Test contracts
         run: vp run --filter @t3tools/contracts test
 
       - name: Test server
         run: vp run --filter t3 test
+
+      - name: Test session-sharing web and client-runtime code
+        if: ${{ !cancelled() }}
+        run: |
+          (cd packages/client-runtime && vp test run src/state/sessionAccess.test.ts)
+          (cd apps/web && vp test run src/sidebarProjectGrouping.test.ts src/components/chat/ShareThreadDialog.browser.test.tsx)

@@ -6,10 +6,13 @@ import React, { startTransition, useEffect, useEffectEvent, useRef, useState } f
 import { connectPairing } from "../../connection/onboarding";
 import {
   peekPairingTokenFromUrl,
+  resolvePrimaryEnvironmentHttpUrl,
   stripPairingTokenFromUrl,
   submitServerAuthCredential,
 } from "../../environments/primary";
+import { isElectron } from "../../env";
 import { readHostedPairingRequest } from "../../hostedPairing";
+import { ensureLocalApi } from "../../localApi";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { StandalonePage, StandalonePageHeader } from "../ui/standalone-page";
@@ -62,6 +65,19 @@ export function PairingRouteSurface({
     });
   };
 
+  const signInWithOidc = async () => {
+    const url = resolvePrimaryEnvironmentHttpUrl("/auth/oidc/start", {
+      client: isElectron ? "desktop" : "web",
+    });
+    if (!isElectron) {
+      window.location.assign(url);
+      return;
+    }
+    await ensureLocalApi()
+      .shell.openExternal(url)
+      .catch((error) => setErrorMessage(errorMessageFromUnknown(error)));
+  };
+
   const handleSubmit = async (event?: React.SubmitEvent<HTMLFormElement>) => {
     event?.preventDefault();
     await submitCredential(credential);
@@ -88,6 +104,19 @@ export function PairingRouteSurface({
         title="Pair with this environment"
         description={describeAuthGate(auth.bootstrapMethods)}
       />
+
+      {auth.oidcSignIn ? (
+        <div className="mt-6 space-y-2">
+          <Button disabled={isSubmitting} onClick={() => void signInWithOidc()} size="sm">
+            Sign in with Kanidm
+          </Button>
+          <p className="text-xs text-muted-foreground">
+            {isElectron
+              ? "Opens your browser; the app signs in when you return."
+              : "Or pair this device with a token below."}
+          </p>
+        </div>
+      ) : null}
 
       <form className="mt-6 space-y-4" onSubmit={(event) => void handleSubmit(event)}>
         <div className="space-y-2">
