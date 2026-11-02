@@ -3,6 +3,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
 import { act, render } from "../../../test/render";
+import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 
 const access = vi.hoisted(() => ({ mutate: vi.fn() }));
 
@@ -27,7 +28,12 @@ const threadId = ThreadId.make("thread-1");
 it("shares a session with a person and removes an existing share", async () => {
   access.mutate.mockReset().mockResolvedValue(true);
   // The dialog needs no route.
-  await using _screen = await render(<ShareThreadDialogHost />, { router: false });
+  await using _screen = await render(
+    <AppAtomRegistryProvider>
+      <ShareThreadDialogHost />
+    </AppAtomRegistryProvider>,
+    { router: false },
+  );
   await act(async () => openShareThreadDialog({ environmentId, threadId }));
 
   const share = page.getByRole("button", { name: "Share", exact: true });
