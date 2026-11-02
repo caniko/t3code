@@ -430,6 +430,8 @@ export const AuthSessionState = Schema.Struct({
   permissions: authScopeResponseFields.permissions,
   sessionMethod: Schema.optionalKey(ServerAuthSessionMethod),
   expiresAt: Schema.optionalKey(Schema.DateTimeUtc),
+  /** The signed-in principal; absent for the default `owner`. */
+  principal: Schema.optionalKey(PrincipalId),
 });
 export type AuthSessionState = typeof AuthSessionState.Type;
 
