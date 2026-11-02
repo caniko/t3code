@@ -23,7 +23,8 @@
           unwrapped = pkgs.t3code.unwrapped.overrideAttrs (
             final: prev: {
               version = (builtins.fromJSON (builtins.readFile ./apps/server/package.json)).version;
-              src = self;
+              # cleanSource gives the source a `name`; resource-monitor.nix reads src.name.
+              src = nixpkgs.lib.cleanSource self;
               nativeBuildInputs = (builtins.filter (p: p != pkgs.pnpm_11) prev.nativeBuildInputs) ++ [ pnpm ];
               pnpmDeps = pkgs.fetchPnpmDeps {
                 inherit pnpm;
@@ -34,7 +35,11 @@
             }
           );
         in
-        pkgs.t3code.override { t3code-unwrapped = unwrapped; };
+        # ponytail: resource monitor off; its cargoHash tracks nixpkgs' source, enable once it is overridden too.
+        pkgs.t3code.override {
+          t3code-unwrapped = unwrapped;
+          enableResourceMonitor = false;
+        };
     in
     {
       packages = forAll (pkgs: rec {
