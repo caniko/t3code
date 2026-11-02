@@ -561,6 +561,10 @@ export interface ProjectionStoreV2Shape {
   readonly getThreadsWithPullRequests: (
     threadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadPullRequests>, ProjectionStoreV2Error>;
+  /** Non-default principals owning a thread whose worktree is `cwd` or contains it. */
+  readonly getWorktreeOwners: (
+    cwd: string,
+  ) => Effect.Effect<ReadonlyArray<string>, ProjectionStoreV2Error>;
   readonly getThreadWorktreePaths: (options?: {
     readonly includeArchived?: boolean;
   }) => Effect.Effect<
@@ -6683,6 +6687,24 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
       );
 
+    // ponytail: scans threads with a non-default owner per call; index owner and worktree if it shows up in profiles.
+    const getWorktreeOwners: ProjectionStoreV2Shape["getWorktreeOwners"] = (cwd) =>
+      sql<{ readonly owner: string }>`
+        SELECT DISTINCT json_extract(payload_json, '$.ownerPrincipal') AS owner
+        FROM orchestration_v2_projection_threads
+        WHERE deleted_at IS NULL
+          AND json_extract(payload_json, '$.ownerPrincipal') IS NOT NULL
+          AND json_extract(payload_json, '$.ownerPrincipal') != ${DEFAULT_PRINCIPAL_ID}
+          AND json_extract(payload_json, '$.worktreePath') IS NOT NULL
+          AND (
+            ${cwd} = json_extract(payload_json, '$.worktreePath')
+            OR substr(${cwd}, 1, length(json_extract(payload_json, '$.worktreePath')) + 1) = json_extract(payload_json, '$.worktreePath') || '/'
+          )
+      `.pipe(
+        Effect.map((rows) => rows.map((row) => row.owner)),
+        Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+      );
+
     const getThreadWorktreePaths: ProjectionStoreV2Shape["getThreadWorktreePaths"] = (options) =>
       sql<{ readonly thread_id: string; readonly worktree_path: string }>`
         SELECT thread_id, json_extract(payload_json, '$.worktreePath') AS worktree_path
@@ -7404,6 +7426,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getThread: readOnReader(getThread),
       getSettlementCandidates: readOnReader(getSettlementCandidates),
       getThreadsWithPullRequests: readOnReader(getThreadsWithPullRequests),
+      getWorktreeOwners: readOnReader(getWorktreeOwners),
       getThreadWorktreePaths: readOnReader(getThreadWorktreePaths),
       getOpenRemoteDelegatedTasks: getOpenRemoteDelegatedTasks.pipe(NodeSqliteClient.readOnly),
       getThreadProjection: readOnReader(getThreadProjection),

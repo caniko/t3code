@@ -118,6 +118,7 @@ const openRunnerConnection = (
 
 export interface RunnerEndpoint {
   readonly socketPath: string;
+  readonly principal?: string;
   readonly serverEnv: Readonly<Record<string, string | undefined>>;
 }
 
