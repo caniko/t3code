@@ -218,20 +218,22 @@ export const replayServer = (
       external: options?.external ?? false,
     };
     const borrowers = options?.borrowers;
-    return OpenCode2Server.OpenCode2Server.of({
-      withConnection: (use) =>
-        borrowers === undefined
-          ? use(connection)
-          : Effect.acquireUseRelease(
+    const withConnection: OpenCode2Server.OpenCode2Server["Service"]["withConnection"] = (use) =>
+      borrowers === undefined
+        ? use(connection)
+        : Effect.acquireUseRelease(
+            Effect.sync(() => {
+              borrowers.current += 1;
+            }),
+            () => use(connection),
+            () =>
               Effect.sync(() => {
-                borrowers.current += 1;
+                borrowers.current -= 1;
               }),
-              () => use(connection),
-              () =>
-                Effect.sync(() => {
-                  borrowers.current -= 1;
-                }),
-            ),
+          );
+    return OpenCode2Server.OpenCode2Server.of({
+      withConnection,
+      withThreadConnection: (_threadId, use) => withConnection(use),
     });
   });
 

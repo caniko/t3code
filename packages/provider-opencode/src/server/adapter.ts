@@ -925,6 +925,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
   options: OpenCodeAdapterV2Options,
 ) {
   const runtime = yield* OpenCodeRuntime.OpenCodeRuntime;
+  const threadProcesses = yield* OpenCodeRuntime.OpenCodeThreadProcesses;
   const idAllocator = yield* IdAllocator.IdAllocatorV2;
   const host = yield* ProviderHost.ProviderHost;
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
@@ -943,6 +944,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
         const scope = yield* Effect.scope;
         const cwd = input.runtimePolicy.cwd ?? host.paths.cwd;
+        const threadProcess = yield* threadProcesses.forThread(input.threadId);
         const connection = yield* runtime.connectToOpenCodeServer({
           binaryPath: options.settings.binaryPath,
           directory: cwd,
@@ -951,6 +953,7 @@ export const makeOpenCodeAdapterV2 = Effect.fn("makeOpenCodeAdapterV2")(function
             ? { serverPassword: options.settings.serverPassword }
             : {}),
           environment: options.environment,
+          ...(threadProcess === undefined ? {} : { spawner: threadProcess.spawner }),
         });
         const client = runtime.createOpenCodeSdkClient({
           baseUrl: connection.url,

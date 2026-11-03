@@ -9,6 +9,7 @@ import * as NodeStream from "@effect/platform-node-shared/NodeStream";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
+import * as Redacted from "effect/Redacted";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
@@ -43,10 +44,7 @@ export interface RunnerProcess {
 const LOST: RunnerExit = { code: null, signal: "SIGKILL" };
 
 /** Connects, sends the spawn request and resolves once the runner reports the pid. */
-const openRunnerConnection = (
-  socketPath: string,
-  request: SpawnProcessFrame | SpawnPtyFrame,
-) =>
+const openRunnerConnection = (socketPath: string, request: SpawnProcessFrame | SpawnPtyFrame) =>
   new Promise<RunnerProcess>((resolve, reject) => {
     const socket = NodeNet.connect(socketPath);
     const stdout = new PassThrough();
@@ -155,7 +153,20 @@ const platformError = (method: string, command: string, cause: unknown) =>
   });
 
 const unsupported = (command: string, what: string) =>
-  Effect.fail(platformError("spawn", command, new Error(`${what} is not supported by the runner.`)));
+  Effect.fail(
+    platformError("spawn", command, new Error(`${what} is not supported by the runner.`)),
+  );
+
+/** The runner wire carries plain strings, so a redacted word is unwrapped on its way out. */
+const word = (value: string | Redacted.Redacted<string>): string =>
+  Redacted.isRedacted(value) ? Redacted.value(value) : value;
+
+const envWords = (
+  env: Record<string, string | Redacted.Redacted<string> | undefined>,
+): Record<string, string | undefined> =>
+  Object.fromEntries(
+    Object.entries(env).map(([key, value]) => [key, value === undefined ? undefined : word(value)]),
+  );
 
 /** A `ChildProcessSpawner` whose processes run in the runner behind `endpoint`. */
 export const makeRunnerSpawner = (endpoint: RunnerEndpoint) =>
@@ -175,7 +186,10 @@ export const makeRunnerSpawner = (endpoint: RunnerEndpoint) =>
           : stdinOption;
       const isStream = typeof stdinConfig === "object" && stdinConfig !== null;
       for (const output of [options.stdout, options.stderr]) {
-        const stream = typeof output === "object" && output !== null && "stream" in output ? output.stream : output;
+        const stream =
+          typeof output === "object" && output !== null && "stream" in output
+            ? output.stream
+            : output;
         if (typeof stream === "object" && stream !== null) {
           return yield* unsupported(command.command, "Custom output sinks");
         }
@@ -185,9 +199,9 @@ export const makeRunnerSpawner = (endpoint: RunnerEndpoint) =>
           try: () =>
             openRunnerProcess(endpoint, {
               command: command.command,
-              args: command.args,
+              args: command.args.map(word),
               cwd: options.cwd,
-              env: options.env,
+              env: options.env === undefined ? undefined : envWords(options.env),
               stdin: stdinConfig === "ignore" || stdinConfig === "inherit" ? "ignore" : "pipe",
               shell: options.shell,
             }),
@@ -219,7 +233,11 @@ export const makeRunnerSpawner = (endpoint: RunnerEndpoint) =>
           Effect.flatMap((exit) =>
             exit.code === null
               ? Effect.fail(
-                  platformError("exitCode", command.command, new Error(`Process ended by signal ${exit.signal}.`)),
+                  platformError(
+                    "exitCode",
+                    command.command,
+                    new Error(`Process ended by signal ${exit.signal}.`),
+                  ),
                 )
               : Effect.succeed(ChildProcessSpawner.ExitCode(exit.code)),
           ),
@@ -234,9 +252,10 @@ export const makeRunnerSpawner = (endpoint: RunnerEndpoint) =>
             yield* exited;
           }
         }),
-        stdin: isStream || stdinConfig === "ignore" || stdinConfig === "inherit"
-          ? Sink.drain
-          : NodeSink.fromWritable({ evaluate: () => proc.stdin, onError, endOnDone: true }),
+        stdin:
+          isStream || stdinConfig === "ignore" || stdinConfig === "inherit"
+            ? Sink.drain
+            : NodeSink.fromWritable({ evaluate: () => proc.stdin, onError, endOnDone: true }),
         stdout,
         stderr,
         all: Stream.merge(stdout, stderr),

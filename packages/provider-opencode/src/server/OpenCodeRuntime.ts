@@ -246,6 +246,8 @@ export class OpenCodeRuntime extends Context.Service<
       readonly hostname?: string;
       readonly timeoutMs?: number;
       readonly verify?: (url: string) => Effect.Effect<string, OpenCodeRuntimeError>;
+      /** Runs the server for a thread whose owner is not the server user; defaults to this process. */
+      readonly spawner?: ChildProcessSpawner.ChildProcessSpawner["Service"];
     }) => Effect.Effect<OpenCodeServerProcess, OpenCodeRuntimeError, Scope.Scope>;
     readonly connectToOpenCodeServer: (input: {
       readonly binaryPath: string;
@@ -256,6 +258,7 @@ export class OpenCodeRuntime extends Context.Service<
       readonly port?: number;
       readonly hostname?: string;
       readonly timeoutMs?: number;
+      readonly spawner?: ChildProcessSpawner.ChildProcessSpawner["Service"];
     }) => Effect.Effect<OpenCodeServerConnection, OpenCodeRuntimeError, Scope.Scope>;
     readonly runOpenCodeCommand: (input: {
       readonly binaryPath: string;
@@ -276,6 +279,28 @@ export class OpenCodeRuntime extends Context.Service<
     ) => Effect.Effect<ReadonlyArray<OpenCodeSkill>, OpenCodeRuntimeError>;
   }
 >()("@t3tools/provider-opencode/server/OpenCodeRuntime") {}
+
+/**
+ * The process a thread's OpenCode server runs in: a signed-in owner's runner, so the server reads
+ * that user's files and login environment instead of the server's.
+ */
+export interface OpenCodeThreadProcess {
+  /** Threads of one owner share a server. */
+  readonly owner: string;
+  readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
+}
+
+/**
+ * Resolves a thread's runner process. The server installs this from its principal execution
+ * service; without it every thread runs as the server user.
+ */
+export class OpenCodeThreadProcesses extends Context.Reference<{
+  readonly forThread: (
+    threadId: string,
+  ) => Effect.Effect<OpenCodeThreadProcess | undefined, OpenCodeRuntimeError>;
+}>("t3/opencode/OpenCodeThreadProcesses", {
+  defaultValue: () => ({ forThread: () => Effect.undefined }),
+}) {}
 
 function parseServerUrlFromOutput(output: string): string | null {
   for (const line of output.split("\n")) {
@@ -508,13 +533,18 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       ));
     const timeoutMs = input.timeoutMs ?? DEFAULT_OPENCODE_SERVER_TIMEOUT_MS;
     const args = ["serve", `--hostname=${hostname}`, `--port=${port}`];
-    const launch = yield* agentScope.wrap({
-      command: input.binaryPath,
-      args,
-      name: "opencode",
-      env: input.environment,
-      shared: true,
-    });
+    // A runner already isolates the process from this one, so the agent scope's
+    // systemd unit for the server user would only misplace it.
+    const launch =
+      input.spawner === undefined
+        ? yield* agentScope.wrap({
+            command: input.binaryPath,
+            args,
+            name: "opencode",
+            env: input.environment,
+            shared: true,
+          })
+        : { command: input.binaryPath, args };
     const spawnCommand = yield* resolveCommand(launch.command, launch.args, input.environment);
     const serverPassword = resolveOpenCodeServerPassword({
       external: false,
@@ -525,7 +555,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
     // Scopes close in reverse order. Forking this before the group kill is
     // registered forgets the ledger entry only once the group is stopped.
     const ledgerScope = yield* Scope.fork(runtimeScope);
-    const child = yield* spawner
+    const child = yield* (input.spawner ?? spawner)
       .spawn(
         ChildProcess.make(spawnCommand.command, spawnCommand.args, {
           detached: hostPlatform !== "win32",
@@ -553,7 +583,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       );
 
     const killOpenCodeProcessGroup = (signal: NodeJS.Signals) =>
-      hostPlatform === "win32"
+      hostPlatform === "win32" || input.spawner !== undefined
         ? child.kill({ killSignal: signal, forceKillAfter: "1 second" }).pipe(Effect.asVoid)
         : Effect.sync(() => {
             try {
@@ -756,6 +786,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       ...(input.port !== undefined ? { port: input.port } : {}),
       ...(input.hostname !== undefined ? { hostname: input.hostname } : {}),
       ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+      ...(input.spawner !== undefined ? { spawner: input.spawner } : {}),
     }).pipe(
       Effect.map((server) => ({
         url: server.url,

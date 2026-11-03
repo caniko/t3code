@@ -5,6 +5,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
+import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as OpenCodeRuntime from "./OpenCodeRuntime.ts";
 
@@ -32,6 +33,7 @@ export const make = Effect.fn("OpenCodeServerOwner.make")(function* (input: {
   readonly serverPassword?: string;
   readonly environment?: NodeJS.ProcessEnv;
   readonly verify?: (url: string) => Effect.Effect<string, OpenCodeRuntime.OpenCodeRuntimeError>;
+  readonly spawner?: ChildProcessSpawner.ChildProcessSpawner["Service"];
 }) {
   const runtime = yield* OpenCodeRuntime.OpenCodeRuntime;
   const ownerScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
@@ -107,6 +109,7 @@ export const make = Effect.fn("OpenCodeServerOwner.make")(function* (input: {
                     : {}),
                   ...(input.environment ? { environment: input.environment } : {}),
                   ...(input.verify ? { verify: input.verify } : {}),
+                  ...(input.spawner !== undefined ? { spawner: input.spawner } : {}),
                 })
                 .pipe(Effect.provideService(Scope.Scope, serverScope)),
             ),

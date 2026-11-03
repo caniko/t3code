@@ -6,6 +6,8 @@ import * as Effect from "effect/Effect";
 import * as Base64Url from "effect/encoding/Base64Url";
 import * as P from "effect/Predicate";
 import * as Redacted from "effect/Redacted";
+import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as HttpClientError from "effect/http/HttpClientError";
 
 import * as OpenCodeRuntime from "../OpenCodeRuntime.ts";
@@ -24,6 +26,11 @@ export class OpenCode2Server extends Context.Service<
   OpenCode2Server,
   {
     readonly withConnection: <A, E, R>(
+      use: (connection: OpenCode2Connection) => Effect.Effect<A, E, R>,
+    ) => Effect.Effect<A, E | OpenCodeRuntime.OpenCodeRuntimeError, R>;
+    /** The server a thread runs in: its owner's runner, or this process for the server user. */
+    readonly withThreadConnection: <A, E, R>(
+      threadId: string,
       use: (connection: OpenCode2Connection) => Effect.Effect<A, E, R>,
     ) => Effect.Effect<A, E | OpenCodeRuntime.OpenCodeRuntimeError, R>;
   }
@@ -117,6 +124,12 @@ export const make = Effect.fn("OpenCode2Server.make")(function* (input: {
   readonly environment: NodeJS.ProcessEnv;
 }) {
   const opencode = yield* OpenCode2Client.OpenCode2Client;
+  const processes = yield* OpenCodeRuntime.OpenCodeThreadProcesses;
+  // Servers are built lazily, after `make`'s own scope and crypto have gone; keep them here.
+  const ownerContext = Context.make(Scope.Scope, yield* Effect.scope).pipe(
+    Context.add(SecureRandom.SecureRandom, yield* SecureRandom.SecureRandom),
+    Context.add(OpenCodeRuntime.OpenCodeRuntime, yield* OpenCodeRuntime.OpenCodeRuntime),
+  );
   const connectTo = Effect.fn("OpenCode2Server.connectTo")(function* (
     url: string,
     password: Redacted.Redacted,
@@ -126,41 +139,96 @@ export const make = Effect.fn("OpenCode2Server.make")(function* (input: {
     const version = yield* verifyServer(api.client);
     return { ...api, url, version, external } satisfies OpenCode2Connection;
   });
-  let latest: OpenCode2Connection | undefined;
-  const remember = (connection: OpenCode2Connection) =>
-    Effect.sync(() => {
-      latest = connection;
-      return connection.version;
-    });
 
   const serverUrl = input.serverUrl.trim();
   if (serverUrl.length > 0) {
+    let latest: OpenCode2Connection | undefined;
+    const remember = (connection: OpenCode2Connection) =>
+      Effect.sync(() => {
+        latest = connection;
+      });
     const connect = connectTo(serverUrl, Redacted.make(input.serverPassword), true).pipe(
       Effect.tap(remember),
     );
+    const withConnection: OpenCode2Server["Service"]["withConnection"] = Effect.fn(
+      "OpenCode2Server.withConnection",
+    )(function (use) {
+      return Effect.suspend(() => (latest === undefined ? connect : Effect.succeed(latest))).pipe(
+        Effect.flatMap(use),
+      );
+    });
     return OpenCode2Server.of({
-      withConnection: Effect.fn("OpenCode2Server.withConnection")(function (use) {
-        return Effect.suspend(() => (latest === undefined ? connect : Effect.succeed(latest))).pipe(
-          Effect.flatMap(use),
-        );
-      }),
+      withConnection,
+      withThreadConnection: Effect.fn("OpenCode2Server.withThreadConnection")(
+        function (_threadId, use) {
+          return withConnection(use);
+        },
+      ),
     });
   }
 
-  const password = yield* generatePassword;
-  const owner = yield* OpenCodeServerOwner.make({
-    binaryPath: input.binaryPath,
-    directory: input.directory,
-    environment: serverEnvironment(input.environment, password),
-    verify: (url) => connectTo(url, password, false).pipe(Effect.flatMap(remember)),
-  });
-  return OpenCode2Server.of({
-    withConnection: Effect.fn("OpenCode2Server.withConnection")(function (use) {
+  /** Each owner gets its own server: one process cannot read two users' files or logins. */
+  const serverFor = Effect.fn("OpenCode2Server.serverFor")(function* (
+    spawner: OpenCodeRuntime.OpenCodeThreadProcess["spawner"] | undefined,
+  ) {
+    const password = yield* generatePassword;
+    let latest: OpenCode2Connection | undefined;
+    const remember = (connection: OpenCode2Connection) =>
+      Effect.sync(() => {
+        latest = connection;
+        return connection.version;
+      });
+    const owner = yield* OpenCodeServerOwner.make({
+      binaryPath: input.binaryPath,
+      directory: input.directory,
+      environment: serverEnvironment(input.environment, password),
+      verify: (url) => connectTo(url, password, false).pipe(Effect.flatMap(remember)),
+      ...(spawner === undefined ? {} : { spawner }),
+    });
+    const withConnection: OpenCode2Server["Service"]["withConnection"] = Effect.fn(
+      "OpenCode2Server.withConnection",
+    )(function (use) {
       return owner.withServer((server) =>
         latest?.url === server.url
           ? use(latest)
           : Effect.die(new Error("OpenCode 2 server was lent before verification.")),
       );
-    }),
+    });
+    return withConnection;
+  });
+
+  const inProcess = yield* serverFor(undefined);
+  const runnerServers = new Map<string, OpenCode2Server["Service"]["withConnection"]>();
+  const runners = yield* Semaphore.make(1);
+  const serverForThread = Effect.fn("OpenCode2Server.serverForThread")(function* (
+    threadId: string,
+  ) {
+    const process = yield* processes.forThread(threadId);
+    if (process === undefined) return inProcess;
+    return yield* runners.withPermit(
+      Effect.suspend(() => {
+        const known = runnerServers.get(process.owner);
+        if (known !== undefined) return Effect.succeed(known);
+        return serverFor(process.spawner).pipe(
+          Effect.provide(ownerContext),
+          Effect.tap((started) =>
+            Effect.sync(() => {
+              runnerServers.set(process.owner, started);
+            }),
+          ),
+        );
+      }),
+    );
+  });
+
+  return OpenCode2Server.of({
+    withConnection: inProcess,
+    withThreadConnection: Effect.fn("OpenCode2Server.withThreadConnection")(
+      function (threadId, use) {
+        return serverForThread(threadId).pipe(
+          Effect.flatMap((withConnection) => withConnection(use)),
+        );
+      },
+    ),
   });
 });

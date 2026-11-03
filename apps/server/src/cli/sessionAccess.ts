@@ -7,7 +7,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Console from "effect/Console";
-import * as Crypto from "effect/Crypto";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Hex from "effect/encoding/Hex";
 import * as Layer from "effect/Layer";
@@ -91,10 +91,8 @@ const groupCreate = Command.make("create", {
   Command.withHandler((flags) =>
     runWithSessionAccess(flags, (access) =>
       Effect.gen(function* () {
-        const crypto = yield* Crypto.Crypto;
-        const groupId = SessionGroupId.make(
-          Hex.encode(yield* crypto.randomBytes(8).pipe(Effect.orDie)),
-        );
+        const random = yield* SecureRandom.SecureRandom;
+        const groupId = SessionGroupId.make(Hex.encode(yield* random.randomBytes(8)));
         yield* access.mutate(flags.as, { type: "group.create", groupId, name: flags.name });
         yield* Console.log(`${groupId}\n`);
       }),

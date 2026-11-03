@@ -3,10 +3,12 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeCryptoPlatform from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Etag from "effect/http/Etag";
@@ -144,7 +146,7 @@ const makeRoutes = (fetchImpl: typeof fetch) =>
         Layer.provideMerge(Etag.layerWeak),
       ),
     ),
-    Layer.provide(NodeServices.layer),
+    Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCryptoPlatform.layer)),
   );
 
 const withServer = <A>(
@@ -154,7 +156,8 @@ const withServer = <A>(
   ) => Promise<A>,
 ) =>
   Effect.gen(function* () {
-    const crypto = yield* Crypto.Crypto;
+    const digest = yield* Digest.Digest;
+    const random = yield* SecureRandom.SecureRandom;
     const unusedSecretStore = ServerSecretStore.ServerSecretStore.of({
       get: () => Effect.succeedNone,
       set: () => Effect.void,
@@ -162,7 +165,8 @@ const withServer = <A>(
       getOrCreateRandom: () => Effect.die("Not used by these routes."),
       remove: () => Effect.void,
     });
-    const requestContext = Context.make(Crypto.Crypto, crypto).pipe(
+    const requestContext = Context.make(Digest.Digest, digest).pipe(
+      Context.add(SecureRandom.SecureRandom, random),
       Context.add(ServerSecretStore.ServerSecretStore, unusedSecretStore),
     );
     const { issuer, fetchImpl } = makeFakeIssuer();
@@ -185,7 +189,7 @@ const withServer = <A>(
         ),
       (server) => Effect.promise(() => server.dispose()),
     );
-  }).pipe(Effect.provide(NodeServices.layer));
+  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCryptoPlatform.layer)));
 
 /** Starts a login and returns the callback path the provider would send the browser to. */
 const beginLogin = async (

@@ -10,8 +10,10 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Stream from "effect/Stream";
 import { ChildProcess } from "effect/process";
+import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import {
+  makeOpenCodeThreadProcesses,
   makePrincipalExecution,
   ProviderRunnerUnsupportedError,
   requireRunnerSupport,
@@ -23,7 +25,10 @@ import { serveRunner } from "./RunnerServer.ts";
 const serverEnv = { HOME: "/var/lib/t3code", SERVER_SECRET: "s3cret" };
 
 const fakePty: Parameters<typeof serveRunner>[0]["spawnPty"] = async (input) => {
-  const child = NodeChildProcess.spawn(input.shell, input.args ?? [], { cwd: input.cwd, env: input.env });
+  const child = NodeChildProcess.spawn(input.shell, input.args ?? [], {
+    cwd: input.cwd,
+    env: input.env,
+  });
   child.stdout.setEncoding("utf8");
   return {
     pid: child.pid!,
@@ -41,7 +46,9 @@ const fakePty: Parameters<typeof serveRunner>[0]["spawnPty"] = async (input) => 
   };
 };
 
-const withRunner = <A, E, R>(use: (input: { socketPath: string; home: string }) => Effect.Effect<A, E, R>) =>
+const withRunner = <A, E, R>(
+  use: (input: { socketPath: string; home: string }) => Effect.Effect<A, E, R>,
+) =>
   Effect.acquireUseRelease(
     Effect.promise(async () => {
       const home = NodeFs.realpathSync(NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3r-")));
@@ -63,15 +70,19 @@ const withRunner = <A, E, R>(use: (input: { socketPath: string; home: string }) 
       }),
   );
 
-const runShell = (spawner: ReturnType<typeof makeRunnerSpawner>, script: string, options: object) =>
+const runShell = (
+  spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
+  script: string,
+  options: object,
+) =>
   Effect.scoped(
-    spawner.spawn(ChildProcess.make("/bin/sh", ["-c", script], options)).pipe(
-      Effect.flatMap((handle) =>
-        Stream.mkString(Stream.decodeText(handle.stdout)).pipe(
-          Effect.zip(handle.exitCode),
+    spawner
+      .spawn(ChildProcess.make("/bin/sh", ["-c", script], options))
+      .pipe(
+        Effect.flatMap((handle) =>
+          Stream.mkString(Stream.decodeText(handle.stdout)).pipe(Effect.zip(handle.exitCode)),
         ),
       ),
-    ),
   );
 
 const rawRequest = (socketPath: string, frame: Parameters<typeof sendFrame>[1]) =>
@@ -79,23 +90,32 @@ const rawRequest = (socketPath: string, frame: Parameters<typeof sendFrame>[1]) 
     () =>
       new Promise<RunnerFrame>((resolve) => {
         const socket = NodeNet.connect(socketPath, () => sendFrame(socket, frame));
-        readFrames(socket, (raw) => { resolve(raw as RunnerFrame); socket.destroy(); }, () => {});
+        readFrames(
+          socket,
+          (raw) => {
+            resolve(raw as RunnerFrame);
+            socket.destroy();
+          },
+          () => {},
+        );
       }),
   );
 
 describe("runner", () => {
-  it.live("runs a process in the requested cwd with the overlaid env and the runner's own HOME", () =>
-    withRunner(({ socketPath, home }) =>
-      Effect.gen(function* () {
-        const spawner = makeRunnerSpawner({ socketPath, serverEnv });
-        const [out, code] = yield* runShell(spawner, 'pwd; echo "$FOO|$HOME|$SERVER_SECRET"', {
-          cwd: home,
-          env: { ...serverEnv, FOO: "bar", HOME: "/evil" },
-        });
-        expect(code).toBe(0);
-        expect(out).toBe(`${home}\nbar|${home}|\n`);
-      }),
-    ),
+  it.live(
+    "runs a process in the requested cwd with the overlaid env and the runner's own HOME",
+    () =>
+      withRunner(({ socketPath, home }) =>
+        Effect.gen(function* () {
+          const spawner = makeRunnerSpawner({ socketPath, serverEnv });
+          const [out, code] = yield* runShell(spawner, 'pwd; echo "$FOO|$HOME|$SERVER_SECRET"', {
+            cwd: home,
+            env: { ...serverEnv, FOO: "bar", HOME: "/evil" },
+          });
+          expect(code).toBe(0);
+          expect(out).toBe(`${home}\nbar|${home}|\n`);
+        }),
+      ),
   );
 
   it.live("rejects a cwd outside the allowed roots and protected env keys", () =>
@@ -104,7 +124,13 @@ describe("runner", () => {
         const spawner = makeRunnerSpawner({ socketPath, serverEnv });
         const escaped = yield* Effect.exit(runShell(spawner, "true", { cwd: "/" }));
         expect(Exit.isFailure(escaped)).toBe(true);
-        const base = { t: "spawn", kind: "process", command: "true", args: [], stdin: "ignore" } as const;
+        const base = {
+          t: "spawn",
+          kind: "process",
+          command: "true",
+          args: [],
+          stdin: "ignore",
+        } as const;
         expect(yield* rawRequest(socketPath, { ...base, env: { PATH: "/evil" } })).toMatchObject({
           t: "error",
           message: "Environment override of PATH is not allowed.",
@@ -140,7 +166,14 @@ describe("runner", () => {
     withRunner(({ socketPath, home }) =>
       Effect.gen(function* () {
         const pty = makeRunnerPtyAdapter({ socketPath, serverEnv });
-        const process = yield* pty.spawn({ shell: "/bin/sh", args: ["-c", "exec cat"], cwd: home, cols: 80, rows: 24, env: {} });
+        const process = yield* pty.spawn({
+          shell: "/bin/sh",
+          args: ["-c", "exec cat"],
+          cwd: home,
+          cols: 80,
+          rows: 24,
+          env: {},
+        });
         const echoed = new Promise<string>((resolve) => {
           let seen = "";
           process.onData((data) => {
@@ -148,7 +181,9 @@ describe("runner", () => {
             if (seen.includes("hi\n")) resolve(seen);
           });
         });
-        const exited = new Promise<number>((resolve) => process.onExit((event) => resolve(event.exitCode)));
+        const exited = new Promise<number>((resolve) =>
+          process.onExit((event) => resolve(event.exitCode)),
+        );
         process.write("hi\n");
         expect(yield* Effect.promise(() => echoed)).toContain("hi");
         process.kill("SIGTERM");
@@ -157,36 +192,78 @@ describe("runner", () => {
     ),
   );
 
-  it.live("fails closed when the runner socket is missing or the principal is not a user name", () =>
-    Effect.gen(function* () {
-      const execution = makePrincipalExecution({
-        ownerOf: (threadId) => Effect.succeed(threadId),
-        ownersOfPath: () => Effect.succeed([]),
-        socketExists: () => Effect.succeed(false),
-        socketTemplate: "/run/t3code/runner-%u.sock",
-        serverEnv,
-      });
-      const missing = yield* Effect.flip(execution.spawnerFor("dejana"));
-      expect(missing.message).toContain("/run/t3code/runner-dejana.sock");
-      const traversal = yield* Effect.flip(execution.runnerFor("../../etc/x"));
-      expect(traversal.socketPath).not.toContain("..");
-    }),
+  it.live(
+    "fails closed when the runner socket is missing or the principal is not a user name",
+    () =>
+      Effect.gen(function* () {
+        const execution = makePrincipalExecution({
+          ownerOf: (threadId) => Effect.succeed(threadId),
+          ownersOfPath: () => Effect.succeed([]),
+          socketExists: () => Effect.succeed(false),
+          socketTemplate: "/run/t3code/runner-%u.sock",
+          serverEnv,
+        });
+        const missing = yield* Effect.flip(execution.spawnerFor("dejana"));
+        expect(missing.message).toContain("/run/t3code/runner-dejana.sock");
+        const traversal = yield* Effect.flip(execution.runnerFor("../../etc/x"));
+        expect(traversal.socketPath).not.toContain("..");
+      }),
   );
 
-  it.live("fails closed for providers that spawn in-process when a runner principal owns the thread", () =>
-    Effect.gen(function* () {
-      const execution = makePrincipalExecution({
-        ownerOf: (threadId) => Effect.succeed(threadId === "mine" ? undefined : "dejana"),
-        ownersOfPath: () => Effect.succeed([]),
-        socketExists: () => Effect.succeed(true),
-        socketTemplate: "/run/t3code/runner-%u.sock",
-        serverEnv,
-      });
-      yield* requireRunnerSupport(execution, "mine", "cursor");
-      yield* requireRunnerSupport(execution, "theirs", "codex");
-      const refused = yield* Effect.flip(requireRunnerSupport(execution, "theirs", "cursor"));
-      expect(refused).toBeInstanceOf(ProviderRunnerUnsupportedError);
-      expect(refused.message).toContain("not supported for signed-in users yet");
-    }),
+  it.live("runs an OpenCode server in the thread owner's runner", () =>
+    withRunner(({ socketPath, home }) =>
+      Effect.gen(function* () {
+        const execution = makePrincipalExecution({
+          ownerOf: (threadId) => Effect.succeed(threadId === "mine" ? undefined : "dejana"),
+          ownersOfPath: () => Effect.succeed([]),
+          socketExists: (path) => Effect.succeed(path === socketPath),
+          socketTemplate: socketPath,
+          serverEnv,
+        });
+        const processes = makeOpenCodeThreadProcesses(execution);
+        expect(yield* processes.forThread("mine")).toBeUndefined();
+        const theirs = yield* processes.forThread("theirs");
+        expect(theirs?.owner).toBe("dejana");
+        expect(yield* processes.forThread("theirs-2")).toMatchObject({ owner: "dejana" });
+        const [out, code] = yield* runShell(
+          theirs!.spawner,
+          'pwd; echo "$HOME|$OPENCODE_LOG|$SERVER_SECRET"',
+          { cwd: home, env: { ...serverEnv, OPENCODE_LOG: "debug", HOME: "/evil" } },
+        );
+        expect(code).toBe(0);
+        expect(out).toBe(`${home}\n${home}|debug|\n`);
+
+        const offline = makePrincipalExecution({
+          ownerOf: () => Effect.succeed("dejana"),
+          ownersOfPath: () => Effect.succeed([]),
+          socketExists: () => Effect.succeed(false),
+          socketTemplate: "/run/t3code/runner-%u.sock",
+          serverEnv,
+        });
+        const missing = yield* Effect.flip(
+          makeOpenCodeThreadProcesses(offline).forThread("theirs"),
+        );
+        expect(missing.detail).toContain("/run/t3code/runner-dejana.sock");
+      }),
+    ),
+  );
+
+  it.live(
+    "fails closed for providers that spawn in-process when a runner principal owns the thread",
+    () =>
+      Effect.gen(function* () {
+        const execution = makePrincipalExecution({
+          ownerOf: (threadId) => Effect.succeed(threadId === "mine" ? undefined : "dejana"),
+          ownersOfPath: () => Effect.succeed([]),
+          socketExists: () => Effect.succeed(true),
+          socketTemplate: "/run/t3code/runner-%u.sock",
+          serverEnv,
+        });
+        yield* requireRunnerSupport(execution, "mine", "cursor");
+        yield* requireRunnerSupport(execution, "theirs", "codex");
+        const refused = yield* Effect.flip(requireRunnerSupport(execution, "theirs", "cursor"));
+        expect(refused).toBeInstanceOf(ProviderRunnerUnsupportedError);
+        expect(refused.message).toContain("not supported for signed-in users yet");
+      }),
   );
 });

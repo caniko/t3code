@@ -10,8 +10,17 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
+import * as OpenCodeRuntime from "@t3tools/provider-opencode/server/OpenCodeRuntime";
+import type { OpenCodeThreadProcess } from "@t3tools/provider-opencode/server/OpenCodeRuntime";
+
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import { makeRunnerPtyAdapter, makeRunnerSpawner, type RunnerEndpoint } from "./RunnerClient.ts";
+
+type OpenCodeThreadProcessesShape = {
+  readonly forThread: (
+    threadId: string,
+  ) => Effect.Effect<OpenCodeThreadProcess | undefined, OpenCodeRuntime.OpenCodeRuntimeError>;
+};
 
 export class RunnerUnavailableError extends Schema.TaggedError<RunnerUnavailableError>()(
   "RunnerUnavailableError",
@@ -26,15 +35,23 @@ export class RunnerUnavailableError extends Schema.TaggedError<RunnerUnavailable
 export interface PrincipalExecutionShape {
   readonly spawnerFor: (
     threadId: string,
-  ) => Effect.Effect<ChildProcessSpawner.ChildProcessSpawner["Service"] | undefined, RunnerUnavailableError>;
+  ) => Effect.Effect<
+    ChildProcessSpawner.ChildProcessSpawner["Service"] | undefined,
+    RunnerUnavailableError
+  >;
   readonly ptyFor: (
     threadId: string,
   ) => Effect.Effect<PtyAdapter.PtyAdapter["Service"] | undefined, RunnerUnavailableError>;
-  readonly runnerFor: (threadId: string) => Effect.Effect<RunnerEndpoint | undefined, RunnerUnavailableError>;
+  readonly runnerFor: (
+    threadId: string,
+  ) => Effect.Effect<RunnerEndpoint | undefined, RunnerUnavailableError>;
   /** Work inside a non-default principal's thread worktree belongs to that principal's runner. */
   readonly spawnerForPath: (
     cwd: string,
-  ) => Effect.Effect<ChildProcessSpawner.ChildProcessSpawner["Service"] | undefined, RunnerUnavailableError>;
+  ) => Effect.Effect<
+    ChildProcessSpawner.ChildProcessSpawner["Service"] | undefined,
+    RunnerUnavailableError
+  >;
 }
 
 const unwired: PrincipalExecutionShape = {
@@ -76,8 +93,12 @@ export const passthroughAgentScope: AgentScopeShape = {
 };
 
 export const makePrincipalExecution = (input: {
-  readonly ownerOf: (threadId: string) => Effect.Effect<string | undefined, ProjectionStore.ProjectionStoreV2Error>;
-  readonly ownersOfPath: (cwd: string) => Effect.Effect<ReadonlyArray<string>, ProjectionStore.ProjectionStoreV2Error>;
+  readonly ownerOf: (
+    threadId: string,
+  ) => Effect.Effect<string | undefined, ProjectionStore.ProjectionStoreV2Error>;
+  readonly ownersOfPath: (
+    cwd: string,
+  ) => Effect.Effect<ReadonlyArray<string>, ProjectionStore.ProjectionStoreV2Error>;
   readonly socketExists: (socketPath: string) => Effect.Effect<boolean>;
   readonly socketTemplate: string;
   readonly serverEnv: NodeJS.ProcessEnv;
@@ -90,12 +111,23 @@ export const makePrincipalExecution = (input: {
     });
   const endpointFor = Effect.fn("PrincipalExecution.endpointFor")(function* (principal: string) {
     if (principal === DEFAULT_PRINCIPAL_ID) return undefined;
-    const socketPath = runnerSocketPath(input.socketTemplate, USERNAME.test(principal) ? principal : "invalid");
+    const socketPath = runnerSocketPath(
+      input.socketTemplate,
+      USERNAME.test(principal) ? principal : "invalid",
+    );
     if (!USERNAME.test(principal)) {
-      return yield* new RunnerUnavailableError({ principal, socketPath, reason: "not a valid Linux user name" });
+      return yield* new RunnerUnavailableError({
+        principal,
+        socketPath,
+        reason: "not a valid Linux user name",
+      });
     }
     if (!(yield* input.socketExists(socketPath))) {
-      return yield* new RunnerUnavailableError({ principal, socketPath, reason: "no runner socket" });
+      return yield* new RunnerUnavailableError({
+        principal,
+        socketPath,
+        reason: "no runner socket",
+      });
     }
     return { socketPath, serverEnv: input.serverEnv, principal } satisfies RunnerEndpoint;
   });
@@ -120,7 +152,9 @@ export const makePrincipalExecution = (input: {
     spawnerFor: (threadId) =>
       runnerFor(threadId).pipe(Effect.map((endpoint) => endpoint && makeRunnerSpawner(endpoint))),
     ptyFor: (threadId) =>
-      runnerFor(threadId).pipe(Effect.map((endpoint) => endpoint && makeRunnerPtyAdapter(endpoint))),
+      runnerFor(threadId).pipe(
+        Effect.map((endpoint) => endpoint && makeRunnerPtyAdapter(endpoint)),
+      ),
     spawnerForPath: (cwd) =>
       runnerForPath(cwd).pipe(Effect.map((endpoint) => endpoint && makeRunnerSpawner(endpoint))),
   };
@@ -138,9 +172,7 @@ export const layer = Layer.effect(
     const shape = makePrincipalExecution({
       ownersOfPath: store.getWorktreeOwners,
       ownerOf: (threadId) =>
-        store.getThreadShell(threadId as never).pipe(
-          Effect.map((shell) => shell?.ownerPrincipal),
-        ),
+        store.getThreadShell(threadId as never).pipe(Effect.map((shell) => shell?.ownerPrincipal)),
       socketExists: (socketPath) =>
         fs.stat(socketPath).pipe(
           Effect.map((info) => info.type === "Socket"),
@@ -167,7 +199,7 @@ export class ProviderRunnerUnsupportedError extends Schema.TaggedError<ProviderR
 }
 
 /** Drivers whose processes go through the runner; every other driver spawns in-process and so must not serve a runner principal. */
-const RUNNER_DRIVERS: ReadonlySet<string> = new Set(["codex", "claudeAgent", "remote"]);
+const RUNNER_DRIVERS: ReadonlySet<string> = new Set(["codex", "claudeAgent", "opencode", "remote"]);
 
 export const requireRunnerSupport = Effect.fn("PrincipalExecution.requireRunnerSupport")(function* (
   execution: PrincipalExecutionShape,
@@ -177,6 +209,35 @@ export const requireRunnerSupport = Effect.fn("PrincipalExecution.requireRunnerS
   if (RUNNER_DRIVERS.has(driver)) return;
   const runner = yield* execution.runnerFor(threadId);
   if (runner !== undefined) {
-    return yield* new ProviderRunnerUnsupportedError({ driver, principal: runner.principal ?? "unknown" });
+    return yield* new ProviderRunnerUnsupportedError({
+      driver,
+      principal: runner.principal ?? "unknown",
+    });
   }
+});
+
+/**
+ * OpenCode picks its server process per thread from inside the provider package, which cannot reach
+ * this module. Threads of one owner share the server they resolve here.
+ */
+export const makeOpenCodeThreadProcesses = (
+  execution: PrincipalExecutionShape,
+): OpenCodeThreadProcessesShape => ({
+  forThread: Effect.fn("PrincipalExecution.openCodeProcess")(function* (threadId: string) {
+    const runner = yield* execution.runnerFor(threadId).pipe(
+      Effect.mapError(
+        (cause) =>
+          new OpenCodeRuntime.OpenCodeRuntimeError({
+            operation: "startOpenCodeServerProcess",
+            detail: cause.message,
+            cause,
+          }),
+      ),
+    );
+    if (runner === undefined) return undefined;
+    return {
+      owner: runner.principal ?? runner.socketPath,
+      spawner: makeRunnerSpawner(runner),
+    } satisfies OpenCodeThreadProcess;
+  }),
 });

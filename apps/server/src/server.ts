@@ -488,6 +488,14 @@ const layerCheckpointStore = CheckpointStore.layer.pipe(Layer.provide(layerVcsDr
 
 const layerPortScanner = PortScanner.layer.pipe(Layer.provide(ProcessRunner.layer));
 
+const layerOpenCodeThreadProcesses = Layer.effect(
+  OpenCodeRuntime.OpenCodeThreadProcesses,
+  Effect.gen(function* () {
+    const execution = yield* PrincipalExecution.PrincipalExecution;
+    return PrincipalExecution.makeOpenCodeThreadProcesses(execution);
+  }),
+);
+
 const layerTerminal = TerminalManager.layer.pipe(
   Layer.provide(PrincipalExecution.layer),
   Layer.provide(layerPtyAdapter),
@@ -683,6 +691,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   Layer.provideMerge(ProviderRegistry.layer),
   Layer.provideMerge(ProviderInstanceRegistryHydration.layer),
   Layer.provideMerge(PrincipalExecution.layer),
+  Layer.provideMerge(layerOpenCodeThreadProcesses),
   Layer.provideMerge(ProjectionStoreV2.layer),
   // Provider hydration builds the Claude runner, which reports agents to the same scanner the
   // terminal and preview layers share.
