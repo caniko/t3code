@@ -1,0 +1,15 @@
+[ci]
+platform = "github"
+provider = "actions"
+runtime = "nix"
+runner = "ubuntu-24.04"
+nix_builds = [".#t3code", ".#checks.x86_64-linux.desktop-launcher"]
+
+[ci.nix_build]
+only = true
+timeout_minutes = 90
+max_parallel = 2
+max_jobs = 2
+cores = 2
+capture_results = true
+artifact_retention_days = 7
