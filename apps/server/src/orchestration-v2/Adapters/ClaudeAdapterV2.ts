@@ -1048,7 +1048,11 @@ export const layerQueryRunner: Layer.Layer<
             options.spawnClaudeCodeProcess ??
             ((spawnOptions: ClaudeSpawnOptions) => {
               if (runner !== undefined) {
-                return spawnClaudeViaRunner(runner, spawnOptions, appendStderr) as ClaudeSpawnedProcess;
+                return spawnClaudeViaRunner(
+                  runner,
+                  spawnOptions,
+                  appendStderr,
+                ) as ClaudeSpawnedProcess;
               }
               if (platform !== "win32") {
                 // Node can report "exit" before it has read the stderr the CLI wrote.

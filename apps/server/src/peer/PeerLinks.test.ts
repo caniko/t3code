@@ -139,9 +139,9 @@ it.effect("routes peer reads to readers and sees uncommitted link updates", () =
     `;
       const { queries, trace } = traceSqlRouting();
       yield* links.list("owner").pipe(trace);
-      expect(Option.getOrThrow(yield* links.get("owner", box.environmentId).pipe(trace)).label).toBe(
-        "Box",
-      );
+      expect(
+        Option.getOrThrow(yield* links.get("owner", box.environmentId).pipe(trace)).label,
+      ).toBe("Box");
       const reads = queries.filter(({ query }) =>
         query.includes("SELECT * FROM peer_environment_links"),
       );
@@ -663,17 +663,15 @@ it.effect("keeps each principal's links to itself", () =>
       const b = yield* serveB(box);
       const a = yield* makeA(laptop);
       const linkAs = (principal: string) =>
-        b.auth
-          .issuePairingCredential()
-          .pipe(
-            Effect.flatMap((pairing) =>
-              a.links.link(principal, {
-                url: b.url,
-                pairingCode: pairing.credential,
-                access: "auto",
-              }),
-            ),
-          );
+        b.auth.issuePairingCredential().pipe(
+          Effect.flatMap((pairing) =>
+            a.links.link(principal, {
+              url: b.url,
+              pairingCode: pairing.credential,
+              access: "auto",
+            }),
+          ),
+        );
       yield* linkAs("owner");
       yield* linkAs("principal:alice");
 
