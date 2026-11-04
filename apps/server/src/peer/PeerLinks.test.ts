@@ -138,8 +138,10 @@ it.effect("routes peer reads to readers and sees uncommitted link updates", () =
       )
     `;
       const { queries, trace } = traceSqlRouting();
-      yield* links.list.pipe(trace);
-      expect(Option.getOrThrow(yield* links.get(box.environmentId).pipe(trace)).label).toBe("Box");
+      yield* links.list("owner").pipe(trace);
+      expect(Option.getOrThrow(yield* links.get("owner", box.environmentId).pipe(trace)).label).toBe(
+        "Box",
+      );
       const reads = queries.filter(({ query }) =>
         query.includes("SELECT * FROM peer_environment_links"),
       );
@@ -148,14 +150,14 @@ it.effect("routes peer reads to readers and sees uncommitted link updates", () =
       yield* sql.withTransaction(
         Effect.gen(function* () {
           yield* sql`UPDATE peer_environment_links SET label = 'Uncommitted box'`;
-          expect(Option.getOrThrow(yield* links.get(box.environmentId)).label).toBe(
+          expect(Option.getOrThrow(yield* links.get("owner", box.environmentId)).label).toBe(
             "Uncommitted box",
           );
-          expect((yield* links.list)[0]?.label).toBe("Uncommitted box");
+          expect((yield* links.list("owner"))[0]?.label).toBe("Uncommitted box");
         }),
       );
-      expect(yield* links.unlink(box.environmentId)).toBe(true);
-      expect(yield* links.list).toEqual([]);
+      expect(yield* links.unlink("owner", box.environmentId)).toBe(true);
+      expect(yield* links.list("owner")).toEqual([]);
     }),
   ),
 );
@@ -469,16 +471,16 @@ it.effect("a linked peer that is renamed shows its new name", () =>
       const b = yield* serveB(box);
       const a = yield* makeA(laptop);
       const pairing = yield* b.auth.issuePairingCredential();
-      yield* a.links.link({ url: b.url, pairingCode: pairing.credential, access: "auto" });
+      yield* a.links.link("owner", { url: b.url, pairingCode: pairing.credential, access: "auto" });
 
       yield* Ref.set(b.descriptor, descriptorOf(box.environmentId, "Box Mini"));
-      expect((yield* a.links.resolve(box.environmentId)).link.label).toBe("Box Mini");
-      const stored = yield* a.links.get(box.environmentId);
+      expect((yield* a.links.resolve("owner", box.environmentId)).link.label).toBe("Box Mini");
+      const stored = yield* a.links.get("owner", box.environmentId);
       expect(Option.map(stored, (link) => link.label)).toEqual(Option.some("Box Mini"));
 
       yield* Ref.set(b.descriptor, descriptorOf(box.environmentId, "Box Studio"));
-      expect((yield* a.links.list).map((link) => link.label)).toEqual(["Box Studio"]);
-      const storedAfterList = yield* a.links.get(box.environmentId);
+      expect((yield* a.links.list("owner")).map((link) => link.label)).toEqual(["Box Studio"]);
+      const storedAfterList = yield* a.links.get("owner", box.environmentId);
       expect(Option.map(storedAfterList, (link) => link.label)).toEqual(Option.some("Box Studio"));
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),

@@ -122,9 +122,10 @@ it.effect("keeps a link healthy when the peer refuses a call", () =>
       const links = Context.get(context, PeerLinks.PeerLinks);
       const client = Context.get(context, PeerMcpClient.PeerMcpClient);
       yield* linkTo(links, b);
-      yield* links.recordOutcome(box.environmentId, { error: "earlier outage" });
+      yield* links.recordOutcome("owner", box.environmentId, { error: "earlier outage" });
       const refused = yield* client
         .call({
+          principal: "owner",
           environmentId: box.environmentId,
           tool: "refuse",
           arguments: {},
@@ -134,7 +135,7 @@ it.effect("keeps a link healthy when the peer refuses a call", () =>
         .pipe(Effect.flip);
       // The agent hears the peer's own refusal; the link answered, so it is not failing.
       expect(refused).toMatchObject({ code: refusal.code, message: refusal.message });
-      const link = yield* links.get(box.environmentId);
+      const link = yield* links.get("owner", box.environmentId);
       expect(link._tag === "Some" ? link.value.lastError : "missing").toBeNull();
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
@@ -198,7 +199,8 @@ it.effect("renews a missing peer session once and reuses its replacement", () =>
                   url: "https://peer.example",
                   token: "fixture",
                 }),
-              recordOutcome: (_, outcome) => Effect.sync(() => outcomes.push(outcome.error)),
+              recordOutcome: (_principal, _environmentId, outcome) =>
+                Effect.sync(() => outcomes.push(outcome.error)),
             }),
           ),
         ),
@@ -220,6 +222,7 @@ it.effect("renews a missing peer session once and reuses its replacement", () =>
     // An answer with neither a result nor an error is the link's problem, not the call's.
     const empty = yield* client
       .call({
+        principal: "owner",
         environmentId: box.environmentId,
         tool: "probe",
         arguments: {},
