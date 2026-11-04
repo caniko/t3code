@@ -30,7 +30,7 @@
                 inherit pnpm;
                 inherit (final) pname version src pnpmWorkspaces;
                 fetcherVersion = 4;
-                hash = "sha256-2+4MKEw+e0ovhvOz3pijexYlvsXTASI6lvUq1rAKq/M=";
+                hash = "sha256-uTgZxFRAW8EktSHo6pOZKWo2T3argSAFdW2nAsXkgqM=";
               };
             }
           );
