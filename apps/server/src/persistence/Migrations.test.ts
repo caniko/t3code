@@ -4,10 +4,13 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as Migrator from "effect/sql/Migrator";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { migrationManifest, runMigrations } from "./Migrations.ts";
+import SessionAccess from "./Migrations/080_SessionAccess.ts";
+import PeerLinkOwner from "./Migrations/081_PeerLinkOwner.ts";
 
 const v2Migrations = migrationManifest.filter(([id]) => id >= 55);
 const newerMigrationId = Math.max(...migrationManifest.map(([id]) => id)) + 1;
@@ -26,6 +29,96 @@ const v2TableCount = Effect.gen(function* () {
     SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'orchestration_v2_%'
   `;
   return rows.length;
+});
+
+const ledgerRows = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  return yield* sql<{
+    readonly migration_id: number;
+    readonly name: string;
+    readonly created_at: string;
+  }>`SELECT migration_id, name, created_at FROM effect_sql_migrations ORDER BY migration_id`;
+});
+
+const sharingRows = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  return {
+    groups: yield* sql`SELECT * FROM session_groups ORDER BY id`,
+    members: yield* sql`SELECT * FROM session_group_members ORDER BY group_id, principal`,
+    threads: yield* sql`SELECT * FROM session_group_threads ORDER BY group_id, thread_id`,
+    shares: yield* sql`SELECT * FROM session_shares ORDER BY thread_id, principal`,
+  };
+});
+
+const peerLinks = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  return yield* sql`
+    SELECT owner_principal, environment_id, secret_name, label, urls_json, access,
+           linked_at, expires_at, last_reached_at, last_error, fenced
+    FROM peer_environment_links
+    ORDER BY owner_principal, environment_id
+  `;
+});
+
+const seedSharingRows = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`
+    INSERT INTO session_groups (id, name, owner_principal, created_at)
+    VALUES ('group-1', 'Platform', 'alice', '2026-10-03 00:00:00')
+  `;
+  yield* sql`
+    INSERT INTO session_group_members (group_id, principal, role)
+    VALUES ('group-1', 'bob', 'participant')
+  `;
+  yield* sql`
+    INSERT INTO session_group_threads (group_id, thread_id) VALUES ('group-1', 'thread-1')
+  `;
+  yield* sql`
+    INSERT INTO session_shares (thread_id, principal, role) VALUES ('thread-1', 'carol', 'viewer')
+  `;
+});
+
+const seedLegacySharingHistory = (withPeerLinkOwner: boolean) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    yield* runMigrations({ toMigrationInclusive: 77 });
+    // The abandoned sharing build recorded 080/081 at 78/79.
+    yield* Migrator.make({})({
+      loader: Migrator.fromRecord({
+        "78_SessionAccess": SessionAccess,
+        ...(withPeerLinkOwner ? { "79_PeerLinkOwner": PeerLinkOwner } : {}),
+      }),
+    });
+    yield* sql`
+      UPDATE effect_sql_migrations SET created_at = '2026-10-01 00:00:00' WHERE migration_id = 78
+    `;
+    if (withPeerLinkOwner) {
+      yield* sql`
+        UPDATE effect_sql_migrations SET created_at = '2026-10-02 00:00:00' WHERE migration_id = 79
+      `;
+    }
+  });
+
+const assertSharingSchemaUpgraded = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  assert.deepStrictEqual(yield* history, migrationManifest);
+  assert.deepStrictEqual(yield* runMigrations(), []);
+  assert.deepStrictEqual(
+    yield* sql`
+      SELECT name FROM sqlite_master
+      WHERE type = 'index' AND name = 'idx_orch_events_correlation_id'
+    `,
+    [],
+  );
+  for (const index of [
+    "orchestration_v2_projection_threads_subagent_result_idx",
+    "orchestration_v2_projection_runs_delegated_delivery_idx",
+  ]) {
+    assert.deepStrictEqual(
+      yield* sql`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ${index}`,
+      [{ name: index }],
+    );
+  }
 });
 
 describe("runMigrations", () => {
@@ -161,6 +254,239 @@ describe("runMigrations", () => {
       `;
 
       assert.deepStrictEqual(yield* runMigrations(), []);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+});
+
+describe("legacy sharing migration history", () => {
+  it.effect.each([false, true])(
+    "upgrades a database that recorded the sharing migrations at 78/79 (peer link owner: %s)",
+    (withPeerLinkOwner) =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* seedLegacySharingHistory(withPeerLinkOwner);
+        yield* seedSharingRows;
+        const sharingBefore = yield* sharingRows;
+
+        if (withPeerLinkOwner) {
+          yield* sql`
+            INSERT INTO peer_environment_links (
+              owner_principal, environment_id, secret_name, label, urls_json, access,
+              linked_at, expires_at, last_reached_at, last_error, fenced
+            )
+            VALUES
+              ('alice', 'env-shared', 'secret-alice', 'Alice', '["https://alice.example"]',
+               'full', '2026-10-04 00:00:00', '2027-01-01 00:00:00', NULL, NULL, 0),
+              ('bob', 'env-shared', 'secret-bob', 'Bob', '["https://bob.example"]',
+               'read', '2026-10-05 00:00:00', '2027-02-01 00:00:00',
+               '2026-10-06 00:00:00', 'offline', 1)
+          `;
+          const linksBefore = yield* peerLinks;
+
+          assert.deepStrictEqual(yield* runMigrations(), [
+            [78, "DropOrchestrationEventCorrelationIndex"],
+            [79, "DelegatedRecoveryIndexes"],
+          ]);
+
+          assert.deepStrictEqual(yield* peerLinks, linksBefore);
+          assert.deepStrictEqual(
+            (yield* ledgerRows).filter((row) => row.migration_id >= 80),
+            [
+              { migration_id: 80, name: "SessionAccess", created_at: "2026-10-01 00:00:00" },
+              { migration_id: 81, name: "PeerLinkOwner", created_at: "2026-10-02 00:00:00" },
+            ],
+          );
+        } else {
+          yield* sql`
+            INSERT INTO peer_environment_links (
+              environment_id, secret_name, label, urls_json, access, linked_at, expires_at,
+              last_reached_at, last_error, fenced
+            )
+            VALUES (
+              'env-legacy', 'secret-legacy', 'Legacy', '["https://legacy.example"]', 'full',
+              '2026-10-04 00:00:00', '2027-01-01 00:00:00', NULL, NULL, 0
+            )
+          `;
+
+          assert.deepStrictEqual(yield* runMigrations(), [
+            [78, "DropOrchestrationEventCorrelationIndex"],
+            [79, "DelegatedRecoveryIndexes"],
+            [81, "PeerLinkOwner"],
+          ]);
+
+          assert.deepStrictEqual(yield* peerLinks, [
+            {
+              owner_principal: "owner",
+              environment_id: "env-legacy",
+              secret_name: "secret-legacy",
+              label: "Legacy",
+              urls_json: '["https://legacy.example"]',
+              access: "full",
+              linked_at: "2026-10-04 00:00:00",
+              expires_at: "2027-01-01 00:00:00",
+              last_reached_at: null,
+              last_error: null,
+              fenced: 0,
+            },
+          ]);
+          assert.deepStrictEqual(
+            (yield* ledgerRows).filter((row) => row.migration_id === 80),
+            [{ migration_id: 80, name: "SessionAccess", created_at: "2026-10-01 00:00:00" }],
+          );
+        }
+
+        yield* assertSharingSchemaUpgraded;
+        assert.deepStrictEqual(yield* sharingRows, sharingBefore);
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect.each([
+    "mixed",
+    "later",
+    "unknown",
+    "missing prerequisite",
+    "missing index",
+    "missing owner",
+  ] as const)("fails closed on a %s sharing history without changing the database", (kind) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* seedLegacySharingHistory(true);
+      yield* seedSharingRows;
+      if (kind === "mixed") {
+        yield* sql`
+            UPDATE effect_sql_migrations SET name = 'DelegatedRecoveryIndexes' WHERE migration_id = 79
+          `;
+      } else if (kind === "later") {
+        yield* sql`
+            INSERT INTO effect_sql_migrations (migration_id, name) VALUES (80, 'FutureSharing')
+          `;
+      } else if (kind === "unknown") {
+        yield* sql`UPDATE effect_sql_migrations SET name = 'UnknownFork' WHERE migration_id = 79`;
+      } else if (kind === "missing prerequisite") {
+        yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 77`;
+      } else if (kind === "missing index") {
+        yield* sql`DROP INDEX idx_session_shares_principal`;
+      } else {
+        yield* sql`ALTER TABLE peer_environment_links RENAME COLUMN owner_principal TO invalid_owner`;
+      }
+      const ledgerBefore = yield* ledgerRows;
+      const sharingBefore = yield* sharingRows;
+
+      assert.ok(Exit.isFailure(yield* Effect.exit(runMigrations())));
+
+      assert.deepStrictEqual(yield* ledgerRows, ledgerBefore);
+      assert.deepStrictEqual(yield* sharingRows, sharingBefore);
+      assert.deepStrictEqual(
+        yield* sql`
+            SELECT name FROM sqlite_master
+            WHERE type = 'index' AND name = 'idx_orch_events_correlation_id'
+          `,
+        [{ name: "idx_orch_events_correlation_id" }],
+      );
+      assert.deepStrictEqual(
+        yield* sql`
+            SELECT name FROM sqlite_master
+            WHERE type = 'index'
+              AND name = 'orchestration_v2_projection_runs_delegated_delivery_idx'
+          `,
+        [],
+      );
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect.each([77, 78, 79, 80])("does not reconcile legacy sharing past limit %s", (limit) =>
+    Effect.gen(function* () {
+      yield* seedLegacySharingHistory(true);
+      yield* seedSharingRows;
+      const ledgerBefore = yield* ledgerRows;
+      const sharingBefore = yield* sharingRows;
+
+      const exit = yield* Effect.exit(runMigrations({ toMigrationInclusive: limit }));
+      assert.strictEqual(Exit.isFailure(exit), limit >= 78);
+
+      assert.deepStrictEqual(yield* ledgerRows, ledgerBefore);
+      assert.deepStrictEqual(yield* sharingRows, sharingBefore);
+      assert.isFalse((yield* ledgerRows).some((row) => row.migration_id > 79));
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect("can stop a SessionAccess-only upgrade at 80 before adding peer owners", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* seedLegacySharingHistory(false);
+      yield* seedSharingRows;
+      const sharingBefore = yield* sharingRows;
+
+      assert.deepStrictEqual(yield* runMigrations({ toMigrationInclusive: 80 }), [
+        [78, "DropOrchestrationEventCorrelationIndex"],
+        [79, "DelegatedRecoveryIndexes"],
+      ]);
+      assert.deepStrictEqual(
+        yield* history,
+        migrationManifest.filter(([id]) => id <= 80),
+      );
+      assert.deepStrictEqual(
+        yield* sql`SELECT name FROM pragma_table_info('peer_environment_links') WHERE name = 'owner_principal'`,
+        [],
+      );
+      assert.deepStrictEqual(yield* runMigrations(), [[81, "PeerLinkOwner"]]);
+      yield* assertSharingSchemaUpgraded;
+      assert.deepStrictEqual(yield* sharingRows, sharingBefore);
+    }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
+  );
+
+  it.effect("rolls back sharing DDL and ledger together when the ledger write fails", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* seedLegacySharingHistory(true);
+      yield* seedSharingRows;
+      yield* sql`
+        INSERT INTO peer_environment_links (
+          owner_principal, environment_id, secret_name, label, urls_json, access,
+          linked_at, expires_at, last_reached_at, last_error, fenced
+        )
+        VALUES
+          ('alice', 'env-shared', 'secret-alice', 'Alice', '["https://alice.example"]',
+           'full', '2026-10-04 00:00:00', '2027-01-01 00:00:00', NULL, NULL, 0),
+          ('bob', 'env-shared', 'secret-bob', 'Bob', '["https://bob.example"]',
+           'read', '2026-10-05 00:00:00', '2027-02-01 00:00:00',
+           '2026-10-06 00:00:00', 'offline', 1)
+      `;
+      const ledgerBefore = yield* ledgerRows;
+      const sharingBefore = yield* sharingRows;
+      const linksBefore = yield* peerLinks;
+
+      yield* sql`
+        CREATE TRIGGER abort_sharing_ledger_insert BEFORE INSERT ON effect_sql_migrations
+        WHEN NEW.migration_id >= 78
+        BEGIN SELECT RAISE(ABORT, 'injected ledger failure'); END
+      `;
+      assert.ok(Exit.isFailure(yield* Effect.exit(runMigrations())));
+
+      assert.deepStrictEqual(yield* ledgerRows, ledgerBefore);
+      assert.deepStrictEqual(yield* sharingRows, sharingBefore);
+      assert.deepStrictEqual(yield* peerLinks, linksBefore);
+      assert.deepStrictEqual(
+        yield* sql`
+          SELECT name FROM sqlite_master
+          WHERE type = 'index' AND name = 'idx_orch_events_correlation_id'
+        `,
+        [{ name: "idx_orch_events_correlation_id" }],
+      );
+      assert.deepStrictEqual(
+        yield* sql`
+          SELECT name FROM sqlite_master
+          WHERE type = 'index'
+            AND name = 'orchestration_v2_projection_runs_delegated_delivery_idx'
+        `,
+        [],
+      );
+
+      yield* sql`DROP TRIGGER abort_sharing_ledger_insert`;
+      yield* runMigrations();
+      yield* assertSharingSchemaUpgraded;
+      assert.deepStrictEqual(yield* sharingRows, sharingBefore);
+      assert.deepStrictEqual(yield* peerLinks, linksBefore);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 });
