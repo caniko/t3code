@@ -1,5 +1,6 @@
 import {
   OrchestratorMcpFailure,
+  OrchestratorMcpThreadInterruptResult,
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadResult,
   OrchestratorMcpThreadSendResult,
@@ -31,6 +32,7 @@ import * as ServerConfig from "../config.ts";
 import { mcpToolSession, type McpToolSession } from "../mcp/AcpMcpStdioBridge.ts";
 import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
+import { redactCredentials, resolveThreadTransport } from "./threadTransport.ts";
 
 /**
  * Short enough that a run which stops to ask the user something is noticed
@@ -52,12 +54,11 @@ export class ThreadServerNotRunningError extends Schema.TaggedError<ThreadServer
 
 export class ThreadServerUnreachableError extends Schema.TaggedError<ThreadServerUnreachableError>()(
   "ThreadServerUnreachableError",
-  { origin: Schema.String, cause: Schema.Defect() },
+  { origin: Schema.String, reason: Schema.String },
 ) {
   override readonly [Runtime.errorReported] = false;
   override get message(): string {
-    const reason = this.cause instanceof Error ? ` ${this.cause.message}` : "";
-    return `Could not reach the T3 Code server at ${this.origin}.${reason}`;
+    return `Could not reach the T3 Code server at ${this.origin}. ${this.reason}`;
   }
 }
 
@@ -171,7 +172,15 @@ const toolFailureDetail = (result: typeof ToolResult.Type) => {
   });
 };
 
-const makeThreadTools = (session: McpToolSession, origin: string) => {
+/** A refused or failed MCP request must not echo the bearer token it carried. */
+const unreachableReason = (cause: unknown, token: string) =>
+  redactCredentials(cause instanceof Error ? cause.message : String(cause), token);
+
+const makeThreadTools = (
+  session: McpToolSession,
+  origin: string,
+  reasonForCause: (cause: unknown) => string = (cause) => unreachableReason(cause, ""),
+) => {
   const unexpected = (tool: string) =>
     new ThreadToolFailedError({
       tool,
@@ -185,7 +194,11 @@ const makeThreadTools = (session: McpToolSession, origin: string) => {
     ): Effect.fn.Return<S["Type"], ThreadServerUnreachableError | ThreadToolFailedError> {
       const raw = yield* session
         .call(tool, args)
-        .pipe(Effect.mapError((cause) => new ThreadServerUnreachableError({ origin, cause })));
+        .pipe(
+          Effect.mapError(
+            (cause) => new ThreadServerUnreachableError({ origin, reason: reasonForCause(cause) }),
+          ),
+        );
       const result = yield* decodeToolResult(raw).pipe(Effect.mapError(() => unexpected(tool)));
       if (result.isError === true) {
         return yield* new ThreadToolFailedError({ tool, detail: toolFailureDetail(result) });
@@ -199,10 +212,17 @@ const makeThreadTools = (session: McpToolSession, origin: string) => {
 export type ThreadTools = ReturnType<typeof makeThreadTools>;
 
 /**
+ * Stops a thread the way its Stop button does. The server's own status is
+ * returned unchanged, so `interrupt_requested` is never reported as stopped.
+ */
+export const stopThread = (tools: ThreadTools, threadId: ThreadId) =>
+  tools.call("t3_thread_interrupt", { threadId, stop: true }, OrchestratorMcpThreadInterruptResult);
+
+/**
  * Signs in as a short-lived MCP client of the running server, the same way an
  * outside agent does, and revokes that session when the command ends.
  */
-const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E, R>(
+const withLocalThreadTools = Effect.fn("cli.thread.withLocalThreadTools")(function* <A, E, R>(
   flags: { readonly baseDir: Option.Option<string> },
   run: (tools: ThreadTools) => Effect.Effect<A, E, R>,
 ) {
@@ -231,8 +251,18 @@ const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E,
       endpoint: new URL("/mcp", origin).href,
       authorization: `Bearer ${issued.token}`,
       clientName: "t3-thread-cli",
-    }).pipe(Effect.mapError((cause) => new ThreadServerUnreachableError({ origin, cause })));
-    return yield* run(makeThreadTools(session, origin));
+    }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ThreadServerUnreachableError({
+            origin,
+            reason: unreachableReason(cause, issued.token),
+          }),
+      ),
+    );
+    return yield* run(
+      makeThreadTools(session, origin, (cause) => unreachableReason(cause, issued.token)),
+    );
   }).pipe(
     Effect.scoped,
     Effect.provide(
@@ -241,6 +271,45 @@ const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E,
         Layer.provide(Layer.succeed(References.MinimumLogLevel, config.logLevel)),
       ),
     ),
+  );
+});
+
+/**
+ * A token from `T3CODE_AUTH_TOKEN_FILE` reaches the running server's `/mcp`
+ * as a remote client, so no local server state is opened or issued.
+ */
+export const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E, R>(
+  flags: { readonly baseDir: Option.Option<string> },
+  run: (tools: ThreadTools) => Effect.Effect<A, E, R>,
+) {
+  const transport = yield* resolveThreadTransport();
+  if (transport.kind === "local") return yield* withLocalThreadTools(flags, run);
+  if (Option.isSome(flags.baseDir)) {
+    return yield* new ThreadUsageError({
+      detail: "--base-dir does not apply when the remote T3 Code transport is configured.",
+    });
+  }
+  return yield* Effect.scoped(
+    Effect.gen(function* () {
+      const session = yield* mcpToolSession({
+        endpoint: `${transport.origin}/mcp`,
+        authorization: transport.authorization,
+        clientName: "t3-thread-cli",
+      }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ThreadServerUnreachableError({
+              origin: transport.origin,
+              reason: unreachableReason(cause, transport.authorization.slice("Bearer ".length)),
+            }),
+        ),
+      );
+      return yield* run(
+        makeThreadTools(session, transport.origin, (cause) =>
+          unreachableReason(cause, transport.authorization.slice("Bearer ".length)),
+        ),
+      );
+    }),
   );
 });
 
@@ -708,6 +777,35 @@ const threadSendCommand = Command.make("send", {
   ),
 );
 
+const threadStopCommand = Command.make("stop", {
+  ...projectLocationFlags,
+  thread: threadArgument,
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription(
+    "Stop a thread's running turn, hold its queued messages and stop the tasks it delegated.",
+  ),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const threadId = yield* decodeThreadId(flags.thread);
+      yield* withThreadTools(flags, (tools) =>
+        Effect.gen(function* () {
+          const stopped = yield* stopThread(tools, threadId);
+          if (flags.json) {
+            yield* printJson(stopped);
+            return;
+          }
+          yield* Console.log(
+            stopped.status === "interrupt_requested"
+              ? `Requested stop for thread ${stopped.threadId}.`
+              : `Thread ${stopped.threadId} is not running (${stopped.status}).`,
+          );
+        }),
+      );
+    }).pipe(reportThreadErrors),
+  ),
+);
+
 const threadShowCommand = Command.make("show", {
   ...projectLocationFlags,
   thread: threadArgument,
@@ -763,11 +861,14 @@ const threadShowCommand = Command.make("show", {
 );
 
 export const threadCommand = Command.make("thread").pipe(
-  Command.withDescription("Start, message, and read threads on the running server."),
+  Command.withDescription(
+    "Start, message, stop, and read threads on the running server. T3CODE_SERVER_URL and T3CODE_AUTH_TOKEN_FILE reach a remote server as a bearer-token client instead of the local one.",
+  ),
   Command.withSubcommands([
     threadListCommand,
     threadStartCommand,
     threadSendCommand,
+    threadStopCommand,
     threadShowCommand,
   ]),
 );

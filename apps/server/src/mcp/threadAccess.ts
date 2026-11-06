@@ -40,9 +40,9 @@ export const threadNotFound = Effect.fn("OrchestratorMcpService.threadNotFound")
   });
 });
 
-/** An agent acts as its thread's owner; a client outside any thread acts as the default principal. */
-export const callerPrincipal = (caller: Pick<Caller, "caller">) =>
-  caller.caller?.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID;
+/** An agent acts as its thread's owner; a client outside any thread acts as the principal it was issued for. */
+export const callerPrincipal = (caller: Pick<Caller, "caller" | "scope">) =>
+  caller.caller?.ownerPrincipal ?? caller.scope.principal ?? DEFAULT_PRINCIPAL_ID;
 
 /** A thread of another principal fails as a missing one. */
 export const assertThreadOwnedByCallerPrincipal = (

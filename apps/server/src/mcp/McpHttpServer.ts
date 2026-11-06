@@ -1023,6 +1023,10 @@ const withToolAnalytics =
   });
 
 /** `McpServer.registerToolkit` advertises the full codec schema; agents get the compact one. */
+const encodeDenial = Schema.encodeSync(
+  Schema.fromJsonString(Schema.Struct({ code: Schema.String, message: Schema.String })),
+);
+
 const withAdvertisedSchemas = Effect.fn("McpHttpServer.withAdvertisedSchemas")(function* <
   Tools extends Record<string, Tool.Any>,
   A,
@@ -1035,11 +1039,43 @@ const withAdvertisedSchemas = Effect.fn("McpHttpServer.withAdvertisedSchemas")(f
     ...server,
     addTool: Effect.fn("McpServer.addTool")(function (options) {
       const tool = tools[options.tool.name];
+      const run = options.handle as (
+        payload: unknown,
+      ) => Effect.Effect<
+        McpSchema.CallToolResult,
+        McpSchema.InternalError | McpSchema.InvalidParams,
+        never
+      >;
+      const guarded = {
+        ...options,
+        handle: ((payload: unknown) =>
+          Effect.gen(function* () {
+            const scope = yield* McpInvocationContext.McpInvocationContext;
+            if (
+              McpToolAccess.isPrincipalClientScope(scope) &&
+              !McpToolAccess.PRINCIPAL_CLIENT_TOOLS.has(options.tool.name)
+            ) {
+              const message =
+                "This principal-bound credential can only use its own project and thread operations.";
+              return new McpSchema.CallToolResult({
+                isError: true,
+                structuredContent: { code: "capability_denied", message },
+                content: [
+                  {
+                    type: "text",
+                    text: encodeDenial({ code: "capability_denied", message }),
+                  },
+                ],
+              });
+            }
+            return yield* run(payload);
+          })) as unknown as typeof options.handle,
+      };
       return server.addTool(
         tool === undefined
-          ? options
+          ? guarded
           : {
-              ...options,
+              ...guarded,
               tool: new McpSchema.Tool({
                 ...options.tool,
                 inputSchema: advertisedJsonSchema(tool),

@@ -1,5 +1,6 @@
 import {
   type AuthGrantScope,
+  AuthMcpClientAccess,
   AuthSessionId,
   AuthStandardClientScopes,
   PrincipalId,
@@ -8,9 +9,10 @@ import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
-import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
+import { Argument, CliError, Command, Flag, GlobalFlag } from "effect/cli";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 
@@ -28,10 +30,11 @@ import {
   DurationFromString,
   resolveCliAuthConfig,
 } from "./config.ts";
+import { writeSecretFile } from "./secretFile.ts";
 
-const runWithEnvironmentAuth = Effect.fn("auth.runWithEnvironmentAuth")(function* <A, E>(
+const runWithEnvironmentAuth = Effect.fn("auth.runWithEnvironmentAuth")(function* <A, E, R>(
   flags: CliAuthLocationFlags,
-  run: (environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"]) => Effect.Effect<A, E>,
+  run: (environmentAuth: EnvironmentAuth.EnvironmentAuth["Service"]) => Effect.Effect<A, E, R>,
   options?: {
     readonly quietLogs?: boolean;
   },
@@ -110,6 +113,37 @@ const tokenOnlyFlag = Flag.Boolean("token-only").pipe(
   Flag.withDescription("Print only the issued bearer token."),
   Flag.withDefault(false),
 );
+
+const mcpAccessFlag = Flag.Literals("mcp-access", AuthMcpClientAccess.literals).pipe(
+  Flag.withDescription(
+    "Issue an MCP client token at this access level instead of a general bearer session; combine with --principal to bind it.",
+  ),
+  Flag.optional,
+);
+
+const tokenFileFlag = Flag.String("token-file").pipe(
+  Flag.withDescription("Write the token to this absolute path (mode 0600) instead of printing it."),
+  Flag.optional,
+);
+
+const hasExplicitScopes = (scopes: ReadonlyArray<AuthGrantScope>) =>
+  scopes.length !== AuthStandardClientScopes.length ||
+  !AuthStandardClientScopes.every((scope) => scopes.includes(scope));
+
+/**
+ * A write failure must not leave the just-issued credential live: revoke it
+ * and rethrow the write error, which names the file and never its contents.
+ */
+export const writeIssuedSessionToken = (
+  environmentAuth: Pick<EnvironmentAuth.EnvironmentAuth["Service"], "revokeSession">,
+  issued: { readonly sessionId: AuthSessionId; readonly token: string },
+  tokenFile: string,
+) =>
+  writeSecretFile(tokenFile, issued.token).pipe(
+    Effect.tapError(() =>
+      environmentAuth.revokeSession(issued.sessionId).pipe(Effect.ignore({ log: true })),
+    ),
+  );
 
 const pairingCreateCommand = Command.make("create", {
   ...authLocationFlags,
@@ -200,6 +234,8 @@ const sessionIssueCommand = Command.make("issue", {
   subject: subjectFlag,
   principal: principalFlag,
   tokenOnly: tokenOnlyFlag,
+  tokenFile: tokenFileFlag,
+  mcpAccess: mcpAccessFlag,
   json: jsonFlag,
 }).pipe(
   Command.withDescription("Issue a scoped bearer access token for headless or remote clients."),
@@ -208,22 +244,57 @@ const sessionIssueCommand = Command.make("issue", {
       flags,
       (environmentAuth) =>
         Effect.gen(function* () {
-          const issued = yield* environmentAuth.issueSession({
-            ...scopeInput(flags),
-            ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
-            ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
-            ...(Option.isSome(flags.subject) ? { subject: flags.subject.value } : {}),
-            ...(Option.isSome(flags.principal) ? { principal: flags.principal.value } : {}),
-          });
+          const tokenFile = Option.getOrUndefined(flags.tokenFile);
+          if (tokenFile !== undefined && flags.tokenOnly) {
+            return yield* new CliError.UserError({
+              cause: "--token-file and --token-only cannot be combined.",
+            });
+          }
+          if (tokenFile !== undefined) {
+            const path = yield* Path.Path;
+            if (!path.isAbsolute(tokenFile)) {
+              return yield* new CliError.UserError({
+                cause: "--token-file must be an absolute path.",
+              });
+            }
+          }
+          if (Option.isSome(flags.mcpAccess) && Option.isSome(flags.subject)) {
+            return yield* new CliError.UserError({
+              cause: "--mcp-access derives the token subject; omit --subject.",
+            });
+          }
+          if (Option.isSome(flags.mcpAccess) && hasExplicitScopes(flags.scopes)) {
+            return yield* new CliError.UserError({
+              cause: "--mcp-access sets the token scopes; omit --scope.",
+            });
+          }
+          const issued = Option.isNone(flags.mcpAccess)
+            ? yield* environmentAuth.issueSession({
+                ...scopeInput(flags),
+                ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
+                ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
+                ...(Option.isSome(flags.subject) ? { subject: flags.subject.value } : {}),
+                ...(Option.isSome(flags.principal) ? { principal: flags.principal.value } : {}),
+              })
+            : yield* environmentAuth.issueMcpClientSession({
+                label: Option.getOrUndefined(flags.label) ?? "t3 CLI token",
+                access: flags.mcpAccess.value,
+                peerLink: false,
+                client: { deviceType: "bot" },
+                ...(Option.isSome(flags.principal) ? { principal: flags.principal.value } : {}),
+                ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
+              });
+          if (tokenFile !== undefined) {
+            yield* writeIssuedSessionToken(environmentAuth, issued, tokenFile);
+            yield* Console.log(formatIssuedSession(issued, { json: flags.json, tokenFile }));
+            return;
+          }
           yield* Console.log(
-            formatIssuedSession(issued, {
-              json: flags.json,
-              tokenOnly: flags.tokenOnly,
-            }),
+            formatIssuedSession(issued, { json: flags.json, tokenOnly: flags.tokenOnly }),
           );
         }),
       {
-        quietLogs: flags.json || flags.tokenOnly,
+        quietLogs: flags.json || flags.tokenOnly || Option.isSome(flags.tokenFile),
       },
     ),
   ),

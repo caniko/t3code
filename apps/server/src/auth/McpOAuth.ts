@@ -603,6 +603,7 @@ export const layerMcpClientAuthenticator = Layer.effect(
                     linked: client.peerLink,
                     ...(client.peerLink ? {} : { hostedAppUrl }),
                   },
+                  ...(client.principal === undefined ? {} : { principal: client.principal }),
                   capabilities: new Set<McpInvocationContext.McpCapability>([
                     "orchestration",
                     "worktree",

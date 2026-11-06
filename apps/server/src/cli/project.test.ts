@@ -41,6 +41,8 @@ import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
+import { createRemoteProject } from "./project.ts";
+import type { ThreadTools } from "./thread.ts";
 import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
@@ -470,4 +472,37 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))(
       }),
     );
   },
+);
+
+it.effect("adds a project through the remote MCP endpoint", () =>
+  Effect.gen(function* () {
+    const calls: Array<{ readonly tool: string; readonly args: unknown }> = [];
+    const tools = {
+      call: ((tool: string, args: unknown) => {
+        calls.push({ tool, args });
+        return Effect.succeed({
+          id: "project:remote",
+          title: "operations",
+          workspaceRoot: "/home/can/operations",
+        });
+      }) as ThreadTools["call"],
+    };
+
+    const created = yield* createRemoteProject(tools, {
+      workspaceRoot: "/home/can/operations",
+      title: "operations",
+    });
+
+    assert.deepStrictEqual(created, {
+      id: "project:remote",
+      title: "operations",
+      workspaceRoot: "/home/can/operations",
+    });
+    assert.deepStrictEqual(calls, [
+      {
+        tool: "t3_project_create",
+        args: { workspaceRoot: "/home/can/operations", title: "operations" },
+      },
+    ]);
+  }),
 );

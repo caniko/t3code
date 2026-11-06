@@ -43,6 +43,8 @@ import {
 } from "../serverRuntimeState.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import { type CliAuthLocationFlags, projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
+import { resolveThreadTransport } from "./threadTransport.ts";
+import { type ThreadTools, withThreadTools } from "./thread.ts";
 
 type ProjectMutationTarget = {
   readonly id: ProjectId;
@@ -463,6 +465,44 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
   );
 });
 
+const RemoteProject = Schema.Struct({
+  id: ProjectId,
+  title: Schema.String,
+  workspaceRoot: Schema.String,
+});
+
+/** Registers a project through the remote MCP endpoint, so no local server state is opened. */
+export const createRemoteProject = (
+  tools: ThreadTools,
+  input: { readonly workspaceRoot: string; readonly title?: string },
+) =>
+  tools.call(
+    "t3_project_create",
+    {
+      workspaceRoot: input.workspaceRoot,
+      ...(input.title === undefined ? {} : { title: input.title }),
+    },
+    RemoteProject,
+  );
+
+export class RemoteProjectMutationUnsupportedError extends Schema.TaggedError<RemoteProjectMutationUnsupportedError>()(
+  "RemoteProjectMutationUnsupportedError",
+  { operation: Schema.String },
+) {
+  override get message(): string {
+    return `${this.operation} is not supported over the remote T3 Code transport; use the T3 app.`;
+  }
+}
+
+const requireLocalProjectMutation = (operation: string) =>
+  resolveThreadTransport().pipe(
+    Effect.flatMap((transport) =>
+      transport.kind === "local"
+        ? Effect.void
+        : Effect.fail(new RemoteProjectMutationUnsupportedError({ operation })),
+    ),
+  );
+
 const projectAddCommand = Command.make("add", {
   ...projectLocationFlags,
   workspaceRoot: Argument.String("path").pipe(
@@ -472,41 +512,63 @@ const projectAddCommand = Command.make("add", {
 }).pipe(
   Command.withDescription("Add a project."),
   Command.withHandler((flags) =>
-    runProjectMutation(
-      flags,
-      Effect.fn("projectAddMutation")(function* ({
-        snapshot,
-        dispatch,
-      }: {
-        readonly snapshot: ProjectSnapshot;
-        readonly dispatch: (
-          command: ProjectCliDispatchCommand,
-        ) => Effect.Effect<void, Error, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path>;
-      }) {
-        const workspaceRoot = yield* normalizeWorkspaceRootForProjectCommand(flags.workspaceRoot);
-        const existingProject = snapshot.projects.find(
-          (project) => project.deletedAt === null && project.workspaceRoot === workspaceRoot,
+    Effect.gen(function* () {
+      const transport = yield* resolveThreadTransport();
+      if (transport.kind === "remote") {
+        const created = yield* withThreadTools(flags, (tools) =>
+          createRemoteProject(tools, {
+            workspaceRoot: flags.workspaceRoot,
+            ...(Option.isSome(flags.title) ? { title: flags.title.value } : {}),
+          }),
         );
-        if (existingProject) {
-          return yield* new ProjectAlreadyExistsError({
-            operation: "addProject",
-            projectId: existingProject.id,
+        yield* Console.log(
+          `Added project ${created.id} (${created.title}) at ${created.workspaceRoot}.`,
+        );
+        return;
+      }
+      return yield* runProjectMutation(
+        flags,
+        Effect.fn("projectAddMutation")(function* ({
+          snapshot,
+          dispatch,
+        }: {
+          readonly snapshot: ProjectSnapshot;
+          readonly dispatch: (
+            command: ProjectCliDispatchCommand,
+          ) => Effect.Effect<
+            void,
+            Error,
+            FileSystem.FileSystem | HttpClient.HttpClient | Path.Path
+          >;
+        }) {
+          const workspaceRoot = yield* normalizeWorkspaceRootForProjectCommand(flags.workspaceRoot);
+          const existingProject = snapshot.projects.find(
+            (project) => project.deletedAt === null && project.workspaceRoot === workspaceRoot,
+          );
+          if (existingProject) {
+            return yield* new ProjectAlreadyExistsError({
+              operation: "addProject",
+              projectId: existingProject.id,
+              workspaceRoot,
+            });
+          }
+
+          const title = yield* resolveProjectTitle(
+            workspaceRoot,
+            Option.getOrUndefined(flags.title),
+          );
+          const projectId = ProjectId.make(yield* projectCommandUuid);
+          yield* dispatch({
+            type: "project.create",
+            commandId: CommandId.make(yield* projectCommandUuid),
+            projectId,
+            title,
             workspaceRoot,
           });
-        }
-
-        const title = yield* resolveProjectTitle(workspaceRoot, Option.getOrUndefined(flags.title));
-        const projectId = ProjectId.make(yield* projectCommandUuid);
-        yield* dispatch({
-          type: "project.create",
-          commandId: CommandId.make(yield* projectCommandUuid),
-          projectId,
-          title,
-          workspaceRoot,
-        });
-        return `Added project ${projectId} (${title}) at ${workspaceRoot}.`;
-      }),
-    ),
+          return `Added project ${projectId} (${title}) at ${workspaceRoot}.`;
+        }),
+      );
+    }),
   ),
 );
 
@@ -522,30 +584,37 @@ const projectRemoveCommand = Command.make("remove", {
 }).pipe(
   Command.withDescription("Remove a project."),
   Command.withHandler((flags) =>
-    runProjectMutation(
-      flags,
-      Effect.fn("projectRemoveMutation")(function* ({
-        snapshot,
-        dispatch,
-      }: {
-        readonly snapshot: ProjectSnapshot;
-        readonly dispatch: (
-          command: ProjectCliDispatchCommand,
-        ) => Effect.Effect<void, Error, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path>;
-      }) {
-        const project = yield* findActiveProjectTarget({
+    Effect.gen(function* () {
+      yield* requireLocalProjectMutation("project remove");
+      return yield* runProjectMutation(
+        flags,
+        Effect.fn("projectRemoveMutation")(function* ({
           snapshot,
-          identifier: flags.project,
-        });
-        yield* dispatch({
-          type: "project.delete",
-          commandId: CommandId.make(yield* projectCommandUuid),
-          projectId: project.id,
-          force: flags.force,
-        });
-        return `Removed project ${project.id} (${project.title}).`;
-      }),
-    ),
+          dispatch,
+        }: {
+          readonly snapshot: ProjectSnapshot;
+          readonly dispatch: (
+            command: ProjectCliDispatchCommand,
+          ) => Effect.Effect<
+            void,
+            Error,
+            FileSystem.FileSystem | HttpClient.HttpClient | Path.Path
+          >;
+        }) {
+          const project = yield* findActiveProjectTarget({
+            snapshot,
+            identifier: flags.project,
+          });
+          yield* dispatch({
+            type: "project.delete",
+            commandId: CommandId.make(yield* projectCommandUuid),
+            projectId: project.id,
+            force: flags.force,
+          });
+          return `Removed project ${project.id} (${project.title}).`;
+        }),
+      );
+    }),
   ),
 );
 
@@ -558,35 +627,42 @@ const projectRenameCommand = Command.make("rename", {
 }).pipe(
   Command.withDescription("Rename a project."),
   Command.withHandler((flags) =>
-    runProjectMutation(
-      flags,
-      Effect.fn("projectRenameMutation")(function* ({
-        snapshot,
-        dispatch,
-      }: {
-        readonly snapshot: ProjectSnapshot;
-        readonly dispatch: (
-          command: ProjectCliDispatchCommand,
-        ) => Effect.Effect<void, Error, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path>;
-      }) {
-        const project = yield* findActiveProjectTarget({
+    Effect.gen(function* () {
+      yield* requireLocalProjectMutation("project rename");
+      return yield* runProjectMutation(
+        flags,
+        Effect.fn("projectRenameMutation")(function* ({
           snapshot,
-          identifier: flags.project,
-        });
-        const nextTitle = yield* resolveProjectTitle(project.workspaceRoot, flags.title);
-        if (nextTitle === project.title) {
-          return `Project ${project.id} is already named ${nextTitle}.`;
-        }
+          dispatch,
+        }: {
+          readonly snapshot: ProjectSnapshot;
+          readonly dispatch: (
+            command: ProjectCliDispatchCommand,
+          ) => Effect.Effect<
+            void,
+            Error,
+            FileSystem.FileSystem | HttpClient.HttpClient | Path.Path
+          >;
+        }) {
+          const project = yield* findActiveProjectTarget({
+            snapshot,
+            identifier: flags.project,
+          });
+          const nextTitle = yield* resolveProjectTitle(project.workspaceRoot, flags.title);
+          if (nextTitle === project.title) {
+            return `Project ${project.id} is already named ${nextTitle}.`;
+          }
 
-        yield* dispatch({
-          type: "project.update",
-          commandId: CommandId.make(yield* projectCommandUuid),
-          projectId: project.id,
-          title: nextTitle,
-        });
-        return `Renamed project ${project.id} to ${nextTitle}.`;
-      }),
-    ),
+          yield* dispatch({
+            type: "project.update",
+            commandId: CommandId.make(yield* projectCommandUuid),
+            projectId: project.id,
+            title: nextTitle,
+          });
+          return `Renamed project ${project.id} to ${nextTitle}.`;
+        }),
+      );
+    }),
   ),
 );
 

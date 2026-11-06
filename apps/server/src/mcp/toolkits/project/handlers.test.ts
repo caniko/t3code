@@ -51,6 +51,8 @@ const clientLaunchHarness = (input: {
   readonly workspaceRoot?: string;
   readonly checkWorktreeBase?: ThreadLaunch.ThreadLaunchService["Service"]["checkWorktreeBase"];
   readonly hostedAppUrl?: string;
+  /** The principal an MCP client session is bound to. */
+  readonly principal?: string;
   /** The orchestrator refuses the new thread's mode, as under a managed ceiling. */
   readonly refusedByCeiling?: true;
 }) => {
@@ -91,6 +93,7 @@ const clientLaunchHarness = (input: {
         access: input.runtimeModeCeiling,
         hostedAppUrl: input.hostedAppUrl,
       },
+      ...(input.principal === undefined ? {} : { principal: input.principal }),
       issuedAt: 0,
       capabilities: new Set(["orchestration" as const]),
     }),
@@ -157,6 +160,22 @@ const clientLaunchHarness = (input: {
               } as unknown as ProjectRecord)
             : Option.none(),
         ),
+      create: (createInput) =>
+        Effect.succeed({
+          id: createInput.projectId,
+          title: createInput.title,
+          workspaceRoot: createInput.workspaceRoot,
+          repositoryIdentity: null,
+          faviconPath: null,
+          projectIcon: null,
+          defaultModelSelection: null,
+          defaultThreadEnvMode: null,
+          autoPull: false,
+          scripts: [],
+          createdAt: "2026-01-01T00:00:00.000Z",
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          deletedAt: null,
+        } as unknown as ProjectRecord),
     }),
     Layer.mock(PeerForwarding.PeerForwarding)({}),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
@@ -274,6 +293,61 @@ it.effect(
         message: "Example Corp limits threads to Supervised.",
       });
     }),
+);
+
+it.effect("starts a principal-bound MCP client's thread as that principal", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const { projectId, dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "full-access",
+      launched,
+      principal: "can",
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+
+    yield* toolkit
+      .handle("t3_thread_launch", { projectId, title: "Fix", message: "Fix the bug" })
+      .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+
+    expect(launched[0]?.ownerPrincipal).toBe("can");
+  }),
+);
+
+it.effect("a principal-bound client can only register a plain existing project", () =>
+  Effect.gen(function* () {
+    const launched: Array<ThreadLaunch.ThreadLaunchInput> = [];
+    const { dependencies } = clientLaunchHarness({
+      runtimeModeCeiling: "full-access",
+      launched,
+      principal: "can",
+    });
+    const toolkit = yield* ProjectToolkit.pipe(
+      Effect.provide(
+        McpToolAccess.HandlersLayer.layer(ProjectHandlers.layer).pipe(Layer.provide(dependencies)),
+      ),
+    );
+    const create = (args: Record<string, unknown>) =>
+      toolkit
+        .handle("t3_project_create", args as never)
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.provide(dependencies));
+
+    for (const args of [
+      { title: "work" },
+      { workspaceRoot: "/home/can/work", title: "work", scripts: [] },
+      { workspaceRoot: "/home/can/work", title: "work", createWorkspaceRootIfMissing: true },
+      { workspaceRoot: "/home/can/work", title: "work", defaultModelSelection: null },
+    ]) {
+      expect((yield* create(args)).at(-1)?.result).toMatchObject({ code: "invalid_request" });
+    }
+
+    expect(
+      (yield* create({ workspaceRoot: "/home/can/work", title: "work" })).at(-1)?.result,
+    ).toMatchObject({ workspaceRoot: "/home/can/work" });
+  }),
 );
 
 it.effect("a launch steps an inherited mode down to the provider's, and refuses one it lacks", () =>

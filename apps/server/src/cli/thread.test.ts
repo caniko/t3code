@@ -2,7 +2,13 @@ import { assert, it } from "@effect/vitest";
 import { RunId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
-import { readLatestMessages, type ThreadTools, titleFromMessage, waitForRun } from "./thread.ts";
+import {
+  readLatestMessages,
+  stopThread,
+  type ThreadTools,
+  titleFromMessage,
+  waitForRun,
+} from "./thread.ts";
 
 const threadId = ThreadId.make("thread-1");
 const runId = RunId.make("run-1");
@@ -165,3 +171,29 @@ it("titles from a long first line without splitting an emoji", () => {
   const title = titleFromMessage(`${"a".repeat(78)}😀 and the rest of a long first line`);
   assert.strictEqual(title, `${"a".repeat(78)}…`);
 });
+
+it.effect("stop asks the server to stop and returns its status unchanged", () =>
+  Effect.gen(function* () {
+    const { tools, calls } = scriptedTools({
+      t3_thread_interrupt: [
+        { threadId, runId, status: "interrupt_requested" },
+        { threadId, runId: null, status: "no_active_run" },
+      ],
+    });
+
+    assert.deepStrictEqual(yield* stopThread(tools, threadId), {
+      threadId,
+      runId,
+      status: "interrupt_requested",
+    });
+    assert.deepStrictEqual(yield* stopThread(tools, threadId), {
+      threadId,
+      runId: null,
+      status: "no_active_run",
+    });
+    assert.deepStrictEqual(calls, [
+      { tool: "t3_thread_interrupt", args: { threadId, stop: true } },
+      { tool: "t3_thread_interrupt", args: { threadId, stop: true } },
+    ]);
+  }),
+);

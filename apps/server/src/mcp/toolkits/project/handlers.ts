@@ -223,6 +223,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             )?.supportedRuntimeModes,
           });
         }
+        const ownerPrincipal = caller?.ownerPrincipal ?? scope.principal;
         const result = yield* ThreadMessageIntake.launchThread({
           commandId,
           threadId,
@@ -245,9 +246,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
           createdBy: "agent",
           creationSource: "mcp",
           ...(linkOrigin === undefined ? {} : { linkOrigin }),
-          ...(caller?.ownerPrincipal === undefined
-            ? {}
-            : { ownerPrincipal: caller.ownerPrincipal }),
+          ...(ownerPrincipal === undefined ? {} : { ownerPrincipal }),
           // Kept only alongside linkOrigin: thread.create drops it otherwise.
           ...(input.delegatedFrom === undefined ? {} : { delegatedFrom: input.delegatedFrom }),
         }).pipe(
@@ -312,6 +311,27 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   t3_project_create: McpToolAccess.writesEnvironment(
     ({ workspaceRoot, ...input }) =>
       Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        if (McpToolAccess.isPrincipalClientScope(scope)) {
+          if (workspaceRoot === undefined) {
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message:
+                "A principal-bound client can only register an existing workspace root, not create a named project.",
+            });
+          }
+          if (
+            input.scripts !== undefined ||
+            input.defaultModelSelection !== undefined ||
+            input.createWorkspaceRootIfMissing === true
+          ) {
+            return yield* new OrchestratorMcpFailure({
+              code: "invalid_request",
+              message:
+                "A principal-bound client can only register a plain existing workspace root: no scripts, model defaults, or folder creation.",
+            });
+          }
+        }
         const projects = yield* Project.ProjectService;
         if (workspaceRoot === undefined) {
           // Only updates record model defaults; reject defaults that creation would silently drop.

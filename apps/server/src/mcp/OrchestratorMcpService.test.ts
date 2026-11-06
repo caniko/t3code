@@ -3470,6 +3470,20 @@ describe("OrchestratorMcpService thread list", () => {
       assert.equal(listed.total, 2);
     }).pipe(Effect.provide(service)),
   );
+
+  it.effect("lists only the principal-bound client's own threads", () =>
+    Effect.gen(function* () {
+      const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const listed = yield* mcp.listThreads(
+        { ...client, principal: "alice" },
+        { allProjects: true, snoozed: true },
+      );
+      assert.deepStrictEqual(
+        listed.threads.map((thread) => thread.threadId),
+        ["thread:alice-snoozed"],
+      );
+    }).pipe(Effect.provide(service)),
+  );
 });
 
 describe("OrchestratorMcpService thread stop", () => {

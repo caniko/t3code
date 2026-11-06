@@ -1215,7 +1215,7 @@ const make = Effect.gen(function* () {
         ? caller.parent
         : yield* loadTargetThread(threadId, includeHistory);
     yield* assertThreadOwnedByCallerPrincipal(
-      caller.parent?.thread.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID,
+      caller.parent?.thread.ownerPrincipal ?? scope.principal ?? DEFAULT_PRINCIPAL_ID,
       target.thread,
       () => threadNotFound(threadManagement, threadId, `Thread ${threadId} was not found.`),
     );
@@ -1284,7 +1284,7 @@ const make = Effect.gen(function* () {
       );
     }
     yield* assertThreadOwnedByCallerPrincipal(
-      parent?.thread.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID,
+      parent?.thread.ownerPrincipal ?? scope.principal ?? DEFAULT_PRINCIPAL_ID,
       shell,
       () =>
         threadNotFound(threadManagement, threadId, `Thread ${threadId} is no longer available.`),
@@ -2975,7 +2975,7 @@ const make = Effect.gen(function* () {
         .listProjectThreads({
           projectId: projectId ?? undefined,
           includeSubagents: input.includeSubagents !== false,
-          ownerPrincipal: parent?.thread.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID,
+          ownerPrincipal: parent?.thread.ownerPrincipal ?? scope.principal ?? DEFAULT_PRINCIPAL_ID,
         })
         .pipe(
           Effect.mapError((error) =>

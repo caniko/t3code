@@ -6,6 +6,7 @@ import {
   AuthStandardClientScopes,
   DEFAULT_PRINCIPAL_ID,
   principalOfSubject,
+  PrincipalId,
   principalSubject,
   type AuthAccessTokenResult,
   type AuthBrowserSessionResult,
@@ -79,7 +80,24 @@ export interface IssuedBearerSession {
 
 // MCP client tokens are restricted to /mcp; HTTP API and WebSocket RPC would bypass their access cap.
 const MCP_CLIENT_SUBJECT = "mcp-client";
+const MCP_CLIENT_SUBJECT_PREFIX = `${MCP_CLIENT_SUBJECT}:`;
 const MCP_CLIENT_SESSION_TTL = Duration.days(30);
+
+const isMcpClientSubject = (subject: string) =>
+  subject === MCP_CLIENT_SUBJECT || subject.startsWith(MCP_CLIENT_SUBJECT_PREFIX);
+
+/** A principal-bound MCP token keeps the MCP audience and carries its principal in the subject. */
+const mcpClientSubject = (principal?: string) =>
+  principal === undefined || principal === DEFAULT_PRINCIPAL_ID
+    ? MCP_CLIENT_SUBJECT
+    : `${MCP_CLIENT_SUBJECT_PREFIX}${principal}`;
+
+const mcpClientPrincipalOf = (subject: string): string | undefined =>
+  subject.startsWith(MCP_CLIENT_SUBJECT_PREFIX)
+    ? subject.slice(MCP_CLIENT_SUBJECT_PREFIX.length)
+    : undefined;
+
+const isPrincipalId = Schema.is(PrincipalId);
 
 export interface McpClientSession {
   readonly sessionId: AuthSessionId;
@@ -87,6 +105,8 @@ export interface McpClientSession {
   readonly access: AuthMcpClientAccess;
   /** Another T3 Code environment's link, whose work here stays within it. */
   readonly peerLink: boolean;
+  /** The principal the token is bound to; absent for the environment owner. */
+  readonly principal?: string;
 }
 
 export interface AuthenticatedSession {
@@ -573,11 +593,16 @@ export class EnvironmentAuth extends Context.Service<
       readonly access: AuthMcpClientAccess;
       readonly peerLink: boolean;
       readonly client: AuthClientMetadata;
+      /** Binds the token to a principal's threads instead of the environment owner. */
+      readonly principal?: string;
+      readonly ttl?: Duration.Duration;
     }) => Effect.Effect<
       {
         readonly sessionId: AuthSessionId;
         readonly token: string;
         readonly expiresAt: DateTime.DateTime;
+        readonly subject: string;
+        readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
       },
       ServerAuthInternalError
     >;
@@ -632,7 +657,7 @@ function toBootstrapExchangeError(
 }
 
 const rejectMcpClientAudience = <S extends { readonly subject: string }>(session: S) =>
-  session.subject === MCP_CLIENT_SUBJECT
+  isMcpClientSubject(session.subject)
     ? Effect.fail(
         new ServerAuthInvalidCredentialError({
           diagnostic: "MCP client sessions are only accepted by the MCP endpoint.",
@@ -1382,8 +1407,14 @@ export const make = Effect.gen(function* () {
     if (token === null) return Effect.fail(new ServerAuthMissingCredentialError({}));
     return sessions.verify(token).pipe(
       mapSessionVerificationErrors,
-      Effect.flatMap((session) =>
-        session.subject === MCP_CLIENT_SUBJECT && session.method === "bearer-access-token"
+      Effect.flatMap((session) => {
+        const principal = mcpClientPrincipalOf(session.subject);
+        const valid =
+          isMcpClientSubject(session.subject) &&
+          session.method === "bearer-access-token" &&
+          (session.subject === MCP_CLIENT_SUBJECT ||
+            (principal !== undefined && isPrincipalId(principal)));
+        return valid
           ? Effect.succeed({
               sessionId: session.sessionId,
               label: session.client.label ?? "MCP client",
@@ -1391,24 +1422,27 @@ export const make = Effect.gen(function* () {
                 ? (session.runtimeModeCeiling ?? "approval-required")
                 : "read-only",
               peerLink: session.peerLink === true,
+              ...(principal === undefined ? {} : { principal }),
             } satisfies McpClientSession)
           : Effect.fail(
               new ServerAuthInvalidCredentialError({
                 diagnostic: "Only MCP client sessions are accepted here.",
               }),
-            ),
-      ),
+            );
+      }),
       Effect.withSpan("EnvironmentAuth.authenticateMcpClient"),
     );
   };
 
-  const issueMcpClientSession: EnvironmentAuth["Service"]["issueMcpClientSession"] = (input) =>
-    sessions
+  const issueMcpClientSession: EnvironmentAuth["Service"]["issueMcpClientSession"] = (input) => {
+    const subject = mcpClientSubject(input.principal);
+    const scopes = mcpClientScopes(input.access);
+    return sessions
       .issue({
-        subject: MCP_CLIENT_SUBJECT,
+        subject,
         method: "bearer-access-token",
-        scopes: mcpClientScopes(input.access),
-        ttl: MCP_CLIENT_SESSION_TTL,
+        scopes,
+        ttl: input.ttl ?? MCP_CLIENT_SESSION_TTL,
         ...(input.access === "read-only" ? {} : { runtimeModeCeiling: input.access }),
         peerLink: input.peerLink,
         client: { ...input.client, label: input.label, deviceType: "bot" },
@@ -1418,10 +1452,13 @@ export const make = Effect.gen(function* () {
           sessionId: issued.sessionId,
           token: issued.token,
           expiresAt: issued.expiresAt,
+          subject,
+          scopes,
         })),
         Effect.mapError((cause) => new ServerAuthSessionTokenIssueError({ cause })),
         Effect.withSpan("EnvironmentAuth.issueMcpClientSession"),
       );
+  };
 
   const authenticateBrowserSession: EnvironmentAuth["Service"]["authenticateBrowserSession"] = (
     request,

@@ -1,4 +1,10 @@
-import type { AuthClientMetadata, AuthClientSession, AuthPairingLink } from "@t3tools/contracts";
+import type {
+  AuthClientMetadata,
+  AuthClientSession,
+  AuthEnvironmentScope,
+  AuthPairingLink,
+  ServerAuthSessionMethod,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
 import type { IssuedBearerSession, IssuedPairingLink } from "./auth/EnvironmentAuth.ts";
@@ -104,11 +110,23 @@ export function formatPairingCredentialList(
   );
 }
 
+export interface IssuedSessionView {
+  readonly sessionId: IssuedBearerSession["sessionId"];
+  readonly token: string;
+  readonly expiresAt: DateTime.DateTime | DateTime.Utc;
+  readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly subject: string;
+  readonly method?: ServerAuthSessionMethod;
+  readonly client?: AuthClientMetadata;
+}
+
 export function formatIssuedSession(
-  session: IssuedBearerSession,
+  session: IssuedSessionView,
   options?: {
     readonly json?: boolean;
     readonly tokenOnly?: boolean;
+    /** Write-only output: the token is never printed. */
+    readonly tokenFile?: string;
   },
 ): string {
   if (options?.tokenOnly) {
@@ -119,11 +137,12 @@ export function formatIssuedSession(
     return `${JSON.stringify(
       {
         sessionId: session.sessionId,
-        token: session.token,
-        method: session.method,
+        ...(options?.tokenFile === undefined ? { token: session.token } : {}),
+        ...(session.method === undefined ? {} : { method: session.method }),
         scopes: session.scopes,
         subject: session.subject,
-        client: session.client,
+        ...(session.client === undefined ? {} : { client: session.client }),
+        ...(options?.tokenFile === undefined ? {} : { tokenFile: options.tokenFile }),
         expiresAt: toIsoString(session.expiresAt),
       },
       null,
@@ -135,10 +154,12 @@ export function formatIssuedSession(
     [
       `Issued bearer access token ${session.sessionId}.`,
       `Scopes: ${session.scopes.join(" ")}`,
-      `Token: ${session.token}`,
       `Subject: ${session.subject}`,
-      `Client: ${formatClientMetadata(session.client)}`,
+      ...(session.client === undefined ? [] : [`Client: ${formatClientMetadata(session.client)}`]),
       `Expires at: ${toIsoString(session.expiresAt)}`,
+      ...(options?.tokenFile === undefined
+        ? [`Token: ${session.token}`]
+        : [`Token file: ${options.tokenFile}`]),
     ].join(newline) + newline
   );
 }

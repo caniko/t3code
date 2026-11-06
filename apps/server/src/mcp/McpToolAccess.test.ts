@@ -31,6 +31,8 @@ const backgroundThreadId = ThreadId.make("thread:background");
 const oldProviderThreadId = ThreadId.make("thread:old-provider-background");
 const archivedThreadId = ThreadId.make("thread:archived-background");
 const unknownOwnerThreadId = ThreadId.make("thread:unknown-background-owner");
+const aliceThreadId = ThreadId.make("thread:alice");
+const bobThreadId = ThreadId.make("thread:bob");
 
 const backgroundShell = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) => ({
   ...liveThreadShell(threadId, { activeRunId: null }),
@@ -63,6 +65,8 @@ const shells = new Map([
       pendingBackgroundTasks: [{ taskId: "task:unknown", kind: "subagent" as const }],
     },
   ],
+  [aliceThreadId, { ...liveThreadShell(aliceThreadId), ownerPrincipal: "alice" }],
+  [bobThreadId, { ...liveThreadShell(bobThreadId), ownerPrincipal: "bob" }],
 ]);
 
 const threadCaller = (threadId: ThreadId): McpInvocationContext.McpInvocationScope => ({
@@ -117,7 +121,7 @@ const ProbeToolkit = Toolkit.make(
   Tool.make("acts_as_caller", probe),
   Tool.make("writes", probe),
   Tool.make("writes_with_capability", probe),
-  Tool.make("writes_threads", {
+  Tool.make("t3_thread_send", {
     ...probe,
     parameters: Schema.Struct({ threadId: Schema.optional(ThreadId) }),
   }),
@@ -137,7 +141,7 @@ const probeHandlers: McpToolAccess.Handlers<typeof ProbeToolkit.tools> = {
   acts_as_caller: McpToolAccess.actsAsCaller(() => ran),
   writes: McpToolAccess.writes(() => ran),
   writes_with_capability: McpToolAccess.writesWithCapability(() => ran),
-  writes_threads: McpToolAccess.writesThreads(
+  t3_thread_send: McpToolAccess.writesThreads(
     (input) => [input.threadId],
     () => ran,
   ),
@@ -183,7 +187,7 @@ export const refusedAtCompileTime = () => {
       acts_as_caller: unchecked,
       writes: unchecked,
       writes_with_capability: unchecked,
-      writes_threads: unchecked,
+      t3_thread_send: unchecked,
       starts_threads: unchecked,
       writes_environment: unchecked,
     }),
@@ -231,6 +235,10 @@ const mismatchedProvider = {
 };
 const supervisedClient = clientCaller("approval-required");
 const fullAccessClient = clientCaller("full-access");
+const aliceClient: McpInvocationContext.McpInvocationScope = {
+  ...fullAccessClient,
+  principal: "alice",
+};
 const readOnlyClient = clientCaller("read-only");
 const linkedClient: McpInvocationContext.McpInvocationScope = {
   ...supervisedClient,
@@ -249,7 +257,7 @@ it.effect.each([
   ["reads", readOnlyClient, {}, "ran"],
 
   ["writes", readOnlyClient, {}, "capability_denied"],
-  ["writes_threads", readOnlyClient, { threadId: supervisedThreadId }, "capability_denied"],
+  ["t3_thread_send", readOnlyClient, { threadId: supervisedThreadId }, "capability_denied"],
   ["starts_threads", readOnlyClient, {}, "capability_denied"],
   ["writes_environment", readOnlyClient, {}, "capability_denied"],
 
@@ -280,25 +288,31 @@ it.effect.each([
   ["writes", fullAccessLinkedClient, {}, "ran"],
   ["writes_with_capability", fullAccessLinkedClient, {}, "ran"],
 
-  ["writes_threads", supervised, {}, "ran"],
-  ["writes_threads", supervised, { threadId: planThreadId }, "ran"],
+  ["t3_thread_send", supervised, {}, "ran"],
+  ["t3_thread_send", supervised, { threadId: planThreadId }, "ran"],
   [
-    "writes_threads",
+    "t3_thread_send",
     supervised,
     { threadId: fullAccessThreadId },
     "runtime_mode_escalation_denied",
   ],
-  ["writes_threads", plan, { threadId: supervisedThreadId }, "interaction_mode_escalation_denied"],
-  ["writes_threads", fullAccess, { threadId: supervisedThreadId }, "ran"],
-  ["writes_threads", ended, { threadId: supervisedThreadId }, "parent_not_active"],
-  ["writes_threads", supervisedClient, { threadId: supervisedThreadId }, "ran"],
+  ["t3_thread_send", plan, { threadId: supervisedThreadId }, "interaction_mode_escalation_denied"],
+  ["t3_thread_send", fullAccess, { threadId: supervisedThreadId }, "ran"],
+  ["t3_thread_send", ended, { threadId: supervisedThreadId }, "parent_not_active"],
+  ["t3_thread_send", supervisedClient, { threadId: supervisedThreadId }, "ran"],
   [
-    "writes_threads",
+    "t3_thread_send",
     supervisedClient,
     { threadId: fullAccessThreadId },
     "runtime_mode_escalation_denied",
   ],
-  ["writes_threads", supervised, { threadId: "thread:missing" }, "ran"],
+  ["t3_thread_send", supervised, { threadId: "thread:missing" }, "ran"],
+  // Send, stop and update all pass through this shared ownership guard.
+  ["t3_thread_send", aliceClient, { threadId: aliceThreadId }, "ran"],
+  ["t3_thread_send", aliceClient, { threadId: bobThreadId }, "thread_not_found"],
+  // A principal-bound client reaches only the tools its CLI uses.
+  ["writes", aliceClient, {}, "capability_denied"],
+  ["writes_environment", aliceClient, {}, "capability_denied"],
 
   ["starts_threads", supervised, {}, "approval-required/default"],
   ["starts_threads", supervised, { runtimeMode: "full-access" }, "runtime_mode_escalation_denied"],

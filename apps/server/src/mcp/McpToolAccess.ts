@@ -379,6 +379,26 @@ const linksUnavailable = new OrchestratorMcpFailure({
 });
 
 /**
+ * A principal-bound MCP client owns no environment-wide state. These are the
+ * exact tools the thread/project CLI uses; every other tool is refused before
+ * linked forwarding or handler side effects. Owner and thread callers are not
+ * restricted.
+ */
+export const PRINCIPAL_CLIENT_TOOLS: ReadonlySet<string> = new Set([
+  "t3_project_list",
+  "t3_project_create",
+  "t3_thread_launch",
+  "t3_thread_list",
+  "t3_thread_read",
+  "t3_thread_send",
+  "t3_thread_wait",
+  "t3_thread_interrupt",
+]);
+
+export const isPrincipalClientScope = (scope: McpInvocationContext.McpInvocationScope) =>
+  scope.client !== undefined && scope.principal !== undefined;
+
+/**
  * Every tool that takes a linked environment runs there the same way: its
  * declaration checks the caller here, and the same call goes to the other
  * environment, which checks the rest. The handler here never sees

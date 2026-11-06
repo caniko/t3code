@@ -77,6 +77,18 @@ const makeBearerRequest = (
     EnvironmentAuth.EnvironmentAuth["Service"]["authenticateHttpRequest"]
   >[0];
 
+const makeMcpRequest = (
+  token: string,
+): Parameters<EnvironmentAuth.EnvironmentAuth["Service"]["authenticateMcpClient"]>[0] =>
+  ({
+    cookies: {},
+    headers: {
+      authorization: `Bearer ${token}`,
+    },
+  }) as unknown as Parameters<
+    EnvironmentAuth.EnvironmentAuth["Service"]["authenticateMcpClient"]
+  >[0];
+
 const requestMetadata = {
   deviceType: "desktop" as const,
   os: "macOS",
@@ -440,40 +452,84 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
     );
 
     it.effect(
-    "caps a principal's credentials below server administration and keeps them out of MCP",
-    () =>
+      "caps a principal's credentials below server administration and keeps them out of MCP",
+      () =>
+        Effect.gen(function* () {
+          const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+          const link = yield* serverAuth.createPairingLink({ principal: "alice" });
+          expect(link).toMatchObject({
+            subject: "principal:alice",
+            scopes: AuthPrincipalScopes,
+          });
+          const session = yield* serverAuth.issueSession({ principal: "alice" });
+          expect(session).toMatchObject({
+            subject: "principal:alice",
+            scopes: AuthPrincipalScopes,
+          });
+
+          const tooWide = ["orchestration:read", "access:write"] as const;
+          expect(
+            yield* serverAuth
+              .createPairingLink({ principal: "alice", scopes: tooWide })
+              .pipe(Effect.flip),
+          ).toMatchObject({ _tag: "ServerAuthScopeNotGrantedError" });
+          expect(
+            yield* serverAuth
+              .issueSession({ principal: "alice", scopes: tooWide })
+              .pipe(Effect.flip),
+          ).toMatchObject({ _tag: "ServerAuthScopeNotGrantedError" });
+          expect(
+            yield* serverAuth
+              .issueSession({ subject: "principal:alice", scopes: tooWide })
+              .pipe(Effect.flip),
+          ).toMatchObject({ _tag: "ServerAuthScopeNotGrantedError" });
+
+          expect(
+            yield* serverAuth
+              .consumeMcpApprovalCode(link.credential, "read-only")
+              .pipe(Effect.flip),
+          ).toMatchObject({ _tag: "ServerAuthMcpApprovalCodeError", reason: "not_a_pairing_code" });
+        }).pipe(Effect.provide(layerEnvironmentAuth())),
+    );
+
+    it.effect("binds an MCP client session to a principal and keeps it off other endpoints", () =>
       Effect.gen(function* () {
         const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
-        const link = yield* serverAuth.createPairingLink({ principal: "alice" });
-        expect(link).toMatchObject({
-          subject: "principal:alice",
-          scopes: AuthPrincipalScopes,
+        const issued = yield* serverAuth.issueMcpClientSession({
+          access: "full-access",
+          peerLink: false,
+          client: { deviceType: "bot" },
+          label: "t3 thread cli",
+          principal: "can",
         });
-        const session = yield* serverAuth.issueSession({ principal: "alice" });
-        expect(session).toMatchObject({ subject: "principal:alice", scopes: AuthPrincipalScopes });
 
-        const tooWide = ["orchestration:read", "access:write"] as const;
+        expect(yield* serverAuth.authenticateMcpClient(makeMcpRequest(issued.token))).toMatchObject(
+          {
+            principal: "can",
+            access: "full-access",
+          },
+        );
         expect(
           yield* serverAuth
-            .createPairingLink({ principal: "alice", scopes: tooWide })
+            .authenticateHttpRequest(makeBearerRequest(issued.token))
             .pipe(Effect.flip),
-        ).toMatchObject({ _tag: "ServerAuthScopeNotGrantedError" });
-        expect(
-          yield* serverAuth.issueSession({ principal: "alice", scopes: tooWide }).pipe(Effect.flip),
-        ).toMatchObject({ _tag: "ServerAuthScopeNotGrantedError" });
+        ).toMatchObject({ _tag: "ServerAuthInvalidCredentialError" });
         expect(
           yield* serverAuth
-            .issueSession({ subject: "principal:alice", scopes: tooWide })
+            .authenticateWebSocketUpgrade(makeBearerRequest(issued.token), "rpc")
             .pipe(Effect.flip),
-        ).toMatchObject({ _tag: "ServerAuthScopeNotGrantedError" });
+        ).toMatchObject({ _tag: "ServerAuthInvalidCredentialError" });
 
+        const principalSession = yield* serverAuth.issueSession({ principal: "can" });
         expect(
-          yield* serverAuth.consumeMcpApprovalCode(link.credential, "read-only").pipe(Effect.flip),
-        ).toMatchObject({ _tag: "ServerAuthMcpApprovalCodeError", reason: "not_a_pairing_code" });
+          yield* serverAuth
+            .authenticateMcpClient(makeMcpRequest(principalSession.token))
+            .pipe(Effect.flip),
+        ).toMatchObject({ _tag: "ServerAuthInvalidCredentialError" });
       }).pipe(Effect.provide(layerEnvironmentAuth())),
-  );
+    );
 
-  it.effect("narrows seeded desktop grants to the requested scopes", () =>
+    it.effect("narrows seeded desktop grants to the requested scopes", () =>
       Effect.gen(function* () {
         const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
         const token = yield* serverAuth.exchangeBootstrapCredentialForAccessToken(

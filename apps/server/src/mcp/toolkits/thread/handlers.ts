@@ -133,7 +133,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         .searchThreads({
           ...input,
           projectId: input.projectId ?? caller?.projectId,
-          ownerPrincipal: caller?.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID,
+          ownerPrincipal: caller?.ownerPrincipal ?? scope.principal ?? DEFAULT_PRINCIPAL_ID,
         })
         .pipe(Effect.mapError(unavailable));
       return {

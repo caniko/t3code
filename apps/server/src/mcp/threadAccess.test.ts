@@ -81,3 +81,29 @@ it.effect.each([
         expect(result.failure.code).toBe("thread_not_found");
     }),
 );
+
+it.effect("scopes a principal-bound MCP client to its own threads", () =>
+  Effect.gen(function* () {
+    const target = ThreadId.make("thread:principal-owned");
+    const shells = new Map([[target, { ...liveThreadShell(target), ownerPrincipal: "alice" }]]);
+    const readAs = (principal: string) =>
+      readThread(target).pipe(
+        Effect.result,
+        Effect.provideService(McpInvocationContext.McpInvocationContext, {
+          ...client,
+          principal,
+        } as McpInvocationContext.McpInvocationScope),
+        Effect.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (threadId) => Effect.succeed(shells.get(threadId) ?? null),
+            getProjectThreadRecords: () => Effect.succeed({ thread: shells.get(target) } as never),
+          }),
+        ),
+      );
+
+    expect((yield* readAs("alice"))._tag).toBe("Success");
+    const hidden = yield* readAs("bob");
+    expect(hidden._tag).toBe("Failure");
+    if (hidden._tag === "Failure") expect(hidden.failure.code).toBe("thread_not_found");
+  }),
+);
