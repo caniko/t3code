@@ -119,7 +119,11 @@ describe("DesktopConnectionCatalogStore", () => {
       Effect.gen(function* () {
         const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
         assert.isFalse(yield* store.set("{}"));
-        assert.deepStrictEqual(yield* store.get, Option.none());
+        const error = yield* store.get.pipe(Effect.flip);
+        assert.instanceOf(
+          error,
+          DesktopConnectionCatalogStore.DesktopConnectionCatalogStoreProtectionError,
+        );
       }),
       false,
     ),
@@ -260,6 +264,13 @@ describe("DesktopConnectionCatalogStore", () => {
         );
 
         assert.deepEqual(yield* store.read, { _tag: "unavailable" });
+        const error = yield* store.get.pipe(Effect.flip);
+        assert.instanceOf(
+          error,
+          DesktopConnectionCatalogStore.DesktopConnectionCatalogStoreProtectionError,
+        );
+        assert.equal(error.operation, "check-encryption-availability");
+        assert.include(yield* fileSystem.readFileString(catalogPath), "encryptedCatalog");
       }),
       false,
     ),
