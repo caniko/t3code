@@ -8,6 +8,7 @@ import * as Console from "effect/Console";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 import * as Stdio from "effect/Stdio";
@@ -132,6 +133,12 @@ const environmentLinkCommand = Command.make("link", {
       "A pairing code from the other environment (`t3 pair` there), or - to read it from stdin.",
     ),
   ),
+  expectedEnvironmentId: Flag.String("expect-environment-id").pipe(
+    Flag.withDescription(
+      "Only send the pairing code to addresses that answer as this environment.",
+    ),
+    Flag.optional,
+  ),
   access: Flag.Literals("access", AuthMcpClientAccess.literals).pipe(
     Flag.withDescription(
       "What this environment's agents may do there: read-only, or the broadest runtime mode.",
@@ -152,6 +159,10 @@ const environmentLinkCommand = Command.make("link", {
               alternateUrls: flags.alternateUrl,
               pairingCode,
               access: flags.access,
+              ...Option.match(flags.expectedEnvironmentId, {
+                onNone: () => ({}),
+                onSome: (value) => ({ expectedEnvironmentId: EnvironmentId.make(value) }),
+              }),
             });
             yield* Console.log(
               `Linked ${linked.label} (${linked.environmentId}) with ${linked.access} access, until ${DateTime.formatIso(linked.expiresAt)}.\n`,
