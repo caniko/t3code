@@ -11,7 +11,6 @@ const {
   hasSwitchMock,
   registerSchemesMock,
   setDesktopNameMock,
-  setNameMock,
   mkdirSyncMock,
   writeFileSyncMock,
   copyFileSyncMock,
@@ -23,7 +22,6 @@ const {
   hasSwitchMock: vi.fn(),
   registerSchemesMock: vi.fn(),
   setDesktopNameMock: vi.fn(),
-  setNameMock: vi.fn(),
   mkdirSyncMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
   copyFileSyncMock: vi.fn(),
@@ -34,7 +32,6 @@ const {
 vi.mock("electron", () => ({
   app: {
     setDesktopName: setDesktopNameMock,
-    setName: setNameMock,
     getVersion: () => "0.0.37",
     isPackaged: true,
     getAppPath: () => "/tmp/.mount_T3/resources/app.asar",
@@ -70,7 +67,6 @@ describe("DesktopPreReadyPlatform", () => {
     hasSwitchMock.mockReset();
     registerSchemesMock.mockReset();
     setDesktopNameMock.mockReset();
-    setNameMock.mockReset();
     mkdirSyncMock.mockReset();
     writeFileSyncMock.mockReset();
     copyFileSyncMock.mockReset();
@@ -131,7 +127,6 @@ describe("DesktopPreReadyPlatform", () => {
     vi.stubEnv("VITE_DEV_SERVER_URL", "");
     getSwitchValueMock.mockReturnValue("");
     let desktopName = "t3code.desktop";
-    let applicationName = "Electron";
     let desktopEntry = previousEntry;
     let iconInstalled = false;
     copyFileSyncMock.mockImplementation((_source: string, destination: string) => {
@@ -139,9 +134,6 @@ describe("DesktopPreReadyPlatform", () => {
     });
     setDesktopNameMock.mockImplementation((name: string) => {
       desktopName = name;
-    });
-    setNameMock.mockImplementation((name: string) => {
-      applicationName = name;
     });
     writeFileSyncMock.mockImplementation((path: string, contents: string) => {
       if (path === "/xdg/applications/com.t3tools.T3Code.desktop") desktopEntry = contents;
@@ -151,7 +143,6 @@ describe("DesktopPreReadyPlatform", () => {
       Effect.gen(function* () {
         const portalIdentity = Promise.resolve().then(() => ({
           desktopName,
-          applicationName,
           desktopEntry,
           iconInstalled,
         }));
@@ -168,7 +159,6 @@ describe("DesktopPreReadyPlatform", () => {
         );
         const identity = yield* Effect.promise(() => portalIdentity);
         assert.equal(identity.desktopName, "com.t3tools.T3Code.desktop");
-        assert.equal(identity.applicationName, "T3 Code Beta");
         assert.include(identity.desktopEntry ?? "", "Exec=/Applications/current.AppImage %U");
         assert.include(identity.desktopEntry ?? "", "Name=T3 Code (Beta)");
         assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/t3code;");
@@ -255,7 +245,6 @@ describe("DesktopPreReadyPlatform", () => {
         assert.equal(registerSchemesMock.mock.calls.length, 1);
         assert.equal(appendSwitchMock.mock.calls.length, 0);
         assert.equal(setDesktopNameMock.mock.calls.length, 0);
-        assert.deepEqual(setNameMock.mock.calls, [["T3 Code Beta"]]);
       }),
   );
 });

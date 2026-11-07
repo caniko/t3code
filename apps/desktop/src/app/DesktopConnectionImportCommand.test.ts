@@ -12,6 +12,7 @@ import * as Schema from "effect/Schema";
 
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
+import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
 import * as DesktopConnectionCatalogStore from "./DesktopConnectionCatalogStore.ts";
 import * as DesktopConnectionImportCommand from "./DesktopConnectionImportCommand.ts";
@@ -640,6 +641,12 @@ describe("DesktopConnectionImportCommand.prepare", () => {
       return yield* run(events).pipe(
         Effect.provide(layerPreReady),
         Effect.provideService(ElectronApp.ElectronApp, electronApp),
+        Effect.provideService(DesktopAppIdentity.DesktopAppIdentity, {
+          resolveUserDataPath: Effect.die("profile setup must use the pre-ready filesystem"),
+          configure: Effect.sync(() => {
+            events.push("identity");
+          }),
+        }),
         Effect.provideService(DesktopEnvironment.DesktopEnvironment, environment),
       );
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped);
@@ -649,7 +656,13 @@ describe("DesktopConnectionImportCommand.prepare", () => {
       DesktopConnectionImportCommand.prepare.pipe(
         Effect.tap(() =>
           Effect.sync(() => {
-            assert.deepEqual(events, ["pre-ready", "set-path:userData", "lock", "ready"]);
+            assert.deepEqual(events, [
+              "pre-ready",
+              "set-path:userData",
+              "lock",
+              "identity",
+              "ready",
+            ]);
           }),
         ),
       ),

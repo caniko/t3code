@@ -15,6 +15,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as ElectronApp from "../electron/ElectronApp.ts";
+import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
 import * as DesktopConnectionCatalogStore from "./DesktopConnectionCatalogStore.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopPreReadyFileSystem from "./DesktopPreReadyFileSystem.ts";
@@ -121,6 +122,8 @@ export const prepare = Effect.gen(function* () {
   if (!(yield* electronApp.requestSingleInstanceLock)) {
     return yield* new DesktopConnectionImportError({ reason: "app-running" });
   }
+  const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
+  yield* identity.configure;
   yield* electronApp.whenReady;
 }).pipe(Effect.withSpan("desktop.connectionImport.prepare"));
 
