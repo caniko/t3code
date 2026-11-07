@@ -68,14 +68,7 @@ export const make = Effect.gen(function* () {
   const platform = yield* HostProcess.Platform;
   const homeDirectory = yield* HostProcess.HomeDirectory;
   const linuxDesktopEntryConfig = yield* LinuxDesktopEntryConfig;
-  const devServerUrl = yield* trimmedString("VITE_DEV_SERVER_URL");
   return yield* Effect.sync((): DesktopPreReadyElectronOptions["Service"] => {
-    const branding = resolveDesktopAppBranding({
-      isDevelopment: Option.isSome(devServerUrl),
-      appVersion: Electron.app.getVersion(),
-    });
-    // The importer and normal startup must select the same keyring application identity before yielding.
-    Electron.app.setName(`${branding.baseName} ${branding.stageLabel}`);
     const linuxPasswordStoreCommandLine =
       platform === "linux"
         ? readCommandLineSwitchValue(Electron.app.commandLine, "password-store")
@@ -149,7 +142,10 @@ export const make = Effect.gen(function* () {
         NodeFS.writeFileSync(
           desktopEntryPath,
           renderUrlHandlerDesktopEntry({
-            displayName: branding.displayName,
+            displayName: resolveDesktopAppBranding({
+              isDevelopment: linux.isDevelopment,
+              appVersion: Electron.app.getVersion(),
+            }).displayName,
             execTarget:
               Option.getOrUndefined(
                 Option.orElse(

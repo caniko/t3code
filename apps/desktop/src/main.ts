@@ -277,6 +277,7 @@ if (importConnectionsArgument._tag === "Invalid") {
     Layer.provideMerge(
       DesktopConnectionCatalogStore.layer.pipe(Layer.provideMerge(DesktopSavedEnvironments.layer)),
     ),
+    Layer.provideMerge(DesktopAppIdentity.layer.pipe(Layer.provide(DesktopAssets.layer))),
     Layer.provideMerge(layerDesktopEnvironment),
     Layer.provideMerge(ElectronSafeStorage.layer),
     Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
