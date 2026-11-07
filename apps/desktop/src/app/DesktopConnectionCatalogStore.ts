@@ -505,9 +505,18 @@ export const make = Effect.gen(function* () {
   return DesktopConnectionCatalogStore.of({
     read: readCatalog,
     get: readCatalog.pipe(
-      Effect.map((result) =>
-        result._tag === "present" ? Option.some(result.catalog) : Option.none<string>(),
-      ),
+      Effect.flatMap((result) => {
+        if (result._tag === "unavailable") {
+          return new DesktopConnectionCatalogStoreProtectionError({
+            operation: "check-encryption-availability",
+            catalogPath,
+            cause: new Error("Secure storage is unavailable."),
+          });
+        }
+        return Effect.succeed(
+          result._tag === "present" ? Option.some(result.catalog) : Option.none<string>(),
+        );
+      }),
       Effect.withSpan("desktop.connectionCatalogStore.get"),
     ),
     set: Effect.fn("desktop.connectionCatalogStore.set")(function* (catalog) {
