@@ -172,6 +172,10 @@ const importedDocument = {
       connectionId: "bearer:env-1",
       credential: { _tag: "BearerConnectionCredential", token: "secret-token" },
     },
+    {
+      connectionId: "ssh:env-1",
+      credential: { _tag: "BearerConnectionCredential", token: "ssh-token" },
+    },
   ],
   remoteDpopTokens: [],
   disabledEnvironmentIds: [],
@@ -192,7 +196,7 @@ describe("DesktopConnectionImportCommand", () => {
         assert.isTrue(yield* store.set(JSON.stringify(existingDocument)));
 
         const summary = yield* command.importConnections(importPath);
-        assert.deepEqual(summary, { targets: 2, profiles: 2, credentials: 1 });
+        assert.deepEqual(summary, { targets: 2, profiles: 2, credentials: 2 });
         assert.notInclude(JSON.stringify(summary), "secret-token");
 
         const stored = yield* store.get;
@@ -235,7 +239,7 @@ describe("DesktopConnectionImportCommand", () => {
         assert.deepEqual(yield* command.importConnections(importPath), {
           targets: 2,
           profiles: 2,
-          credentials: 1,
+          credentials: 2,
         });
         const stored = yield* store.get;
         assert.isTrue(stored._tag === "Some");
@@ -395,6 +399,58 @@ describe("DesktopConnectionImportCommand", () => {
         yield* fileSystem.makeDirectory(environment.stateDir, { recursive: true });
         assert.isTrue(yield* store.set(original));
         const cases: ReadonlyArray<readonly [string, object, string]> = [
+          [
+            "redirect-existing-token",
+            {
+              ...importedDocument,
+              profiles: [
+                {
+                  ...importedDocument.profiles[0],
+                  httpBaseUrl: "https://attacker.example",
+                  wsBaseUrl: "wss://attacker.example",
+                },
+                importedDocument.profiles[1],
+              ],
+              credentials: [],
+            },
+            "inconsistent-document",
+          ],
+          [
+            "missing-ssh-credential",
+            { ...importedDocument, credentials: [importedDocument.credentials[0]] },
+            "inconsistent-document",
+          ],
+          ["missing-profile", { ...importedDocument, profiles: [] }, "inconsistent-document"],
+          ...[
+            "learned:env-1:https://attacker.example@bearer:env-1",
+            "learned:env-1:https://attacker.example",
+          ].map(
+            (connectionId) =>
+              [
+                "synthetic-learned-identity",
+                {
+                  ...importedDocument,
+                  targets: [{ ...importedDocument.targets[0], connectionId }],
+                  profiles: [{ ...importedDocument.profiles[0], connectionId }],
+                  credentials: [{ ...importedDocument.credentials[0], connectionId }],
+                },
+                "inconsistent-document",
+              ] as const,
+          ),
+          ...[{ learned: true }, { network: "tailscale" }, { authorization: "t3-connect" }].map(
+            (flags) =>
+              [
+                "transport-relaxing-profile",
+                {
+                  ...importedDocument,
+                  profiles: [
+                    { ...importedDocument.profiles[0], ...flags },
+                    importedDocument.profiles[1],
+                  ],
+                },
+                "inconsistent-document",
+              ] as const,
+          ),
           [
             "shared-connection-id",
             {

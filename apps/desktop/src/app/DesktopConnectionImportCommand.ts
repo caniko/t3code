@@ -162,6 +162,7 @@ function importedDocumentProblem(
     if (targetIdentities.has(identity)) return "duplicate-identity";
     targetIdentities.add(identity);
     if (target._tag === "RelayConnectionTarget") continue;
+    if (target.connectionId.startsWith("learned:")) return "inconsistent-document";
     if (targetsByConnectionId.has(target.connectionId)) return "duplicate-identity";
     targetsByConnectionId.set(target.connectionId, target);
   }
@@ -174,6 +175,14 @@ function importedDocumentProblem(
     if (target === undefined || !targetProfileMatches(target, profile)) {
       return "inconsistent-document";
     }
+    if (
+      profile._tag === "BearerConnectionProfile" &&
+      (profile.learned !== undefined ||
+        profile.network !== undefined ||
+        profile.authorization !== undefined)
+    ) {
+      return "inconsistent-document";
+    }
   }
 
   const credentialConnectionIds = new Set<string>();
@@ -181,6 +190,12 @@ function importedDocumentProblem(
     if (credentialConnectionIds.has(credential.connectionId)) return "duplicate-identity";
     credentialConnectionIds.add(credential.connectionId);
     if (!targetsByConnectionId.has(credential.connectionId)) return "inconsistent-document";
+  }
+  // Imported endpoints cannot borrow credentials or profiles from the local keyring.
+  for (const connectionId of targetsByConnectionId.keys()) {
+    if (!profileConnectionIds.has(connectionId) || !credentialConnectionIds.has(connectionId)) {
+      return "inconsistent-document";
+    }
   }
   return null;
 }
