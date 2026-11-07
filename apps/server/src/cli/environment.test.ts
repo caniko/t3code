@@ -8,18 +8,22 @@ import type { ExecutionEnvironmentDescriptor } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NetService from "@t3tools/shared/Net";
 import { assert, expect, it } from "@effect/vitest";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/cli";
 
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { cli } from "../binCli.ts";
 import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { descriptorOf, servePeer } from "../peer/PeerLinks.testkit.ts";
-import { readPairingCode } from "./environment.ts";
+import { environmentCommand, readPairingCode } from "./environment.ts";
 
 const layerCliRuntime = Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer);
 
@@ -164,4 +168,63 @@ it.effect("reads a pairing code from stdin without changing literal-code behavio
     assert.strictEqual(error.reason, "pairing_rejected");
     assert.strictEqual(error.message, "The pairing code read from standard input is empty.");
   }),
+);
+
+const layerDescribeRuntime = Layer.mergeAll(
+  layerCliRuntime,
+  TestConsole.layer,
+  ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+);
+
+it.effect("describes this environment's native identity without starting a server", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+      prefix: "t3-environment-describe-test-",
+    });
+    const runDescribe = (args: ReadonlyArray<string>) =>
+      Command.runWith(environmentCommand, { version: "0.0.0" })([
+        "describe",
+        "--base-dir",
+        baseDir,
+        ...args,
+      ]);
+    const lastLog = Effect.map(TestConsole.logLines, (lines) => String(lines.at(-1) ?? ""));
+
+    const { human, json, repeatedJson } = yield* Effect.gen(function* () {
+      yield* runDescribe([]);
+      const human = yield* lastLog;
+      yield* runDescribe(["--json"]);
+      const json = yield* lastLog;
+      yield* runDescribe(["--json"]);
+      const repeatedJson = yield* lastLog;
+      return { human, json, repeatedJson };
+    }).pipe(Effect.provide(layerDescribeRuntime));
+
+    const descriptor = JSON.parse(json) as { environmentId: string; label: string };
+    const repeated = JSON.parse(repeatedJson) as { environmentId: string };
+    assert.equal(descriptor.environmentId, repeated.environmentId);
+    assert.equal(human, `${descriptor.label} (${descriptor.environmentId})\n`);
+
+    const nativeDescriptor = yield* Effect.gen(function* () {
+      const environment = yield* ServerEnvironment.ServerEnvironment;
+      return yield* environment.getDescriptor;
+    }).pipe(
+      Effect.provide(
+        ServerEnvironment.layer.pipe(
+          Layer.provide(ServerSecretStore.layer),
+          Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
+          Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+        ),
+      ),
+    );
+    assert.equal(descriptor.environmentId, nativeDescriptor.environmentId);
+    assert.deepEqual(descriptor, nativeDescriptor);
+
+    const stateDir = path.join(baseDir, "userdata");
+    assert.isFalse(yield* fileSystem.exists(path.join(stateDir, "statev2.sqlite")));
+    assert.isFalse(yield* fileSystem.exists(path.join(stateDir, "server-runtime.json")));
+    assert.deepEqual(yield* fileSystem.readDirectory(path.join(stateDir, "secrets")), []);
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );

@@ -1,6 +1,7 @@
 import {
   AuthMcpClientAccess,
   EnvironmentId,
+  ExecutionEnvironmentDescriptor,
   PeerLinkError,
   peerLinkFailureKind,
   type PeerLinkSummary,
@@ -86,6 +87,10 @@ const jsonFlag = Flag.Boolean("json").pipe(
 
 const encodeLinks = Schema.encodeEffect(
   Schema.fromJsonString(Schema.Array(Schema.toEncoded(Schema.Unknown))),
+);
+
+const encodeEnvironmentDescriptor = Schema.encodeEffect(
+  Schema.fromJsonString(ExecutionEnvironmentDescriptor),
 );
 
 const formatLinks = (links: ReadonlyArray<PeerLinkSummary>) =>
@@ -317,6 +322,40 @@ const environmentLinkCommand = Command.make("link", {
   ),
 );
 
+const environmentDescribeCommand = Command.make("describe", {
+  ...authLocationFlags,
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription(
+    "Show this environment's id, platform and capabilities without starting its server.",
+  ),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const logLevel = yield* GlobalFlag.LogLevel;
+      const config = yield* resolveCliAuthConfig(flags, logLevel, { quietLogs: flags.json });
+      const descriptor = yield* Effect.gen(function* () {
+        const environment = yield* ServerEnvironment.ServerEnvironment;
+        return yield* environment.getDescriptor;
+      }).pipe(
+        Effect.provide(
+          ServerEnvironment.layer.pipe(
+            Layer.provide(ServerSecretStore.layer),
+            Layer.provide(ServerConfig.layer(config)),
+            Layer.provide(
+              Layer.succeed(References.MinimumLogLevel, flags.json ? "Error" : config.logLevel),
+            ),
+          ),
+        ),
+      );
+      yield* Console.log(
+        flags.json
+          ? `${yield* encodeEnvironmentDescriptor(descriptor)}\n`
+          : `${descriptor.label} (${descriptor.environmentId})\n`,
+      );
+    }),
+  ),
+);
+
 const environmentListCommand = Command.make("list", { ...authLocationFlags, json: jsonFlag }).pipe(
   Command.withDescription("List linked environments and whether each answers now."),
   Command.withHandler((flags) =>
@@ -360,8 +399,11 @@ const environmentUnlinkCommand = Command.make("unlink", {
 );
 
 export const environmentCommand = Command.make("environment").pipe(
-  Command.withDescription("Link other T3 Code environments, so agents here can work there."),
+  Command.withDescription(
+    "Link other T3 Code environments, or show this one's id and capabilities.",
+  ),
   Command.withSubcommands([
+    environmentDescribeCommand,
     environmentLinkCommand,
     environmentListCommand,
     environmentUnlinkCommand,
