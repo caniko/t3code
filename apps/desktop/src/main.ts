@@ -85,7 +85,11 @@ import * as DesktopWslServerTree from "./wsl/DesktopWslServerTree.ts";
 
 if (process.argv.includes("--version")) {
   try {
-    NodeFS.writeSync(process.stdout.fd, `${Electron.app.getVersion()}\n`);
+    const version = Electron.app.getVersion();
+    NodeFS.writeSync(
+      process.stdout.fd,
+      `${process.argv.includes("--json") ? JSON.stringify({ version, capabilities: ["import-connections"] }) : version}\n`,
+    );
   } catch (error) {
     if (!(error instanceof Error) || !("code" in error) || error.code !== "EPIPE") throw error;
   }

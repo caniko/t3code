@@ -256,6 +256,12 @@ const environmentLinkCommand = Command.make("link", {
     ),
     Flag.optional,
   ),
+  expectedEnvironmentId: Flag.String("expect-environment-id").pipe(
+    Flag.withDescription(
+      "Only send the pairing code to addresses that answer as this environment.",
+    ),
+    Flag.optional,
+  ),
   access: Flag.Literals("access", AuthMcpClientAccess.literals).pipe(
     Flag.withDescription(
       "What this environment's agents may do there: read-only, or the broadest runtime mode.",
@@ -272,10 +278,12 @@ const environmentLinkCommand = Command.make("link", {
         if (
           Option.isSome(flags.url) ||
           Option.isSome(flags.pairingCode) ||
-          flags.alternateUrl.length > 0
+          flags.alternateUrl.length > 0 ||
+          Option.isSome(flags.expectedEnvironmentId)
         ) {
           return yield* new EnvironmentLinkUsageError({
-            detail: "--from takes its addresses and pairing codes from the file.",
+            detail:
+              "--from takes its addresses and pairing codes from the file and cannot verify a single expected environment.",
           });
         }
         const text = yield* readLinkBatch(flags.from.value);
@@ -295,6 +303,10 @@ const environmentLinkCommand = Command.make("link", {
             alternateUrls: flags.alternateUrl,
             pairingCode,
             access: flags.access,
+            ...Option.match(flags.expectedEnvironmentId, {
+              onNone: () => ({}),
+              onSome: (value) => ({ expectedEnvironmentId: EnvironmentId.make(value) }),
+            }),
           });
           yield* Console.log(
             `Linked ${linked.label} (${linked.environmentId}) with ${linked.access} access, until ${DateTime.formatIso(linked.expiresAt)}.\n`,
