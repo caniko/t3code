@@ -7,16 +7,19 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { ExecutionEnvironmentDescriptor } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NetService from "@t3tools/shared/Net";
-import { expect, it } from "@effect/vitest";
+import { assert, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Stdio from "effect/Stdio";
+import * as Stream from "effect/Stream";
 import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/cli";
 
 import { cli } from "../binCli.ts";
 import * as ServerConfig from "../config.ts";
 import { descriptorOf, servePeer } from "../peer/PeerLinks.testkit.ts";
+import { readPairingCode } from "./environment.ts";
 
 const layerCliRuntime = Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer);
 
@@ -140,4 +143,25 @@ it.effect("links a file of environments, reports each line, and fails when one d
       expect(redacted).not.toMatch(/alice|hunter2|s3cret/);
     }),
   ).pipe(Effect.provide(Layer.mergeAll(layerCliRuntime, TestConsole.layer))),
+);
+
+it.effect("reads a pairing code from stdin without changing literal-code behavior", () =>
+  Effect.gen(function* () {
+    const input = Stdio.layerTest({
+      stdin: Stream.make(new TextEncoder().encode("  pairing-code\n")),
+    });
+    assert.strictEqual(yield* readPairingCode("-").pipe(Effect.provide(input)), "pairing-code");
+    assert.strictEqual(
+      yield* readPairingCode("literal-code").pipe(
+        Effect.provide(Stdio.layerTest({ stdin: Stream.die("stdin must not be read") })),
+      ),
+      "literal-code",
+    );
+    const error = yield* readPairingCode("-").pipe(
+      Effect.provide(Stdio.layerTest({ stdin: Stream.empty })),
+      Effect.flip,
+    );
+    assert.strictEqual(error.reason, "pairing_rejected");
+    assert.strictEqual(error.message, "The pairing code read from standard input is empty.");
+  }),
 );

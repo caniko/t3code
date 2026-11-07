@@ -205,6 +205,33 @@ const readLinkBatch = Effect.fn("environment.readLinkBatch")(function* (from: st
   return yield* fs.readFileString(yield* expandHomePath(from));
 });
 
+/** @public */
+export const readPairingCode = Effect.fn("cli.environment.readPairingCode")(function* (
+  argument: string,
+) {
+  if (argument !== "-") return argument;
+  const stdio = yield* Stdio.Stdio;
+  const code = (yield* stdio.stdin.pipe(
+    Stream.decodeText(),
+    Stream.mkString,
+    Effect.mapError(
+      (cause) =>
+        new PeerLinkError({
+          reason: "pairing_rejected",
+          message: "Could not read the pairing code from standard input.",
+          cause,
+        }),
+    ),
+  )).trim();
+  if (code.length === 0) {
+    return yield* new PeerLinkError({
+      reason: "pairing_rejected",
+      message: "The pairing code read from standard input is empty.",
+    });
+  }
+  return code;
+});
+
 const environmentLinkCommand = Command.make("link", {
   ...authLocationFlags,
   url: Argument.String("url").pipe(
@@ -218,7 +245,9 @@ const environmentLinkCommand = Command.make("link", {
     Flag.atLeast(0),
   ),
   pairingCode: Flag.String("pairing-code").pipe(
-    Flag.withDescription("A pairing code from the other environment (`t3 pair` there)."),
+    Flag.withDescription(
+      "A pairing code from the other environment (`t3 pair` there), or - to read it from stdin.",
+    ),
     Flag.optional,
   ),
   from: Flag.String("from").pipe(
@@ -258,7 +287,7 @@ const environmentLinkCommand = Command.make("link", {
         });
       }
       const url = flags.url.value;
-      const pairingCode = flags.pairingCode.value;
+      const pairingCode = yield* readPairingCode(flags.pairingCode.value);
       return yield* runWithPeerLinks(flags, (links) =>
         Effect.gen(function* () {
           const linked = yield* links.link({
