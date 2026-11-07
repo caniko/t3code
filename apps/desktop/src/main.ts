@@ -38,6 +38,7 @@ import * as DesktopAppActivation from "./app/DesktopAppActivation.ts";
 import * as DesktopWebLinks from "./app/DesktopWebLinks.ts";
 import * as DesktopAppIdentity from "./app/DesktopAppIdentity.ts";
 import * as DesktopConnectionCatalogStore from "./app/DesktopConnectionCatalogStore.ts";
+import * as DesktopConnectionImportCommand from "./app/DesktopConnectionImportCommand.ts";
 import * as DesktopClerk from "./app/DesktopClerk.ts";
 import * as DesktopCliCommand from "./app/DesktopCliCommand.ts";
 import * as DesktopApplicationMenu from "./window/DesktopApplicationMenu.ts";
@@ -252,4 +253,49 @@ const layerDesktopRuntime = layerDesktopClerk.pipe(
   Layer.provideMerge(DesktopPreReadyPlatform.layer),
 );
 
-DesktopApp.program.pipe(Effect.provide(layerDesktopRuntime), NodeRuntime.runMain);
+const importConnectionsArgument = DesktopConnectionImportCommand.readImportConnectionsArgument(
+  process.argv,
+);
+
+const failConnectionImport = (message: string) => {
+  process.stderr.write(`${message}\n`);
+  Electron.app.exit(1);
+};
+
+if (importConnectionsArgument._tag === "Invalid") {
+  failConnectionImport(importConnectionsArgument.message);
+} else if (importConnectionsArgument._tag === "Present") {
+  const layerDesktopConnectionImport = DesktopConnectionImportCommand.layer.pipe(
+    Layer.provideMerge(
+      DesktopConnectionCatalogStore.layer.pipe(Layer.provideMerge(DesktopSavedEnvironments.layer)),
+    ),
+    Layer.provideMerge(layerDesktopEnvironment),
+    Layer.provideMerge(ElectronSafeStorage.layer),
+    Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+    Layer.provideMerge(ElectronApp.layer),
+    Layer.provideMerge(DesktopPreReadyPlatform.layer),
+  );
+  const program = Effect.gen(function* () {
+    yield* DesktopConnectionImportCommand.prepare;
+    const command = yield* DesktopConnectionImportCommand.DesktopConnectionImportCommand;
+    return yield* command.importConnections(importConnectionsArgument.path);
+  }).pipe(
+    Effect.provide(layerDesktopConnectionImport),
+    Effect.tap((summary) =>
+      Effect.sync(() => {
+        process.stdout.write(
+          `Imported ${summary.targets} targets, ${summary.profiles} profiles, ${summary.credentials} credentials.\n`,
+        );
+        Electron.app.exit(0);
+      }),
+    ),
+    Effect.catch((error) =>
+      Effect.sync(() => {
+        failConnectionImport(error instanceof Error ? error.message : "Connection import failed.");
+      }),
+    ),
+  );
+  void Effect.runPromise(program);
+} else {
+  DesktopApp.program.pipe(Effect.provide(layerDesktopRuntime), NodeRuntime.runMain);
+}
