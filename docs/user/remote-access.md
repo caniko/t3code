@@ -236,6 +236,31 @@ again on its next connect.
 For Antigravity's Google callback on a remote host, see
 [remote sign-in](./providers-antigravity.md#sign-in-from-a-remote-device).
 
+## Unattended enrollment
+
+Scripts can pass a pairing code on stdin instead of putting it in process arguments:
+
+```bash
+t3 environment link https://peer.example --pairing-code - \
+  --expect-environment-id ENVIRONMENT_ID < pairing-code.txt
+```
+
+Keep the input file private. The expected environment ID filters addresses before
+T3 Code sends the pairing code, so a reused address cannot receive it.
+
+For desktop registration, quit the app, then run its executable with
+`--import-connections FILE`. The file must be a version-1 connection catalog,
+owned by the invoking user and accessible only to that user on Unix. Every bearer
+or SSH target must include its own matching profile and bearer credential;
+learned routes and transport-trust overrides are not importable. Unrelated saved
+connections stay in place, and imported route order is preserved.
+
+The import uses the app's native keyring and fails without changing the catalog
+when secure storage is unavailable. It does not start a window. Remove the
+plaintext input file after the attempt. Before importing, `--version --json`
+reports the app version and a `capabilities` array containing `import-connections`
+on builds that support it; older builds may print only their version.
+
 ## Browser on a remote environment
 
 Browser tabs belong to the environment, so you and your agents see the same
