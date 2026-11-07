@@ -29,6 +29,7 @@ import * as ServerSecretStore from "./ServerSecretStore.ts";
 
 const ISSUER = "https://idm.test/oauth2/openid/t3code";
 const ORIGIN = "http://127.0.0.1";
+const PROXY_ORIGIN = "https://t3-atlas.lan.candee.baby";
 const CLIENT_ID = "t3code";
 const CLIENT_SECRET = "s3cret value";
 
@@ -110,7 +111,7 @@ const layerConfig = Layer.effect(
         clientSecretFile: secretFile,
         allowedGroup: "t3code_users",
         principalClaim: "preferred_username",
-        publicOrigins: [ORIGIN],
+        publicOrigins: [ORIGIN, PROXY_ORIGIN],
       },
     } satisfies ServerConfig.ServerConfig["Service"];
   }),
@@ -224,6 +225,19 @@ it.effect("signs a group member in with a principal browser session", () =>
       subject: "principal:dejana",
       method: "browser-session-cookie",
     });
+  }),
+);
+
+it.effect("starts sign-in from the public origin behind an HTTPS reverse proxy", () =>
+  withServer(async (_fake, get) => {
+    const response = await get("/auth/oidc/start", {
+      host: new URL(PROXY_ORIGIN).host,
+      "x-forwarded-proto": "https",
+    });
+    expect(response.status).toBe(302);
+    const location = new URL(response.headers.get("location") ?? "");
+    const redirectUri = location.searchParams.get("redirect_uri");
+    expect(redirectUri).toBe(`${PROXY_ORIGIN}/auth/oidc/callback`);
   }),
 );
 

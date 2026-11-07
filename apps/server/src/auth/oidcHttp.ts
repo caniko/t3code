@@ -8,6 +8,7 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import { OidcLogin, OidcLoginError, type OidcClient } from "./OidcLogin.ts";
 import { deriveAuthClientMetadata } from "./utils.ts";
+import { requestUrl } from "../requestUrl.ts";
 
 const NO_STORE = { "cache-control": "no-store", pragma: "no-cache" };
 const PAIRING_TTL = Duration.minutes(2);
@@ -29,7 +30,7 @@ const refuse = (error: OidcLoginError) =>
   failure(STATUS[error.reason], "Sign-in was refused. Close this tab and try again.");
 
 const requestOrigin = Effect.map(HttpServerRequest.HttpServerRequest, (request) => {
-  const url = HttpServerRequest.toURL(request);
+  const url = requestUrl(request);
   return url._tag === "Some" ? url.value.origin : "";
 });
 
