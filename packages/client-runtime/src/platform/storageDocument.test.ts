@@ -28,6 +28,7 @@ import {
   ConnectionCatalogDocument,
   EMPTY_CONNECTION_CATALOG_DOCUMENT,
   catalogRoutes,
+  mergeConnectionCatalogDocument,
   setRoutesInCatalog,
   putRemoteDpopTokenInCatalog,
   registerConnectionInCatalog,
@@ -406,5 +407,80 @@ describe("ConnectionCatalogDocument", () => {
     expect(
       setRoutesInCatalog(document, ENVIRONMENT_ID, [BEARER_TARGET, RELAY_TARGET]).targets,
     ).toEqual([BEARER_TARGET, RELAY_TARGET, other]);
+  });
+
+  it("upserts imported records by native identity and keeps route order", () => {
+    const manualRelay = new RelayConnectionTarget({
+      environmentId: EnvironmentId.make("manual-environment"),
+      label: "Manual relay",
+    });
+    const manualSshTarget = new SshConnectionTarget({
+      environmentId: ENVIRONMENT_ID,
+      label: "Manual SSH",
+      connectionId: "ssh-manual",
+    });
+    const manualSshProfile = new SshConnectionProfile({
+      connectionId: manualSshTarget.connectionId,
+      environmentId: ENVIRONMENT_ID,
+      label: manualSshTarget.label,
+      target: { alias: "manual", hostname: "manual.example.test", username: null, port: 22 },
+    });
+    const manualCredential = {
+      connectionId: manualSshTarget.connectionId,
+      credential: BEARER_CREDENTIAL,
+    };
+    const importedLan = new BearerConnectionTarget({
+      environmentId: ENVIRONMENT_ID,
+      label: "LAN",
+      connectionId: BEARER_TARGET.connectionId,
+    });
+    const importedLanProfile = new BearerConnectionProfile({
+      connectionId: importedLan.connectionId,
+      environmentId: ENVIRONMENT_ID,
+      label: importedLan.label,
+      httpBaseUrl: "http://192.168.1.10:3773",
+      wsBaseUrl: "ws://192.168.1.10:3773",
+    });
+    const importedVpn = new SshConnectionTarget({
+      environmentId: ENVIRONMENT_ID,
+      label: "VPN",
+      connectionId: "ssh:imported",
+    });
+    const importedVpnProfile = new SshConnectionProfile({
+      connectionId: importedVpn.connectionId,
+      environmentId: ENVIRONMENT_ID,
+      label: importedVpn.label,
+      target: { alias: "vpn", hostname: "10.0.0.2", username: "dev", port: 22 },
+    });
+    const importedCredential = {
+      connectionId: importedLan.connectionId,
+      credential: new BearerConnectionCredential({ token: "imported-token" }),
+    };
+    const existing = {
+      ...EMPTY_CONNECTION_CATALOG_DOCUMENT,
+      targets: [manualRelay, BEARER_TARGET, manualSshTarget],
+      profiles: [BEARER_PROFILE, manualSshProfile],
+      credentials: [
+        manualCredential,
+        { connectionId: BEARER_TARGET.connectionId, credential: BEARER_CREDENTIAL },
+      ],
+      remoteDpopTokens: [REMOTE_TOKEN],
+      disabledEnvironmentIds: [ENVIRONMENT_ID],
+    };
+    const imported = {
+      ...EMPTY_CONNECTION_CATALOG_DOCUMENT,
+      targets: [importedLan, importedVpn],
+      profiles: [importedLanProfile, importedVpnProfile],
+      credentials: [importedCredential],
+    };
+
+    const merged = mergeConnectionCatalogDocument(existing, imported);
+
+    expect(merged.targets).toEqual([manualRelay, manualSshTarget, importedLan, importedVpn]);
+    expect(merged.profiles).toEqual([manualSshProfile, importedLanProfile, importedVpnProfile]);
+    expect(merged.credentials).toEqual([manualCredential, importedCredential]);
+    expect(merged.remoteDpopTokens).toEqual([REMOTE_TOKEN]);
+    expect(merged.disabledEnvironmentIds).toEqual([ENVIRONMENT_ID]);
+    expect(mergeConnectionCatalogDocument(merged, imported)).toEqual(merged);
   });
 });

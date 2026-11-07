@@ -1,10 +1,17 @@
-import { AuthMcpClientAccess, EnvironmentId, type PeerLinkSummary } from "@t3tools/contracts";
+import {
+  AuthMcpClientAccess,
+  EnvironmentId,
+  PeerLinkError,
+  type PeerLinkSummary,
+} from "@t3tools/contracts";
 import * as Console from "effect/Console";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as References from "effect/References";
 import * as Schema from "effect/Schema";
+import * as Stdio from "effect/Stdio";
+import * as Stream from "effect/Stream";
 import * as Argument from "effect/cli/Argument";
 import * as Command from "effect/cli/Command";
 import * as Flag from "effect/cli/Flag";
@@ -82,6 +89,33 @@ const formatLinks = (links: ReadonlyArray<PeerLinkSummary>) =>
         )
         .join("\n\n")}\n`;
 
+/** @public */
+export const readPairingCode = Effect.fn("cli.environment.readPairingCode")(function* (
+  argument: string,
+) {
+  if (argument !== "-") return argument;
+  const stdio = yield* Stdio.Stdio;
+  const code = (yield* stdio.stdin.pipe(
+    Stream.decodeText(),
+    Stream.mkString,
+    Effect.mapError(
+      (cause) =>
+        new PeerLinkError({
+          reason: "pairing_rejected",
+          message: "Could not read the pairing code from standard input.",
+          cause,
+        }),
+    ),
+  )).trim();
+  if (code.length === 0) {
+    return yield* new PeerLinkError({
+      reason: "pairing_rejected",
+      message: "The pairing code read from standard input is empty.",
+    });
+  }
+  return code;
+});
+
 const environmentLinkCommand = Command.make("link", {
   ...authLocationFlags,
   url: Argument.String("url").pipe(
@@ -94,7 +128,9 @@ const environmentLinkCommand = Command.make("link", {
     Flag.atLeast(0),
   ),
   pairingCode: Flag.String("pairing-code").pipe(
-    Flag.withDescription("A pairing code from the other environment (`t3 pair` there)."),
+    Flag.withDescription(
+      "A pairing code from the other environment (`t3 pair` there), or - to read it from stdin.",
+    ),
   ),
   access: Flag.Literals("access", AuthMcpClientAccess.literals).pipe(
     Flag.withDescription(
@@ -107,18 +143,22 @@ const environmentLinkCommand = Command.make("link", {
     "Link another T3 Code environment, so agents here can work there. It shows up there under Settings → Connections, where it can be revoked.",
   ),
   Command.withHandler((flags) =>
-    runWithPeerLinks(flags, (links) =>
-      Effect.gen(function* () {
-        const linked = yield* links.link({
-          url: flags.url,
-          alternateUrls: flags.alternateUrl,
-          pairingCode: flags.pairingCode,
-          access: flags.access,
-        });
-        yield* Console.log(
-          `Linked ${linked.label} (${linked.environmentId}) with ${linked.access} access, until ${DateTime.formatIso(linked.expiresAt)}.\n`,
-        );
-      }),
+    readPairingCode(flags.pairingCode).pipe(
+      Effect.flatMap((pairingCode) =>
+        runWithPeerLinks(flags, (links) =>
+          Effect.gen(function* () {
+            const linked = yield* links.link({
+              url: flags.url,
+              alternateUrls: flags.alternateUrl,
+              pairingCode,
+              access: flags.access,
+            });
+            yield* Console.log(
+              `Linked ${linked.label} (${linked.environmentId}) with ${linked.access} access, until ${DateTime.formatIso(linked.expiresAt)}.\n`,
+            );
+          }),
+        ),
+      ),
     ),
   ),
 );

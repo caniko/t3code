@@ -146,16 +146,26 @@ export class DesktopConnectionCatalogStoreProtectionError extends Schema.TaggedE
   }
 }
 
+type DesktopConnectionCatalogStoreReadFailure =
+  | DesktopConnectionCatalogStoreReadError
+  | DesktopConnectionCatalogStoreDocumentDecodeError
+  | DesktopConnectionCatalogStoreDecodeError
+  | DesktopConnectionCatalogStoreMigrationError
+  | DesktopConnectionCatalogStoreProtectionError;
+
+export type DesktopConnectionCatalogRead =
+  | { readonly _tag: "unavailable" }
+  | { readonly _tag: "missing" }
+  | { readonly _tag: "present"; readonly catalog: string };
+
 export class DesktopConnectionCatalogStore extends Context.Service<
   DesktopConnectionCatalogStore,
   {
-    readonly get: Effect.Effect<
-      Option.Option<string>,
-      | DesktopConnectionCatalogStoreReadError
-      | DesktopConnectionCatalogStoreDocumentDecodeError
-      | DesktopConnectionCatalogStoreDecodeError
-      | DesktopConnectionCatalogStoreMigrationError
-      | DesktopConnectionCatalogStoreProtectionError
+    readonly get: Effect.Effect<Option.Option<string>, DesktopConnectionCatalogStoreReadFailure>;
+    /** Distinguishes an unavailable keyring from a catalog that does not exist yet. */
+    readonly read: Effect.Effect<
+      DesktopConnectionCatalogRead,
+      DesktopConnectionCatalogStoreReadFailure
     >;
     readonly set: (
       catalog: string,
@@ -461,31 +471,45 @@ export const make = Effect.gen(function* () {
     return Option.some(encoded);
   });
 
-  return DesktopConnectionCatalogStore.of({
-    get: Effect.gen(function* () {
-      const document = yield* readDocument(fileSystem, catalogPath);
-      if (Option.isNone(document)) {
-        return yield* migrateLegacyCatalog;
-      }
+  const readCatalog = Effect.gen(function* () {
+    const document = yield* readDocument(fileSystem, catalogPath);
+    if (Option.isNone(document)) {
       if (!(yield* encryptionAvailable)) {
-        return Option.none<string>();
+        return { _tag: "unavailable" } as const;
       }
-      const decrypted = yield* decodeSecretBytes(catalogPath, document.value.encryptedCatalog).pipe(
-        Effect.flatMap((encryptedCatalog) =>
-          safeStorage.decryptString(encryptedCatalog).pipe(
-            Effect.mapError(
-              (cause) =>
-                new DesktopConnectionCatalogStoreProtectionError({
-                  operation: "decrypt-catalog",
-                  catalogPath,
-                  cause,
-                }),
-            ),
+      const migrated = yield* migrateLegacyCatalog;
+      return Option.isSome(migrated)
+        ? ({ _tag: "present", catalog: migrated.value } as const)
+        : ({ _tag: "missing" } as const);
+    }
+    if (!(yield* encryptionAvailable)) {
+      return { _tag: "unavailable" } as const;
+    }
+    const catalog = yield* decodeSecretBytes(catalogPath, document.value.encryptedCatalog).pipe(
+      Effect.flatMap((encryptedCatalog) =>
+        safeStorage.decryptString(encryptedCatalog).pipe(
+          Effect.mapError(
+            (cause) =>
+              new DesktopConnectionCatalogStoreProtectionError({
+                operation: "decrypt-catalog",
+                catalogPath,
+                cause,
+              }),
           ),
         ),
-      );
-      return Option.some(decrypted);
-    }).pipe(Effect.withSpan("desktop.connectionCatalogStore.get")),
+      ),
+    );
+    return { _tag: "present", catalog } as const;
+  }).pipe(Effect.withSpan("desktop.connectionCatalogStore.read"));
+
+  return DesktopConnectionCatalogStore.of({
+    read: readCatalog,
+    get: readCatalog.pipe(
+      Effect.map((result) =>
+        result._tag === "present" ? Option.some(result.catalog) : Option.none<string>(),
+      ),
+      Effect.withSpan("desktop.connectionCatalogStore.get"),
+    ),
     set: Effect.fn("desktop.connectionCatalogStore.set")(function* (catalog) {
       if (!(yield* encryptionAvailable)) {
         return false;

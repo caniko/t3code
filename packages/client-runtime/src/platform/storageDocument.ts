@@ -58,6 +58,47 @@ export function removeCatalogValue<A>(
   return values.filter((value) => key(value) !== removedKey);
 }
 
+export function persistedTargetIdentity(target: PersistedConnectionTarget): string {
+  switch (target._tag) {
+    case "RelayConnectionTarget":
+      return `relay:${target.environmentId}`;
+    case "BearerConnectionTarget":
+      return `bearer:${target.connectionId}`;
+    case "SshConnectionTarget":
+      return `ssh:${target.connectionId}`;
+  }
+}
+
+/**
+ * Upserts imported records by native identity and leaves every other entry in
+ * place. Imported routes keep their order, so the file decides route priority.
+ */
+export function mergeConnectionCatalogDocument(
+  document: ConnectionCatalogDocument,
+  imported: ConnectionCatalogDocument,
+): ConnectionCatalogDocument {
+  const targetIdentities = new Set(imported.targets.map(persistedTargetIdentity));
+  const profileConnectionIds = new Set(imported.profiles.map((profile) => profile.connectionId));
+  const credentialConnectionIds = new Set(imported.credentials.map((entry) => entry.connectionId));
+  return {
+    ...document,
+    targets: [
+      ...document.targets.filter(
+        (target) => !targetIdentities.has(persistedTargetIdentity(target)),
+      ),
+      ...imported.targets,
+    ],
+    profiles: [
+      ...document.profiles.filter((profile) => !profileConnectionIds.has(profile.connectionId)),
+      ...imported.profiles,
+    ],
+    credentials: [
+      ...document.credentials.filter((entry) => !credentialConnectionIds.has(entry.connectionId)),
+      ...imported.credentials,
+    ],
+  };
+}
+
 function connectionIdOf(target: ConnectionTarget): string | null {
   switch (target._tag) {
     case "PrimaryConnectionTarget":

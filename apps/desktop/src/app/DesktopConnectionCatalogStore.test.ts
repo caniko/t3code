@@ -242,6 +242,29 @@ describe("DesktopConnectionCatalogStore", () => {
     ),
   );
 
+  it.effect("reports an unavailable keyring instead of a missing catalog", () =>
+    withStore(
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
+        const catalogPath = path.join(environment.stateDir, "connection-catalog.json");
+        yield* fileSystem.makeDirectory(environment.stateDir, { recursive: true });
+        yield* fileSystem.writeFileString(
+          catalogPath,
+          JSON.stringify({
+            version: 1,
+            encryptedCatalog: Base64.encode(textEncoder.encode("encrypted:{}")),
+          }),
+        );
+
+        assert.deepEqual(yield* store.read, { _tag: "unavailable" });
+      }),
+      false,
+    ),
+  );
+
   it.effect("surfaces malformed catalog documents without deleting them", () =>
     withStore(
       Effect.gen(function* () {
