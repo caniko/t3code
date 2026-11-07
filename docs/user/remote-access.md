@@ -238,6 +238,10 @@ For Antigravity's Google callback on a remote host, see
 
 ## Unattended enrollment
 
+Use `t3 environment describe --json` as the host's Unix user to read its native
+environment ID without starting a server. Use the same `--base-dir` as that
+environment; a fresh data directory initializes a new identity.
+
 Scripts can pass a pairing code on stdin instead of putting it in process arguments:
 
 ```bash
