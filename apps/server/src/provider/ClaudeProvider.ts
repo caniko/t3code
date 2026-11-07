@@ -590,6 +590,28 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   const updateRequiredModels = resolveClaudeUpdateRequiredModels(modelCatalog, parsedVersion);
   const versionUpgradeMessage = formatClaudeVersionUpgradeMessage(modelCatalog, parsedVersion);
 
+  if (resolvedEnvironment.T3CODE_RUNNER_SOCKET_TEMPLATE?.trim()) {
+    return buildServerProvider({
+      presentation: CLAUDE_PRESENTATION,
+      enabled: true,
+      checkedAt,
+      models: providerModelsFromSettings(
+        resolveClaudeModelsForVersion(modelCatalog, parsedVersion),
+        claudeSettings.customModels,
+        DEFAULT_CLAUDE_MODEL_CAPABILITIES,
+      ),
+      updateRequiredModels,
+      slashCommands: [COMPACT_SLASH_COMMAND],
+      probe: {
+        installed: true,
+        version: parsedVersion,
+        status: "warning",
+        auth: { status: "unknown" },
+        message: "Authentication is checked in the session owner's runner.",
+      },
+    });
+  }
+
   const probeResult = resolveCapabilities
     ? yield* resolveCapabilities(claudeSettings).pipe(Effect.result)
     : undefined;

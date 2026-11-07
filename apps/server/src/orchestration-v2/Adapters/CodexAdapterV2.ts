@@ -81,6 +81,10 @@ import type {
 import * as CodexClient from "effect-codex-app-server/client";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexSchema from "effect-codex-app-server/schema";
+import {
+  installCodexExternalAuth,
+  makeCodexExternalCredentialAcquirer,
+} from "./CodexExternalAuth.ts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Digest from "effect/crypto/Digest";
@@ -1582,6 +1586,37 @@ export const layerAppServerClientFactory: Layer.Layer<
               }),
           ),
         );
+        const hostEnvironment = yield* HostProcess.Environment;
+        const credentialCommandValue = hostEnvironment.T3CODE_OPENAI_CREDENTIAL_COMMAND;
+        const credentialCommand =
+          credentialCommandValue === undefined || credentialCommandValue === ""
+            ? undefined
+            : credentialCommandValue;
+        let externalCredential:
+          | {
+              readonly command: string;
+              readonly spawner: ChildProcessSpawner.ChildProcessSpawner["Service"];
+            }
+          | undefined;
+        if (credentialCommand !== undefined) {
+          // The executable is trusted server configuration, but it may only run as the thread's
+          // runner principal. Falling back to the shared server spawner would run another user's
+          // work as the server user.
+          if (
+            runnerSpawner === undefined ||
+            !credentialCommand.startsWith("/") ||
+            credentialCommand.includes("\0")
+          ) {
+            return yield* new ProviderAdapter.ProviderAdapterOpenSessionError({
+              driver: CODEX_PROVIDER,
+              providerSessionId: input.providerSessionId,
+              cause: new Error(
+                "External OpenAI credentials require an absolute executable path and a per-thread runner.",
+              ),
+            });
+          }
+          externalCredential = { command: credentialCommand, spawner: runnerSpawner };
+        }
         const environment = {
           ...codexAppServerEnvironment(input.environment),
           ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
@@ -1625,9 +1660,15 @@ export const layerAppServerClientFactory: Layer.Layer<
                 logger: protocolLogger,
               };
         const context = yield* Layer.build(CodexClient.layerChildProcess(handle, clientOptions));
-        return yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
+        const client = yield* Effect.service(CodexClient.CodexAppServerClient).pipe(
           Effect.provide(context),
         );
+        if (externalCredential === undefined) return client;
+        const acquire = yield* makeCodexExternalCredentialAcquirer({
+          command: externalCredential.command,
+          spawner: externalCredential.spawner,
+        });
+        return yield* installCodexExternalAuth({ client, acquire });
       }),
     });
   }),

@@ -70,9 +70,14 @@ import * as Orchestrator from "../Orchestrator.ts";
 import * as ProviderReplayHarness from "../testkit/ProviderReplayHarness.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ModelManifest from "../../provider/ModelManifest.ts";
 import * as PortScanner from "../../preview/PortScanner.ts";
 import { resolveProviderCompatibility } from "../../provider/providerCompatibility.ts";
+import {
+  PrincipalExecution,
+  type PrincipalExecutionShape,
+} from "../../runner/PrincipalExecution.ts";
 import * as CodexAdapterV2 from "./CodexAdapterV2.ts";
 import { withCodexReplayChildMetadata } from "./CodexAdapterV2.testkit.ts";
 import * as CodexAdapterV2Testkit from "./CodexAdapterV2.testkit.ts";
@@ -293,6 +298,7 @@ describe("CodexAdapterV2 native protocol logging", () => {
           params: {
             id: "evt-1",
             http_headers: { Authorization: "Bearer secret-codex-token" },
+            auth: { accessToken: "secret-access-token", chatgptAccountId: "account-1" },
             usage: { inputTokens: 12, outputTokens: 8, totalTokens: 20 },
           },
         },
@@ -319,6 +325,7 @@ describe("CodexAdapterV2 native protocol logging", () => {
             params: {
               id: "evt-1",
               http_headers: { Authorization: "[REDACTED]" },
+              auth: { accessToken: "[REDACTED]", chatgptAccountId: "account-1" },
               usage: { inputTokens: 12, outputTokens: 8, totalTokens: 20 },
             },
           },
@@ -946,6 +953,238 @@ describe("CodexAdapterV2 process exit", () => {
       );
       assert.equal(runningAgents, 0);
     }).pipe(Effect.provide(factoryLayer));
+  });
+});
+
+describe("CodexAdapterV2 external OpenAI credentials", () => {
+  const noRunnerExecution: PrincipalExecutionShape = {
+    spawnerFor: () => Effect.undefined,
+    spawnerForPath: () => Effect.undefined,
+    ptyFor: () => Effect.undefined,
+    runnerFor: () => Effect.undefined,
+  };
+  const idleHandle = () =>
+    ChildProcessSpawner.makeHandle({
+      pid: ChildProcessSpawner.ProcessId(999_999_999),
+      exitCode: Effect.never,
+      isRunning: Effect.succeed(true),
+      kill: () => Effect.void,
+      unref: Effect.succeed(Effect.void),
+      stdin: Sink.drain,
+      stdout: Stream.never,
+      stderr: Stream.empty,
+      all: Stream.empty,
+      getInputFd: () => Sink.drain,
+      getOutputFd: () => Stream.empty,
+    });
+
+  it.effect("leaves native login unchanged when the credential opt-in is absent", () => {
+    const spawned: Array<string> = [];
+    const baseSpawner = ChildProcessSpawner.make((command) => {
+      spawned.push(ChildProcess.isStandardCommand(command) ? command.command : "<non-standard>");
+      return Effect.succeed(idleHandle());
+    });
+    const factoryLayer = CodexAdapterV2.layerAppServerClientFactory.pipe(
+      Layer.provide(
+        Layer.mock(PortScanner.PortDiscovery)({
+          trackAgent: () => () => {},
+        }),
+      ),
+      Layer.provide(
+        Layer.succeed(ProviderEventLoggers.ProviderEventLoggers, {
+          native: undefined,
+          canonical: undefined,
+        }),
+      ),
+      Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, baseSpawner)),
+      Layer.provide(Layer.succeed(PrincipalExecution, noRunnerExecution)),
+    );
+    return Effect.gen(function* () {
+      const factory = yield* CodexAdapterV2.CodexAppServerClientFactory;
+      yield* Effect.scoped(
+        factory
+          .open({
+            instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+            threadId: ThreadId.make("thread-codex-native-auth"),
+            providerSessionId: ProviderSessionId.make("session-codex-native-auth"),
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+            settings: DEFAULT_CODEX_SETTINGS,
+            environment: {},
+          })
+          .pipe(
+            Effect.flatMap((client) => client.notify("initialized", undefined)),
+            Effect.provideService(HostProcess.Environment, {}),
+          ),
+      );
+      assert.lengthOf(spawned, 1);
+    }).pipe(Effect.provide(factoryLayer));
+  });
+
+  it.effect("fails closed before spawning when the opt-in has no per-thread runner", () => {
+    const baseSpawner = ChildProcessSpawner.make(() =>
+      Effect.die("the shared server spawner must not run a configured credential command"),
+    );
+    const factoryLayer = CodexAdapterV2.layerAppServerClientFactory.pipe(
+      Layer.provide(
+        Layer.mock(PortScanner.PortDiscovery)({
+          trackAgent: () => () => {},
+        }),
+      ),
+      Layer.provide(
+        Layer.succeed(ProviderEventLoggers.ProviderEventLoggers, {
+          native: undefined,
+          canonical: undefined,
+        }),
+      ),
+      Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, baseSpawner)),
+      Layer.provide(Layer.succeed(PrincipalExecution, noRunnerExecution)),
+    );
+    return Effect.gen(function* () {
+      const factory = yield* CodexAdapterV2.CodexAppServerClientFactory;
+      const error = yield* Effect.scoped(
+        factory.open({
+          instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+          threadId: ThreadId.make("thread-codex-no-runner"),
+          providerSessionId: ProviderSessionId.make("session-codex-no-runner"),
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+          settings: DEFAULT_CODEX_SETTINGS,
+          environment: {},
+        }),
+      ).pipe(
+        Effect.provideService(HostProcess.Environment, {
+          T3CODE_OPENAI_CREDENTIAL_COMMAND: "/nix/store/provenance-credential",
+        }),
+        Effect.flip,
+      );
+
+      assert.equal(error._tag, "ProviderAdapterOpenSessionError");
+    }).pipe(Effect.provide(factoryLayer));
+  });
+
+  it.effect("runs the credential executable and login through the thread runner", () => {
+    const credentialCommand = "/nix/store/provenance-credential";
+    const accessToken = "runner-bound-access-token";
+    const frames: Array<Record<string, unknown>> = [];
+    let baseSpawns = 0;
+    const baseSpawner = ChildProcessSpawner.make(() => {
+      baseSpawns += 1;
+      return Effect.die("the shared server spawner must not run a credentialed Codex session");
+    });
+    return Effect.gen(function* () {
+      const responses = yield* Queue.unbounded<Uint8Array, Cause.Done>();
+      const runnerCommands: Array<string> = [];
+      const codexHandle = ChildProcessSpawner.makeHandle({
+        pid: ChildProcessSpawner.ProcessId(999_999_998),
+        exitCode: Effect.never,
+        isRunning: Effect.succeed(true),
+        kill: () => Effect.void,
+        unref: Effect.succeed(Effect.void),
+        stdin: Sink.forEach((chunk: Uint8Array) =>
+          Effect.gen(function* () {
+            const text = new TextDecoder().decode(chunk);
+            for (const line of text.split("\n")) {
+              if (line.trim() === "") continue;
+              const frame = JSON.parse(line) as Record<string, unknown>;
+              frames.push(frame);
+              if (frame.method === "account/login/start" && typeof frame.id === "number") {
+                yield* Queue.offer(
+                  responses,
+                  new TextEncoder().encode(
+                    `${JSON.stringify({ id: frame.id, result: { type: "chatgptAuthTokens" } })}\n`,
+                  ),
+                );
+              }
+            }
+          }),
+        ),
+        stdout: Stream.fromQueue(responses),
+        stderr: Stream.empty,
+        all: Stream.empty,
+        getInputFd: () => Sink.drain,
+        getOutputFd: () => Stream.empty,
+      });
+      const credentialHandle = ChildProcessSpawner.makeHandle({
+        pid: ChildProcessSpawner.ProcessId(999_999_997),
+        exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+        isRunning: Effect.succeed(false),
+        kill: () => Effect.void,
+        unref: Effect.succeed(Effect.void),
+        stdin: Sink.drain,
+        stdout: Stream.encodeText(
+          Stream.make(
+            JSON.stringify({
+              accessToken,
+              accountId: "account-1",
+              expiresAt: Number.MAX_SAFE_INTEGER,
+            }),
+          ),
+        ),
+        stderr: Stream.empty,
+        all: Stream.empty,
+        getInputFd: () => Sink.drain,
+        getOutputFd: () => Stream.empty,
+      });
+      const runnerSpawner = ChildProcessSpawner.make((command) => {
+        const name = ChildProcess.isStandardCommand(command) ? command.command : "<non-standard>";
+        runnerCommands.push(name);
+        return Effect.succeed(name === credentialCommand ? credentialHandle : codexHandle);
+      });
+      const execution: PrincipalExecutionShape = {
+        spawnerFor: () => Effect.succeed(runnerSpawner),
+        spawnerForPath: () => Effect.succeed(runnerSpawner),
+        ptyFor: () => Effect.undefined,
+        runnerFor: () => Effect.undefined,
+      };
+      const factoryLayer = CodexAdapterV2.layerAppServerClientFactory.pipe(
+        Layer.provide(
+          Layer.mock(PortScanner.PortDiscovery)({
+            trackAgent: () => () => {},
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(ProviderEventLoggers.ProviderEventLoggers, {
+            native: undefined,
+            canonical: undefined,
+          }),
+        ),
+        Layer.provide(Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, baseSpawner)),
+        Layer.provide(Layer.succeed(PrincipalExecution, execution)),
+      );
+
+      yield* Effect.gen(function* () {
+        const factory = yield* CodexAdapterV2.CodexAppServerClientFactory;
+        yield* Effect.scoped(
+          factory
+            .open({
+              instanceId: CodexAdapterV2.CODEX_DEFAULT_INSTANCE_ID,
+              threadId: ThreadId.make("thread-codex-external-auth"),
+              providerSessionId: ProviderSessionId.make("session-codex-external-auth"),
+              runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+              settings: DEFAULT_CODEX_SETTINGS,
+              environment: {},
+            })
+            .pipe(
+              Effect.flatMap((client) => client.notify("initialized", undefined)),
+              Effect.provideService(HostProcess.Environment, {
+                T3CODE_OPENAI_CREDENTIAL_COMMAND: credentialCommand,
+              }),
+            ),
+        );
+      }).pipe(Effect.provide(factoryLayer));
+
+      assert.equal(baseSpawns, 0);
+      assert.include(runnerCommands, credentialCommand);
+      const login = frames.find((frame) => frame.method === "account/login/start");
+      assert.deepEqual(login, {
+        id: 1,
+        method: "account/login/start",
+        params: {
+          type: "chatgptAuthTokens",
+          accessToken,
+          chatgptAccountId: "account-1",
+        },
+      });
+    });
   });
 });
 

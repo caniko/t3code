@@ -358,6 +358,25 @@ it.layer(
   Layer.mergeAll(layerTestNodeServices, ServerSettingsModule.layerTest(), layerTestHttpClient),
 )("ProviderRegistry", (it) => {
   describe("checkCodexProviderStatus", () => {
+    it.effect("does not probe the shared server account when credentials belong to runners", () =>
+      Effect.gen(function* () {
+        const status = yield* checkCodexProviderStatus(
+          defaultCodexSettings,
+          () => Effect.die("must not inspect the shared server's account"),
+          { T3CODE_RUNNER_SOCKET_TEMPLATE: "/run/t3code/runner-%u.sock" },
+        );
+        assert.strictEqual(status.auth.status, "unknown");
+        assert.strictEqual(status.auth.email, undefined);
+        assert.strictEqual(status.usageLimits, undefined);
+        assert.strictEqual(status.version, "0.159.0");
+        assert.isAbove(status.models.length, 0);
+      }).pipe(
+        Effect.provide(
+          layerMockSpawner(() => ({ stdout: "codex-cli 0.159.0\n", stderr: "", code: 0 })),
+        ),
+      ),
+    );
+
     it.effect("uses the app-server account and model list for provider status", () =>
       Effect.gen(function* () {
         const status = yield* checkCodexProviderStatus(defaultCodexSettings, () =>
@@ -3041,6 +3060,25 @@ it.layer(
   });
 
   describe("checkClaudeProviderStatus", () => {
+    it.effect("does not probe the shared server account when credentials belong to runners", () =>
+      Effect.gen(function* () {
+        const status = yield* checkClaudeProviderStatus(
+          defaultClaudeSettings,
+          () => Effect.die("must not inspect the shared server's account"),
+          { T3CODE_RUNNER_SOCKET_TEMPLATE: "/run/t3code/runner-%u.sock" },
+        );
+        assert.strictEqual(status.auth.status, "unknown");
+        assert.strictEqual(status.auth.email, undefined);
+        assert.strictEqual(status.usageLimits, undefined);
+        assert.strictEqual(status.version, "2.1.311");
+        assert.isAbove(status.models.length, 0);
+      }).pipe(
+        Effect.provide(
+          layerMockSpawner(() => ({ stdout: "2.1.311 (Claude Code)\n", stderr: "", code: 0 })),
+        ),
+      ),
+    );
+
     it.effect("adds models Claude Code reports that the catalog does not know", () =>
       Effect.gen(function* () {
         const status = yield* checkClaudeProviderStatus(

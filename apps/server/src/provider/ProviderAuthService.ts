@@ -14,6 +14,7 @@ import * as Function from "effect/Function";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import * as Semaphore from "effect/Semaphore";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
@@ -68,6 +69,7 @@ export const makeProviderAuthService = Effect.gen(function* () {
   const registry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+  const environment = yield* HostProcess.Environment;
   const credentialChanges = yield* Semaphore.make(1);
 
   const getController = Effect.fn("ProviderAuthService.getController")(function* (
@@ -75,6 +77,17 @@ export const makeProviderAuthService = Effect.gen(function* () {
     operation: string,
   ) {
     const instance = yield* registry.getInstance(instanceId);
+    if (
+      environment.T3CODE_RUNNER_SOCKET_TEMPLATE?.trim() &&
+      (instance?.driverKind === "codex" || instance?.driverKind === "claudeAgent")
+    ) {
+      return yield* new ProviderSetupError({
+        instanceId,
+        operation,
+        detail:
+          "Credentials belong to each session owner's runner. Manage provider sign-in on the host, not the shared server.",
+      });
+    }
     if (!instance?.auth) {
       return yield* new ProviderSetupError({
         instanceId,

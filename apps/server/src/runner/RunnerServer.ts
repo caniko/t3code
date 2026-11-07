@@ -1,8 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- the runner owns raw sockets, child processes and their exit flush.
 import * as NodeChildProcess from "node:child_process";
-import * as NodeFs from "node:fs";
+import * as NodeFS from "node:fs";
 import * as NodeNet from "node:net";
-import * as NodeOs from "node:os";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import type * as PtyAdapter from "@t3tools/shared/PtyAdapter";
@@ -27,9 +27,82 @@ export interface RunnerServerOptions {
   readonly spawnPty: (input: PtyAdapter.PtySpawnInput) => Promise<PtyAdapter.PtyProcess>;
 }
 
-const SIGNALS = new Set(Object.keys(NodeOs.constants.signals));
+const SIGNALS = new Set(Object.keys(NodeOS.constants.signals));
 // Grandchildren that inherit the pipes keep `close` from firing; report the exit regardless.
 const EXIT_FLUSH_GRACE_MS = 2_000;
+
+const CLAUDE_CREDENTIAL_FILE_ENV = "T3CODE_CLAUDE_OAUTH_TOKEN_FILE";
+const CLAUDE_CREDENTIAL_FD_ENV = "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR";
+const CLAUDE_CREDENTIAL_FD = 3;
+const CLAUDE_CREDENTIAL_MAX_BYTES = 16 * 1024;
+const CLAUDE_CREDENTIAL_UNAVAILABLE = "The native Claude credential is unavailable.";
+const CLAUDE_AMBIENT_CREDENTIAL_KEYS = [
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN_FILE",
+  "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+  "CLAUDE_CODE_OAUTH_SCOPES",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+] as const;
+
+const isCredentialWhitespace = (byte: number) => byte === 0x20 || (byte >= 0x09 && byte <= 0x0d);
+
+/** A positioned read validates the token without moving the offset the child inherits. */
+const hasCredentialContent = (fd: number, size: number) => {
+  const content = Buffer.alloc(size);
+  try {
+    if (NodeFS.readSync(fd, content, 0, size, 0) !== size) return false;
+    let contentSeen = false;
+    let trailingWhitespace = false;
+    for (const byte of content) {
+      if (isCredentialWhitespace(byte)) {
+        trailingWhitespace ||= contentSeen;
+        continue;
+      }
+      if (byte < 0x21 || byte > 0x7e || trailingWhitespace) return false;
+      contentSeen = true;
+    }
+    return contentSeen;
+  } finally {
+    content.fill(0);
+  }
+};
+
+/** systemd credential files are private: regular, owned by us, readable by nobody else, and non-blank. */
+const openClaudeCredential = (environment: NodeJS.ProcessEnv): number | undefined => {
+  const path = environment[CLAUDE_CREDENTIAL_FILE_ENV];
+  if (path === undefined) return undefined;
+  let fd: number | undefined;
+  try {
+    if (!NodePath.isAbsolute(path)) throw new Error("relative");
+    fd = NodeFS.openSync(
+      path,
+      NodeFS.constants.O_RDONLY | NodeFS.constants.O_NOFOLLOW | NodeFS.constants.O_NONBLOCK,
+    );
+    const stat = NodeFS.fstatSync(fd);
+    const uid = process.getuid?.();
+    if (
+      uid === undefined ||
+      stat.uid !== uid ||
+      !stat.isFile() ||
+      (stat.mode & 0o077) !== 0 ||
+      stat.size < 1 ||
+      stat.size > CLAUDE_CREDENTIAL_MAX_BYTES ||
+      !hasCredentialContent(fd, stat.size)
+    ) {
+      throw new Error("unsafe");
+    }
+    return fd;
+  } catch {
+    if (fd !== undefined) {
+      try {
+        NodeFS.closeSync(fd);
+      } catch {}
+    }
+    throw new Error(CLAUDE_CREDENTIAL_UNAVAILABLE);
+  }
+};
 
 const within = (root: string, target: string) => {
   const relative = NodePath.relative(root, target);
@@ -38,7 +111,7 @@ const within = (root: string, target: string) => {
 
 const realpathOrNull = (value: string) => {
   try {
-    return NodeFs.realpathSync(value);
+    return NodeFS.realpathSync(value);
   } catch {
     return null;
   }
@@ -51,7 +124,8 @@ export const resolveAllowedCwd = (
   allowedRoots: ReadonlyArray<string>,
 ): string => {
   const requested = cwd ?? home;
-  if (!NodePath.isAbsolute(requested)) throw new Error(`Working directory must be absolute: ${requested}`);
+  if (!NodePath.isAbsolute(requested))
+    throw new Error(`Working directory must be absolute: ${requested}`);
   const real = realpathOrNull(requested);
   if (real === null) throw new Error(`Working directory does not exist: ${requested}`);
   const roots = [home, ...allowedRoots].flatMap((root) => realpathOrNull(root) ?? []);
@@ -63,7 +137,8 @@ export const resolveAllowedCwd = (
 
 export const assertAllowedEnv = (env: Readonly<Record<string, unknown>>) => {
   for (const [key, value] of Object.entries(env)) {
-    if (typeof value !== "string") throw new Error(`Environment value for ${key} must be a string.`);
+    if (typeof value !== "string")
+      throw new Error(`Environment value for ${key} must be a string.`);
     if (isProtectedEnvKey(key)) throw new Error(`Environment override of ${key} is not allowed.`);
   }
 };
@@ -96,13 +171,31 @@ const handleConnection = (socket: NodeNet.Socket, options: RunnerServerOptions) 
     if (typeof request.command !== "string" || request.command === "") {
       throw new Error("Command must be a non-empty string.");
     }
-    const child = NodeChildProcess.spawn(request.command, [...request.args], {
-      cwd,
-      env: { ...options.env, ...request.env },
-      detached: true,
-      shell: request.shell ?? false,
-      stdio: [request.stdin === "ignore" ? "ignore" : "pipe", "pipe", "pipe"],
-    });
+    const managedClaude = !request.shell && NodePath.basename(request.command) === "claude";
+    const credentialFd = managedClaude ? openClaudeCredential(options.env) : undefined;
+    const env: NodeJS.ProcessEnv = { ...options.env, ...request.env };
+    if (credentialFd !== undefined) {
+      for (const key of CLAUDE_AMBIENT_CREDENTIAL_KEYS) delete env[key];
+      env[CLAUDE_CREDENTIAL_FD_ENV] = String(CLAUDE_CREDENTIAL_FD);
+    }
+    const stdio: NodeChildProcess.StdioOptions = [
+      request.stdin === "ignore" ? "ignore" : "pipe",
+      "pipe",
+      "pipe",
+      ...(credentialFd === undefined ? [] : [credentialFd]),
+    ];
+    let child: NodeChildProcess.ChildProcess;
+    try {
+      child = NodeChildProcess.spawn(request.command, [...request.args], {
+        cwd,
+        env,
+        detached: true,
+        shell: request.shell ?? false,
+        stdio,
+      });
+    } finally {
+      if (credentialFd !== undefined) NodeFS.closeSync(credentialFd);
+    }
     let exited = false;
     let exitReported = false;
     const reportExit = (code: number | null, signal: string | null) => {
@@ -249,9 +342,10 @@ export const serveRunner = async (options: RunnerServerOptions) => {
     return server;
   }
   const { socketPath } = options;
-  if (NodeFs.existsSync(socketPath)) {
-    if (!(await isStale(socketPath))) throw new Error(`A runner is already listening on ${socketPath}.`);
-    NodeFs.unlinkSync(socketPath);
+  if (NodeFS.existsSync(socketPath)) {
+    if (!(await isStale(socketPath)))
+      throw new Error(`A runner is already listening on ${socketPath}.`);
+    NodeFS.unlinkSync(socketPath);
   }
   const previousUmask = process.umask(0o117);
   try {
@@ -262,6 +356,6 @@ export const serveRunner = async (options: RunnerServerOptions) => {
   } finally {
     process.umask(previousUmask);
   }
-  NodeFs.chmodSync(socketPath, 0o660);
+  NodeFS.chmodSync(socketPath, 0o660);
   return server;
 };

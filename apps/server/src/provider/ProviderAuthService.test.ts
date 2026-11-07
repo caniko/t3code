@@ -26,6 +26,7 @@ import { AcpProviderCapabilitiesV2 } from "@t3tools/provider-acp/server/adapter"
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as ProviderAuthService from "./ProviderAuthService.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 const instanceId = ProviderInstanceId.make("antigravity-personal");
 const otherInstanceId = ProviderInstanceId.make("antigravity-work");
@@ -56,10 +57,11 @@ function makeInstance(input: {
   instanceId: ProviderInstanceId;
   enabled: boolean;
   auth?: ProviderAuthService.ProviderAuthController;
+  driverKind?: ProviderDriverKind;
 }): ProviderInstance {
   return {
     ...input,
-    driverKind,
+    driverKind: input.driverKind ?? driverKind,
     displayName: undefined,
     continuationIdentity: { driverKind, continuationKey: input.instanceId },
     get snapshot(): never {
@@ -399,6 +401,34 @@ const observeAuth = Effect.fn("ProviderAuthService.test.observeAuth")(function* 
 });
 
 describe("ProviderAuthService", () => {
+  it.effect.each(["codex", "claudeAgent"])(
+    "does not change the shared server's %s credentials in runner mode",
+    (driver) =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness().pipe(
+          Effect.provideService(HostProcess.Environment, {
+            T3CODE_RUNNER_SOCKET_TEMPLATE: "/run/t3code/runner-%u.sock",
+          }),
+        );
+        harness.replaceInstance(
+          makeInstance({
+            instanceId,
+            enabled: true,
+            auth: harness.auth,
+            driverKind: ProviderDriverKind.make(driver),
+          }),
+        );
+        for (const action of [
+          harness.service.start({ instanceId }, owner),
+          harness.service.logout({ instanceId }),
+        ]) {
+          const error = yield* action.pipe(Effect.flip);
+          assert.include(error.detail, "session owner's runner");
+        }
+        assert.deepStrictEqual(harness.actions, []);
+      }),
+  );
+
   it.effect(
     "stops sessions sharing credentials and invalidates their processes before logout",
     () =>

@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- the runner speaks raw unix sockets.
-import type { Socket } from "node:net";
+import type * as NodeNet from "node:net";
 
 /**
  * One connection is one process. The client opens with a `spawn` frame; both sides then exchange
@@ -55,10 +55,28 @@ const PROTECTED_ENV_KEYS = new Set([
   "BASH_ENV",
   "ENV",
   "IFS",
+  "CODEX_HOME",
+  "CLAUDE_CONFIG_DIR",
+  "CREDENTIALS_DIRECTORY",
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "OPENAI_API_KEY",
+  "T3CODE_CLAUDE_OAUTH_TOKEN_FILE",
 ]);
 
+/** Claude's OAuth material, including the native credential descriptor, never comes from the caller. */
+const isClaudeOAuthKey = (key: string) => key.startsWith("CLAUDE_CODE_OAUTH_");
+
+/** Runner-owned paths for OpenAI-compatible credentials; non-credential options still flow through. */
+const isOpenAiCredentialKey = (key: string) =>
+  key.startsWith("T3CODE_OPENAI_") && /_(?:COMMAND|FILE|CONFIG)$/.test(key);
+
 export const isProtectedEnvKey = (key: string) =>
-  PROTECTED_ENV_KEYS.has(key) || key.startsWith("LD_") || key.startsWith("DYLD_");
+  PROTECTED_ENV_KEYS.has(key) ||
+  key.startsWith("LD_") ||
+  key.startsWith("DYLD_") ||
+  isClaudeOAuthKey(key) ||
+  isOpenAiCredentialKey(key);
 
 /**
  * What the client may overlay on the runner's environment: values the caller changed relative to the
@@ -77,14 +95,18 @@ export const overlayEnv = (
   return overlay;
 };
 
-export const sendFrame = (socket: Socket, frame: ClientFrame | RunnerFrame, cb?: () => void) => {
+export const sendFrame = (
+  socket: NodeNet.Socket,
+  frame: ClientFrame | RunnerFrame,
+  cb?: () => void,
+) => {
   if (socket.destroyed || !socket.writable) return false;
   return socket.write(`${JSON.stringify(frame)}\n`, cb);
 };
 
 /** Splits a socket into JSON frames; a malformed or oversized line is reported once and stops reading. */
 export const readFrames = (
-  socket: Socket,
+  socket: NodeNet.Socket,
   onFrame: (frame: unknown) => void,
   onProtocolError: (message: string) => void,
 ) => {

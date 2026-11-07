@@ -775,6 +775,41 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
     });
   }
 
+  if (resolvedEnvironment.T3CODE_RUNNER_SOCKET_TEMPLATE?.trim()) {
+    const version = yield* probeCodexCliVersion({
+      binaryPath: codexSettings.binaryPath,
+      cwd: process.cwd(),
+      environment: resolvedEnvironment,
+    });
+    return buildServerProvider({
+      presentation: CODEX_PRESENTATION,
+      enabled: true,
+      checkedAt,
+      // Each owner's account has its own catalog; do not borrow the server's.
+      models: appendCustomCodexModels(
+        PREFERRED_DEFAULT_CODEX_MODELS.map((slug) => ({
+          slug,
+          name: formatCodexModelName(slug),
+          isCustom: false,
+          capabilities: null,
+        })),
+        codexSettings.customModels,
+      ),
+      skills: [],
+      slashCommands: [COMPACT_SLASH_COMMAND],
+      probe: {
+        installed: version !== null,
+        version,
+        status: version === null ? "error" : "warning",
+        auth: { status: "unknown" },
+        message:
+          version === null
+            ? "Could not verify the Codex CLI version."
+            : "Authentication is checked in the session owner's runner.",
+      },
+    });
+  }
+
   const probeResult = yield* probe({
     binaryPath: codexSettings.binaryPath,
     homePath: codexSettings.homePath,
