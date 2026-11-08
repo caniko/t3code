@@ -23,7 +23,9 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as References from "effect/References";
+import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
+import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/cli";
 import { FetchHttpClient } from "effect/http";
 import * as TestClock from "effect/testing/TestClock";
@@ -41,6 +43,7 @@ import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
+import { ProjectImportFailedError, ProjectImportInputError } from "./project.ts";
 import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
@@ -52,6 +55,50 @@ import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 const layerCliRuntime = Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, NetService.layer);
 const runCli = (args: ReadonlyArray<string>) =>
   Command.runWith(cli, { version: "0.0.0" })(args).pipe(Effect.provide(layerCliRuntime));
+
+const runCliCaptured = (args: ReadonlyArray<string>, options?: { readonly stdin?: string }) =>
+  Effect.gen(function* () {
+    const result = yield* Effect.result(Command.runWith(cli, { version: "0.0.0" })(args));
+    const logs = yield* TestConsole.logLines;
+    return {
+      result,
+      logs: logs.filter((line): line is string => typeof line === "string"),
+    };
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        layerCliRuntime,
+        TestConsole.layer,
+        options?.stdin === undefined
+          ? Layer.empty
+          : Stdio.layerTest({
+              stdin: Stream.make(new TextEncoder().encode(options.stdin)),
+            }),
+      ),
+    ),
+  );
+
+const makeProjectImportFile = (directory: string, records: unknown) => {
+  const file = NodePath.join(directory, "projects.json");
+  NodeFS.writeFileSync(file, JSON.stringify(records));
+  return file;
+};
+
+const readProjectImportSummary = (logs: ReadonlyArray<string>) => {
+  const line = logs.findLast((entry) => entry.startsWith("{"));
+  assert.isDefined(line);
+  return JSON.parse(line!) as {
+    created: number;
+    existing: number;
+    skipped: number;
+    failed: number;
+    results: ReadonlyArray<{
+      workspaceRoot: string;
+      status: "created" | "existing" | "skipped" | "failed";
+      error?: string;
+    }>;
+  };
+};
 
 const makeConfig = (baseDir: string) =>
   Effect.gen(function* () {
@@ -131,6 +178,226 @@ it.effect("adds, renames, and removes projects through the V2 project CLI domain
 
     yield* runCli(["project", "remove", added?.id ?? "", "--base-dir", baseDir]);
     assert.deepEqual((yield* readProjects(baseDir)).projects, []);
+  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
+it.effect("imports a project batch, reruns idempotently, and preserves existing project rows", () =>
+  Effect.gen(function* () {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-v2-project-import-"));
+    const workspaceA = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3-v2-project-import-a-"),
+    );
+    const workspaceB = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3-v2-project-import-b-"),
+    );
+    const file = makeProjectImportFile(baseDir, [
+      { title: "Alpha", workspaceRoot: workspaceA },
+      { title: "Beta", workspaceRoot: workspaceB },
+      { title: "Duplicate Alpha", workspaceRoot: workspaceA },
+    ]);
+
+    const first = yield* runCliCaptured([
+      "project",
+      "import",
+      "--file",
+      file,
+      "--base-dir",
+      baseDir,
+    ]);
+    assert.equal(first.result._tag, "Success");
+    assert.lengthOf(first.logs, 1);
+    const firstSummary = readProjectImportSummary(first.logs);
+    assert.deepEqual(
+      {
+        created: firstSummary.created,
+        existing: firstSummary.existing,
+        skipped: firstSummary.skipped,
+        failed: firstSummary.failed,
+      },
+      { created: 2, existing: 1, skipped: 0, failed: 0 },
+    );
+    assert.deepEqual(
+      firstSummary.results.map((result) => result.status),
+      ["created", "created", "existing"],
+    );
+
+    const before = (yield* readProjects(baseDir)).projects
+      .map(({ id, title, workspaceRoot }) => ({ id, title, workspaceRoot }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    assert.lengthOf(before, 2);
+
+    const rerunFile = makeProjectImportFile(baseDir, [
+      { title: "Renamed Alpha", workspaceRoot: workspaceA },
+      { title: "Renamed Beta", workspaceRoot: workspaceB },
+    ]);
+    const second = yield* runCliCaptured([
+      "project",
+      "import",
+      "--file",
+      rerunFile,
+      "--base-dir",
+      baseDir,
+    ]);
+    assert.equal(second.result._tag, "Success");
+    assert.deepEqual(
+      {
+        created: readProjectImportSummary(second.logs).created,
+        existing: readProjectImportSummary(second.logs).existing,
+      },
+      { created: 0, existing: 2 },
+    );
+    const after = (yield* readProjects(baseDir)).projects
+      .map(({ id, title, workspaceRoot }) => ({ id, title, workspaceRoot }))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    assert.deepEqual(after, before);
+  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
+it.effect("re-imports a workspace after its project was removed", () =>
+  Effect.gen(function* () {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-v2-project-import-"));
+    const workspaceRoot = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3-v2-project-import-"),
+    );
+    yield* runCli(["project", "add", workspaceRoot, "--title", "Original", "--base-dir", baseDir]);
+    const original = (yield* readProjects(baseDir)).projects[0];
+    assert.isDefined(original);
+    yield* runCli(["project", "remove", original!.id, "--base-dir", baseDir]);
+
+    const file = makeProjectImportFile(baseDir, [{ title: "Reimported", workspaceRoot }]);
+    const { result, logs } = yield* runCliCaptured([
+      "project",
+      "import",
+      "--file",
+      file,
+      "--base-dir",
+      baseDir,
+    ]);
+    assert.equal(result._tag, "Success");
+    assert.equal(readProjectImportSummary(logs).created, 1);
+    const reimported = (yield* readProjects(baseDir)).projects[0];
+    assert.notEqual(reimported!.id, original!.id);
+    assert.equal(reimported!.title, "Reimported");
+  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
+it.effect("skips missing and non-directory workspace roots without creating them", () =>
+  Effect.gen(function* () {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-v2-project-import-"));
+    const missing = NodePath.join(baseDir, "missing");
+    const regularFile = NodePath.join(baseDir, "regular-file");
+    NodeFS.writeFileSync(regularFile, "not a directory");
+    const file = makeProjectImportFile(baseDir, [
+      { title: "Missing", workspaceRoot: missing },
+      { title: "File", workspaceRoot: regularFile },
+    ]);
+    const { result, logs } = yield* runCliCaptured([
+      "project",
+      "import",
+      "--file",
+      file,
+      "--base-dir",
+      baseDir,
+    ]);
+    assert.equal(result._tag, "Success");
+    const summary = readProjectImportSummary(logs);
+    assert.deepEqual(
+      { created: summary.created, skipped: summary.skipped, failed: summary.failed },
+      { created: 0, skipped: 2, failed: 0 },
+    );
+    assert.isFalse(NodeFS.existsSync(missing));
+  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
+it.effect("reads the import list from stdin when --file is -", () =>
+  Effect.gen(function* () {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-v2-project-import-"));
+    const workspaceRoot = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3-v2-project-import-"),
+    );
+    const { result, logs } = yield* runCliCaptured(
+      ["project", "import", "--file", "-", "--base-dir", baseDir],
+      { stdin: JSON.stringify([{ title: "Stdin", workspaceRoot }]) },
+    );
+    assert.equal(result._tag, "Success");
+    assert.equal(readProjectImportSummary(logs).created, 1);
+  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
+it.effect("validates the whole import list before creating anything", () =>
+  Effect.gen(function* () {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-v2-project-import-"));
+    const workspaceRoot = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3-v2-project-import-"),
+    );
+    const invalidRecord = makeProjectImportFile(baseDir, [
+      { title: "Valid", workspaceRoot },
+      { title: "", workspaceRoot },
+    ]);
+    const invalid = yield* runCliCaptured([
+      "project",
+      "import",
+      "--file",
+      invalidRecord,
+      "--base-dir",
+      baseDir,
+    ]);
+    assert.equal(invalid.result._tag, "Failure");
+    assert.instanceOf(
+      invalid.result._tag === "Failure" ? invalid.result.failure : undefined,
+      ProjectImportInputError,
+    );
+    const invalidJsonFile = NodePath.join(baseDir, "invalid.json");
+    NodeFS.writeFileSync(invalidJsonFile, "{");
+    const malformed = yield* runCliCaptured([
+      "project",
+      "import",
+      "--file",
+      invalidJsonFile,
+      "--base-dir",
+      baseDir,
+    ]);
+    assert.instanceOf(
+      malformed.result._tag === "Failure" ? malformed.result.failure : undefined,
+      ProjectImportInputError,
+    );
+    assert.deepEqual((yield* readProjects(baseDir)).projects, []);
+  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
+it.effect("keeps successful records when a later record fails", () =>
+  Effect.gen(function* () {
+    const baseDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-v2-project-import-"));
+    const workspaceRoot = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3-v2-project-import-"),
+    );
+    const loopingPath = NodePath.join(baseDir, "looping-link");
+    NodeFS.symlinkSync(loopingPath, loopingPath);
+    const file = makeProjectImportFile(baseDir, [
+      { title: "Good", workspaceRoot },
+      { title: "Bad", workspaceRoot: loopingPath },
+    ]);
+    const { result, logs } = yield* runCliCaptured([
+      "project",
+      "import",
+      "--file",
+      file,
+      "--base-dir",
+      baseDir,
+    ]);
+    assert.equal(result._tag, "Failure");
+    assert.instanceOf(
+      result._tag === "Failure" ? result.failure : undefined,
+      ProjectImportFailedError,
+    );
+    assert.lengthOf(logs, 1);
+    assert.deepEqual(
+      {
+        created: readProjectImportSummary(logs).created,
+        failed: readProjectImportSummary(logs).failed,
+      },
+      { created: 1, failed: 1 },
+    );
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
