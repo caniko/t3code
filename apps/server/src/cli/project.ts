@@ -6,6 +6,7 @@ import {
   type ProjectMutation,
   type ProjectSnapshot,
   ProjectId,
+  TrimmedNonEmptyString,
 } from "@t3tools/contracts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import { splitsSurrogatePair } from "@t3tools/shared/assistantCitations";
@@ -18,7 +19,10 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as References from "effect/References";
+import * as Runtime from "effect/Runtime";
 import * as Schema from "effect/Schema";
+import * as Stdio from "effect/Stdio";
+import * as Stream from "effect/Stream";
 import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 import { FetchHttpClient, HttpClient, HttpClientError } from "effect/http";
 
@@ -50,6 +54,57 @@ type ProjectMutationTarget = {
 type ProjectCliDispatchCommand = ProjectMutation;
 
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
+
+export class ProjectImportInputError extends Schema.TaggedError<ProjectImportInputError>()(
+  "ProjectImportInputError",
+  {
+    file: Schema.String,
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Could not read the project import list from ${this.file}: ${this.detail}`;
+  }
+}
+
+export class ProjectImportFailedError extends Schema.TaggedError<ProjectImportFailedError>()(
+  "ProjectImportFailedError",
+  {
+    failed: Schema.Int,
+    total: Schema.Int,
+  },
+) {
+  override readonly [Runtime.errorReported] = false;
+
+  override get message(): string {
+    return `${this.failed} of ${this.total} projects failed to import.`;
+  }
+}
+
+const ProjectImportRecord = Schema.Struct({
+  title: TrimmedNonEmptyString,
+  workspaceRoot: TrimmedNonEmptyString,
+});
+type ProjectImportRecord = typeof ProjectImportRecord.Type;
+
+type ProjectImportResult = {
+  readonly workspaceRoot: string;
+  readonly status: "created" | "existing" | "skipped" | "failed";
+  readonly error?: string;
+};
+
+type ProjectImportSummary = {
+  created: number;
+  existing: number;
+  skipped: number;
+  failed: number;
+  results: Array<ProjectImportResult>;
+};
+
+const decodeProjectImportRecords = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Array(ProjectImportRecord)),
+);
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
 export class ProjectCommandIdGenerationError extends Schema.TaggedError<ProjectCommandIdGenerationError>()(
   "ProjectCommandIdGenerationError",
@@ -301,6 +356,28 @@ const findActiveProjectTarget = Effect.fn("findActiveProjectTarget")(function* (
   } satisfies ProjectMutationTarget;
 });
 
+const readProjectImportFile = Effect.fn("readProjectImportFile")(function* (file: string) {
+  if (file === "-") {
+    const stdio = yield* Stdio.Stdio;
+    return yield* stdio.stdin.pipe(Stream.decodeText(), Stream.mkString);
+  }
+  const fs = yield* FileSystem.FileSystem;
+  return yield* fs.readFileString(file);
+});
+
+const readProjectImportRecords = Effect.fn("readProjectImportRecords")(function* (file: string) {
+  return yield* readProjectImportFile(file).pipe(
+    Effect.flatMap(decodeProjectImportRecords),
+    Effect.mapError(
+      (cause) =>
+        new ProjectImportInputError({
+          file,
+          detail: cause instanceof Error ? cause.message : String(cause),
+        }),
+    ),
+  );
+});
+
 const runProjectMutation = Effect.fn("runProjectMutation")(function* (
   flags: CliAuthLocationFlags,
   run: (input: {
@@ -308,6 +385,11 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
     readonly dispatch: (
       command: ProjectCliDispatchCommand,
     ) => Effect.Effect<void, Error, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path>;
+    readonly refreshSnapshot: () => Effect.Effect<
+      ProjectSnapshot,
+      Error,
+      FileSystem.FileSystem | HttpClient.HttpClient | Path.Path
+    >;
   }) => Effect.Effect<
     string,
     Error,
@@ -317,10 +399,11 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
     | Path.Path
     | WorkspacePaths.WorkspacePaths
   >,
+  options?: { readonly quietLogs?: boolean },
 ) {
   const logLevel = yield* GlobalFlag.LogLevel;
-  const config = yield* resolveCliAuthConfig(flags, logLevel);
-  const minimumLogLevel = config.logLevel;
+  const config = yield* resolveCliAuthConfig(flags, logLevel, options);
+  const minimumLogLevel = options?.quietLogs === true ? "Error" : config.logLevel;
 
   return yield* Effect.gen(function* () {
     const output = yield* RunningServer.changeState({
@@ -329,9 +412,12 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
         return yield* run({
           snapshot: yield* client.projects.snapshot({ headers: {} }),
           dispatch: (command) =>
-            client.projects.mutate({ headers: {}, payload: command } as Parameters<
-              typeof client.projects.mutate
-            >[0]),
+            client.projects
+              .mutate({ headers: {}, payload: command } as Parameters<
+                typeof client.projects.mutate
+              >[0])
+              .pipe(Effect.mapError(projectCommandErrorFromServerAnswer)),
+          refreshSnapshot: () => client.projects.snapshot({ headers: {} }),
         });
       }, Effect.mapError(projectCommandErrorFromServerAnswer)),
       locally: Effect.promise(() => import("../orchestration-v2/runtimeLayer.ts")).pipe(
@@ -342,6 +428,7 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
               snapshot: yield* projects.snapshot,
               dispatch: (command) =>
                 projectMutationOperation(projects, command).pipe(Effect.asVoid),
+              refreshSnapshot: () => projects.snapshot,
             });
           }).pipe(
             Effect.provide(
@@ -365,6 +452,96 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
       ),
     ),
   );
+});
+
+const skippedWorkspaceRootError = (error: { readonly _tag: string }) =>
+  error._tag === "WorkspaceRootNotExistsError" || error._tag === "WorkspaceRootNotDirectoryError";
+
+const importProjects = Effect.fn("importProjects")(function* (input: {
+  readonly records: ReadonlyArray<ProjectImportRecord>;
+  readonly snapshot: ProjectSnapshot;
+  readonly dispatch: (
+    command: ProjectCliDispatchCommand,
+  ) => Effect.Effect<void, Error, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path>;
+  readonly refreshSnapshot: () => Effect.Effect<
+    ProjectSnapshot,
+    Error,
+    FileSystem.FileSystem | HttpClient.HttpClient | Path.Path
+  >;
+}) {
+  const roots = new Set(
+    input.snapshot.projects
+      .filter((project) => project.deletedAt === null)
+      .map((project) => project.workspaceRoot),
+  );
+  const summary: ProjectImportSummary = {
+    created: 0,
+    existing: 0,
+    skipped: 0,
+    failed: 0,
+    results: [],
+  };
+
+  for (const record of input.records) {
+    const normalized = yield* Effect.result(
+      normalizeWorkspaceRootForProjectCommand(record.workspaceRoot),
+    );
+    if (normalized._tag === "Failure") {
+      const skipped = skippedWorkspaceRootError(normalized.failure);
+      summary[skipped ? "skipped" : "failed"] += 1;
+      summary.results.push({
+        workspaceRoot: record.workspaceRoot,
+        status: skipped ? "skipped" : "failed",
+        error: normalized.failure.message,
+      });
+      continue;
+    }
+
+    const workspaceRoot = normalized.success;
+    if (roots.has(workspaceRoot)) {
+      summary.existing += 1;
+      summary.results.push({ workspaceRoot, status: "existing" });
+      continue;
+    }
+
+    const created = yield* Effect.result(
+      input.dispatch({
+        type: "project.create",
+        commandId: CommandId.make(yield* projectCommandUuid),
+        projectId: ProjectId.make(yield* projectCommandUuid),
+        title: record.title,
+        workspaceRoot,
+      }),
+    );
+    if (created._tag === "Success") {
+      roots.add(workspaceRoot);
+      summary.created += 1;
+      summary.results.push({ workspaceRoot, status: "created" });
+      continue;
+    }
+
+    // A concurrent create can win after our snapshot; only the refreshed active row proves it.
+    const refreshed = yield* Effect.result(input.refreshSnapshot());
+    if (
+      refreshed._tag === "Success" &&
+      refreshed.success.projects.some(
+        (project) => project.deletedAt === null && project.workspaceRoot === workspaceRoot,
+      )
+    ) {
+      roots.add(workspaceRoot);
+      summary.existing += 1;
+      summary.results.push({ workspaceRoot, status: "existing" });
+      continue;
+    }
+    summary.failed += 1;
+    summary.results.push({
+      workspaceRoot,
+      status: "failed",
+      error: created.failure.message,
+    });
+  }
+
+  return summary;
 });
 
 const projectAddCommand = Command.make("add", {
@@ -561,7 +738,45 @@ const projectRenameCommand = Command.make("rename", {
   ),
 );
 
+const projectImportCommand = Command.make("import", {
+  ...projectLocationFlags,
+  file: Flag.String("file").pipe(
+    Flag.withDescription(
+      "JSON file with an array of { title, workspaceRoot } records. Use - to read stdin.",
+    ),
+  ),
+}).pipe(
+  Command.withDescription(
+    "Import projects, skipping workspace roots that are missing or not directories.",
+  ),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const records = yield* readProjectImportRecords(flags.file);
+      let failed = 0;
+      yield* runProjectMutation(
+        flags,
+        ({ snapshot, dispatch, refreshSnapshot }) =>
+          importProjects({ records, snapshot, dispatch, refreshSnapshot }).pipe(
+            Effect.map((summary) => {
+              failed = summary.failed;
+              return encodeJson(summary);
+            }),
+          ),
+        { quietLogs: true },
+      );
+      if (failed > 0) {
+        return yield* new ProjectImportFailedError({ failed, total: records.length });
+      }
+    }),
+  ),
+);
+
 export const projectCommand = Command.make("project").pipe(
   Command.withDescription("Manage projects."),
-  Command.withSubcommands([projectAddCommand, projectRemoveCommand, projectRenameCommand]),
+  Command.withSubcommands([
+    projectAddCommand,
+    projectImportCommand,
+    projectRemoveCommand,
+    projectRenameCommand,
+  ]),
 );
