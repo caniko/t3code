@@ -17,6 +17,11 @@ const SNIPPET_LENGTH = 200;
 export type PullRequestWatchChange =
   | { readonly kind: "checks-failed"; readonly failed: ReadonlyArray<PullRequestCheck> }
   | { readonly kind: "checks-passed"; readonly count: number; readonly required: boolean }
+  | {
+      readonly kind: "checks-finished";
+      readonly count: number;
+      readonly failed: ReadonlyArray<PullRequestCheck>;
+    }
   | { readonly kind: "remarks"; readonly remarks: ReadonlyArray<PullRequestComment> }
   | { readonly kind: "no-checks"; readonly minutes: number }
   | { readonly kind: "conflicting" };
@@ -73,6 +78,10 @@ export function evaluatePullRequestWatch(
         : [];
     const settled =
       failed.length === 0 && detail.checks.every((check) => check.status !== "pending");
+    const pending = detail.checks
+      .filter((check) => check.status === "pending")
+      .map((check) => check.name);
+    const owedAtFailure = owedChecks;
     owedChecks = owed;
     if (passedNow && (!passed || gateGrew)) {
       changes.push({ kind: "checks-passed", count: gate.length, required: required.length > 0 });
@@ -85,6 +94,13 @@ export function evaluatePullRequestWatch(
     } else if (settled && owed.length > 0) {
       changes.push({ kind: "checks-passed", count: detail.checks.length, required: false });
       owedChecks = [];
+    } else if (!passedNow && failed.length > 0) {
+      // A failure wake ends the turn while other checks run, so their finish is owed one wake.
+      owedChecks =
+        newlyFailed.length > 0 ? pending : owedAtFailure.filter((name) => pending.includes(name));
+      if (newlyFailed.length === 0 && owedAtFailure.length > 0 && owedChecks.length === 0) {
+        changes.push({ kind: "checks-finished", count: detail.checks.length, failed });
+      }
     }
     passed = passedNow;
     passedChecks = passedNow ? gateNames : [];
@@ -176,23 +192,24 @@ function listed<T>(items: ReadonlyArray<T>, line: (item: T) => string): Array<st
   return lines;
 }
 
+const checkLine = (check: PullRequestCheck) =>
+  `  - ${check.name}${check.status === "failure" ? "" : ` (${check.status})`}${check.url ? ` ${check.url}` : ""}`;
+
 function changeLines(
   change: PullRequestWatchChange,
   context: { readonly baseBranch: string; readonly commit: string },
 ): Array<string> {
   switch (change.kind) {
     case "checks-failed":
-      return [
-        `- Checks failed${context.commit}:`,
-        ...listed(
-          change.failed,
-          (check) =>
-            `  - ${check.name}${check.status === "failure" ? "" : ` (${check.status})`}${check.url ? ` ${check.url}` : ""}`,
-        ),
-      ];
+      return [`- Checks failed${context.commit}:`, ...listed(change.failed, checkLine)];
     case "checks-passed":
       return [
         `- All ${change.count} ${change.required ? "required " : ""}${change.count === 1 ? "check" : "checks"} passed${context.commit}.`,
+      ];
+    case "checks-finished":
+      return [
+        `- All ${change.count} ${change.count === 1 ? "check" : "checks"} finished${context.commit}, and ${change.failed.length} failed:`,
+        ...listed(change.failed, checkLine),
       ];
     case "remarks":
       return [
@@ -216,6 +233,7 @@ function changeLines(
 const SUMMARY: Record<PullRequestWatchChange["kind"], string> = {
   "checks-failed": "checks failed",
   "checks-passed": "checks passed",
+  "checks-finished": "checks finished",
   remarks: "new comments",
   "no-checks": "no checks reported",
   conflicting: "merge conflict",
@@ -242,7 +260,10 @@ export function pullRequestWatchMessage(input: {
       : "Look into each item and act on it as your task requires. This PR stays linked and watched, so do not link, watch, or list it again. End your turn when you are done, and T3 Code wakes you on the next change. When you hand the work back to the user, call unwatch_pull_request first so the thread returns to their inbox.",
   ].join("\n");
   const failed = changes.some(
-    (change) => change.kind === "checks-failed" || change.kind === "conflicting",
+    (change) =>
+      change.kind === "checks-failed" ||
+      change.kind === "checks-finished" ||
+      change.kind === "conflicting",
   );
   const summary = changes.map((change) => SUMMARY[change.kind]);
   if (exhausted) summary.push("stopped watching");
