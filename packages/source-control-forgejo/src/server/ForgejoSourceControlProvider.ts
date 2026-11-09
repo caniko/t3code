@@ -35,11 +35,19 @@ export const discovery = {
     const logins = ForgejoCli.parseForgejoLogins(input.stdout);
     const login = logins.find((entry) => entry.default === "true") ?? logins[0];
     return login
-      ? providerAuth({
-          status: login.valid === "true" ? "authenticated" : "unauthenticated",
-          account: login.user,
-          host: ForgejoCli.parseForgejoRemote(login.url)?.host,
-        })
+      ? {
+          ...providerAuth({
+            status: login.valid === "true" ? "authenticated" : "unauthenticated",
+            account: login.user,
+            host: ForgejoCli.parseForgejoRemote(login.url)?.host,
+          }),
+          accounts: logins.map((entry) => ({
+            host: ForgejoCli.parseForgejoRemote(entry.url)?.host ?? entry.name,
+            account: entry.user || entry.name,
+            active: entry === login,
+            authenticated: entry.valid === "true",
+          })),
+        }
       : providerAuth({
           status: "unauthenticated",
           detail: "Run `tea login add` to authenticate a Forgejo or Gitea server.",
@@ -94,64 +102,106 @@ export const makeDiscovery = Effect.gen(function* () {
       const credentials = yield* Effect.result(listLogins({ cwd, command: "fj", remoteUrl }));
       const logins = Result.isSuccess(credentials) ? credentials.success : [];
       const remote = ForgejoCli.parseForgejoRemote(remoteUrl);
-      const login =
-        (remote && ForgejoCli.matchForgejoLogin(logins, remote)) ||
-        logins.find((entry) => entry.default === "true") ||
-        logins[0];
+      const home = yield* HostProcess.HomeDirectory;
+      const probes = yield* Effect.forEach(
+        logins,
+        (entry) =>
+          process
+            .run({
+              operation: "source-control.discovery.auth",
+              command: "fj",
+              args: ["--host", entry.url, "whoami"],
+              cwd: home,
+              allowNonZeroExit: true,
+              timeoutMs: 5_000,
+              maxOutputBytes: 8_000,
+              appendTruncationMarker: true,
+            })
+            .pipe(
+              Effect.map((result) => ({
+                authenticated: result.exitCode === 0,
+                // fj prints this for transport failures (TLS, connect, DNS), never for a rejected token.
+                unreachable: result.stderr.includes("error sending request for url"),
+              })),
+              // A whoami that times out or cannot run leaves the login unverified, not rejected.
+              Effect.orElseSucceed(() => ({ authenticated: false, unreachable: true })),
+            ),
+        { concurrency: 3 },
+      );
+      const authenticated = probes.map((entry) => entry.authenticated);
+      const matched = remote ? ForgejoCli.matchForgejoLogin(logins, remote) : undefined;
+      const selected = matched
+        ? logins.indexOf(matched)
+        : logins.findIndex((entry) => entry.default === "true");
+      const primaryIndex = selected >= 0 ? selected : Math.max(authenticated.indexOf(true), 0);
+      const login = logins[primaryIndex];
+      const accounts = yield* Effect.forEach(
+        logins,
+        (entry, index) =>
+          authenticated[index] && cli.getAccount
+            ? cli.getAccount({ cwd, baseUrl: entry.url }).pipe(
+                Effect.result,
+                Effect.map((result) =>
+                  Result.isSuccess(result) ? result.success : entry.user || entry.name,
+                ),
+              )
+            : Effect.succeed(entry.user || entry.name),
+        { concurrency: 3 },
+      );
+      const loginAccounts = logins.map((entry, index) => ({
+        host: ForgejoCli.parseForgejoRemote(entry.url)?.host ?? entry.name,
+        account: accounts[index] ?? entry.name,
+        active: index === primaryIndex,
+        authenticated: authenticated[index] === true,
+        ...(probes[index]?.unreachable
+          ? { error: `Could not reach ${entry.url} to verify this login.` }
+          : {}),
+      }));
+      const auth = Result.isFailure(credentials)
+        ? providerAuth({
+            status: "unknown",
+            detail: "Could not read fj authentication storage. Authenticate again with fj.",
+          })
+        : authenticated.some((entry) => entry)
+          ? {
+              ...providerAuth({
+                status: "authenticated",
+                account: accounts[primaryIndex],
+                host: login && (ForgejoCli.parseForgejoRemote(login.url)?.host ?? login.name),
+              }),
+              accounts: loginAccounts,
+            }
+          : login && probes[primaryIndex]?.unreachable
+            ? {
+                ...providerAuth({
+                  status: "unknown",
+                  detail: `Could not reach ${login.url} to verify the fj login.`,
+                  host: ForgejoCli.parseForgejoRemote(login.url)?.host,
+                }),
+                accounts: loginAccounts,
+              }
+            : {
+                ...providerAuth({
+                  status: "unauthenticated",
+                  detail:
+                    "Authenticate this server with `fj --host <server-url> auth add-token`. For a server under a URL subpath, such as `https://example.com/forgejo`, use `tea login add` instead.",
+                }),
+                accounts: loginAccounts,
+              };
       const fj = yield* probeSourceControlProvider({
         // fj reads the cwd repository even with --host and fails on an unborn branch.
-        cwd: yield* HostProcess.HomeDirectory,
+        cwd: home,
         process,
         spec: {
           ...discovery,
           executable: "fj",
           versionArgs: ["version"],
-          authArgs: login ? ["--host", login.url, "whoami"] : ["auth", "list"],
-          parseAuth: (result) =>
-            Result.isFailure(credentials)
-              ? providerAuth({
-                  status: "unknown",
-                  detail: "Could not read fj authentication storage. Authenticate again with fj.",
-                })
-              : login && result.exitCode === 0
-                ? providerAuth({
-                    status: "authenticated",
-                    account: login.user,
-                    host: ForgejoCli.parseForgejoRemote(login.url)?.host,
-                  })
-                : // fj prints this for transport failures (TLS, connect, DNS), never for a rejected token.
-                  login && result.stderr.includes("error sending request for url")
-                  ? providerAuth({
-                      status: "unknown",
-                      detail: `Could not reach ${login.url} to verify the fj login.`,
-                      host: ForgejoCli.parseForgejoRemote(login.url)?.host,
-                    })
-                  : providerAuth({
-                      status: "unauthenticated",
-                      detail:
-                        "Authenticate this server with `fj --host <server-url> auth add-token`. For a server under a URL subpath, such as `https://example.com/forgejo`, use `tea login add` instead.",
-                    }),
+          authArgs: ["auth", "list"],
+          parseAuth: () => auth,
         },
       });
       if (fj.status === "available" && (login || Result.isFailure(credentials))) {
-        if (login && fj.auth.status === "authenticated" && cli.getAccount) {
-          const account = yield* cli.getAccount({ cwd, baseUrl: login.url }).pipe(Effect.result);
-          return {
-            ...fj,
-            auth: Result.isSuccess(account)
-              ? providerAuth({
-                  status: "authenticated",
-                  account: account.success,
-                  host: ForgejoCli.parseForgejoRemote(login.url)?.host,
-                })
-              : providerAuth({
-                  status: "unknown",
-                  detail: account.failure.detail,
-                  host: ForgejoCli.parseForgejoRemote(login.url)?.host,
-                }),
-          };
-        }
-        return fj;
+        return { ...fj, auth };
       }
       const tea = yield* probeSourceControlProvider({ cwd, process, spec: discovery });
       // Discovery keeps the install hint only for an absent executable; a slow or broken fj

@@ -2323,7 +2323,7 @@ it.effect(
                         );
                       if (input.args[0] === "version")
                         return Effect.succeed(processOutput("fj 0.10.0"));
-                      if (scenario === "invalid-storage") {
+                      if (input.args[0] === "auth") {
                         assert.deepStrictEqual(input.args, ["auth", "list"]);
                         return Effect.succeed(processOutput(""));
                       }
@@ -2481,3 +2481,176 @@ it.effect("does not call a valid fj login on an HTTP-only server unauthenticated
     Effect.provideService(HostProcess.HomeDirectory, "/home/maria"),
   ),
 );
+function fjDiscoveryLayer(options: {
+  readonly logins: ReadonlyArray<{
+    readonly name: string;
+    readonly url: string;
+    readonly user: string;
+    readonly default: string;
+  }>;
+  readonly authenticated: ReadonlySet<string>;
+  readonly accounts: Readonly<Record<string, string>>;
+  readonly probed: string[];
+  readonly timedOut?: ReadonlySet<string>;
+}) {
+  return Layer.mergeAll(
+    Layer.mock(ForgejoCli.ForgejoCli)({
+      listLogins: () => Effect.succeed([...options.logins]),
+      getAccount: (input) =>
+        options.accounts[input.baseUrl] === undefined
+          ? Effect.fail(
+              new ForgejoCli.ForgejoCliError({
+                command: "fj",
+                cwd: input.cwd,
+                detail: `No credentials for ${input.baseUrl}.`,
+              }),
+            )
+          : Effect.succeed(options.accounts[input.baseUrl]!),
+    }),
+    TestSourceControlHost.layer({
+      process: {
+        run: (input) => {
+          if (input.command === "git")
+            return Effect.succeed(processOutput("", { exitCode: ChildProcessSpawner.ExitCode(1) }));
+          assert.strictEqual(input.command, "fj");
+          if (input.args[0] === "version") return Effect.succeed(processOutput("fj 0.10.0"));
+          if (input.args[0] === "auth") return Effect.succeed(processOutput(""));
+          assert.strictEqual(input.cwd, "/home/maria");
+          const url = input.args[1];
+          if (url === undefined)
+            return Effect.die(`Unexpected fj arguments: ${input.args.join(" ")}`);
+          options.probed.push(url);
+          if (options.timedOut?.has(url)) {
+            return Effect.fail(
+              new VcsProcessTimeoutError({
+                operation: input.operation,
+                command: input.command,
+                cwd: input.cwd,
+                timeoutMs: 5_000,
+              }),
+            );
+          }
+          return Effect.succeed(
+            processOutput("", {
+              exitCode: ChildProcessSpawner.ExitCode(options.authenticated.has(url) ? 0 : 1),
+            }),
+          );
+        },
+      },
+    }),
+    Layer.succeed(HostProcess.HomeDirectory, "/home/maria"),
+  );
+}
+
+it.effect("discovers an authenticated fj login after an unreachable one", () => {
+  const probed: string[] = [];
+  return Effect.gen(function* () {
+    const spec = yield* ForgejoSourceControlProvider.makeDiscovery;
+    if (spec.type !== "managed-cli") return yield* Effect.die("managed discovery missing");
+    const result = yield* spec.probe("/repo");
+    assert.strictEqual(result.auth.status, "authenticated");
+    assert.deepStrictEqual(result.auth.account, Option.some("second"));
+    assert.deepStrictEqual(result.auth.host, Option.some("second.example"));
+    assert.deepStrictEqual(
+      result.auth.accounts?.map((entry) => [
+        entry.host,
+        entry.account,
+        entry.authenticated,
+        entry.active,
+      ]),
+      [
+        ["first.example", "first.example", false, false],
+        ["second.example", "second", true, true],
+      ],
+    );
+    assert.deepStrictEqual(probed.toSorted(), ["https://first.example", "https://second.example"]);
+  }).pipe(
+    Effect.provide(
+      fjDiscoveryLayer({
+        logins: [
+          { name: "first.example", url: "https://first.example", user: "", default: "false" },
+          { name: "second.example", url: "https://second.example", user: "", default: "false" },
+        ],
+        authenticated: new Set(["https://second.example"]),
+        accounts: { "https://second.example": "second" },
+        probed,
+      }),
+    ),
+  );
+});
+
+it.effect("keeps every fj login listed when the selected one cannot be verified", () =>
+  Effect.gen(function* () {
+    const spec = yield* ForgejoSourceControlProvider.makeDiscovery;
+    if (spec.type !== "managed-cli") return yield* Effect.die("managed discovery missing");
+    const result = yield* spec.probe("/repo");
+    assert.strictEqual(result.auth.status, "unknown");
+    assert.deepStrictEqual(
+      result.auth.detail,
+      Option.some("Could not reach https://codeberg.org to verify the fj login."),
+    );
+    assert.deepStrictEqual(
+      result.auth.accounts?.map((entry) => [entry.host, entry.authenticated, entry.error]),
+      [
+        ["codeberg.org", false, "Could not reach https://codeberg.org to verify this login."],
+        ["codefloe.com", false, undefined],
+      ],
+    );
+  }).pipe(
+    Effect.provide(
+      fjDiscoveryLayer({
+        logins: [
+          { name: "codeberg.org", url: "https://codeberg.org", user: "ana", default: "true" },
+          { name: "codefloe.com", url: "https://codefloe.com", user: "bo", default: "false" },
+        ],
+        authenticated: new Set(),
+        accounts: {},
+        probed: [],
+        timedOut: new Set(["https://codeberg.org"]),
+      }),
+    ),
+  ),
+);
+
+it.effect("lists every fj login as a discovered account", () => {
+  const probed: string[] = [];
+  return Effect.gen(function* () {
+    const spec = yield* ForgejoSourceControlProvider.makeDiscovery;
+    if (spec.type !== "managed-cli") return yield* Effect.die("managed discovery missing");
+    const result = yield* spec.probe("/repo");
+    assert.strictEqual(result.auth.status, "authenticated");
+    assert.deepStrictEqual(result.auth.accounts, [
+      { host: "codeberg.org", account: "ana", active: true, authenticated: true },
+      { host: "codefloe.com", account: "bo", active: false, authenticated: true },
+      {
+        host: "git.tartanoglu.com",
+        account: "git.tartanoglu.com",
+        active: false,
+        authenticated: false,
+      },
+    ]);
+    assert.deepStrictEqual(probed.toSorted(), [
+      "https://codeberg.org",
+      "https://codefloe.com",
+      "https://git.tartanoglu.com",
+    ]);
+  }).pipe(
+    Effect.provide(
+      fjDiscoveryLayer({
+        logins: [
+          { name: "codeberg.org", url: "https://codeberg.org", user: "", default: "false" },
+          { name: "codefloe.com", url: "https://codefloe.com", user: "", default: "false" },
+          {
+            name: "git.tartanoglu.com",
+            url: "https://git.tartanoglu.com",
+            user: "",
+            default: "false",
+          },
+        ],
+        authenticated: new Set(["https://codeberg.org", "https://codefloe.com"]),
+        accounts: { "https://codeberg.org": "ana", "https://codefloe.com": "bo" },
+        probed,
+      }),
+    ),
+  );
+});
