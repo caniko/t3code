@@ -89,13 +89,14 @@ type ProjectImportRecord = typeof ProjectImportRecord.Type;
 
 type ProjectImportResult = {
   readonly workspaceRoot: string;
-  readonly status: "created" | "existing" | "skipped" | "failed";
+  readonly status: "created" | "existing" | "moved" | "skipped" | "failed";
   readonly error?: string;
 };
 
 type ProjectImportSummary = {
   created: number;
   existing: number;
+  moved: number;
   skipped: number;
   failed: number;
   results: Array<ProjectImportResult>;
@@ -469,18 +470,46 @@ const importProjects = Effect.fn("importProjects")(function* (input: {
     FileSystem.FileSystem | HttpClient.HttpClient | Path.Path
   >;
 }) {
-  const roots = new Set(
-    input.snapshot.projects
-      .filter((project) => project.deletedAt === null)
-      .map((project) => project.workspaceRoot),
-  );
+  const activeProjects = input.snapshot.projects.filter((project) => project.deletedAt === null);
+  const roots = new Set(activeProjects.map((project) => project.workspaceRoot));
   const summary: ProjectImportSummary = {
     created: 0,
     existing: 0,
+    moved: 0,
     skipped: 0,
     failed: 0,
     results: [],
   };
+
+  const fileSystem = yield* FileSystem.FileSystem;
+  // A moved root keeps resolving through the symlink left at its old path, so compare real
+  // directories when the exact workspace root strings differ. Resolve the active roots once
+  // per import, and only when a record actually needs the comparison.
+  let projectsByRealRoot: Map<string, (typeof activeProjects)[number]> | undefined;
+  const resolveRealRoot = Effect.fn("importProjects.resolveRealRoot")(function* (
+    workspaceRoot: string,
+  ) {
+    const resolved = yield* Effect.result(fileSystem.realPath(workspaceRoot));
+    return resolved._tag === "Success" ? resolved.success : undefined;
+  });
+  const findMovedProject = Effect.fn("importProjects.findMovedProject")(function* (
+    workspaceRoot: string,
+  ) {
+    if (projectsByRealRoot === undefined) {
+      projectsByRealRoot = new Map();
+      for (const project of activeProjects) {
+        const realRoot = yield* resolveRealRoot(project.workspaceRoot);
+        // A root that no longer resolves cannot prove the project was moved.
+        if (realRoot !== undefined && !projectsByRealRoot.has(realRoot)) {
+          projectsByRealRoot.set(realRoot, project);
+        }
+      }
+    }
+    const realRoot = yield* resolveRealRoot(workspaceRoot);
+    if (realRoot === undefined) return undefined;
+    const project = projectsByRealRoot.get(realRoot);
+    return project === undefined ? undefined : { project, realRoot };
+  });
 
   for (const record of input.records) {
     const normalized = yield* Effect.result(
@@ -501,6 +530,36 @@ const importProjects = Effect.fn("importProjects")(function* (input: {
     if (roots.has(workspaceRoot)) {
       summary.existing += 1;
       summary.results.push({ workspaceRoot, status: "existing" });
+      continue;
+    }
+
+    const movedProject = yield* findMovedProject(workspaceRoot);
+    if (movedProject !== undefined) {
+      const rebound = yield* Effect.result(
+        input.dispatch({
+          type: "project.update",
+          commandId: CommandId.make(yield* projectCommandUuid),
+          projectId: movedProject.project.id,
+          workspaceRoot,
+        }),
+      );
+      if (rebound._tag === "Success") {
+        roots.delete(movedProject.project.workspaceRoot);
+        roots.add(workspaceRoot);
+        projectsByRealRoot?.set(movedProject.realRoot, {
+          ...movedProject.project,
+          workspaceRoot,
+        });
+        summary.moved += 1;
+        summary.results.push({ workspaceRoot, status: "moved" });
+      } else {
+        summary.failed += 1;
+        summary.results.push({
+          workspaceRoot,
+          status: "failed",
+          error: rebound.failure.message,
+        });
+      }
       continue;
     }
 

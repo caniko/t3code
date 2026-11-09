@@ -13,6 +13,7 @@ import {
   EventId,
   ProviderInstanceId,
   ThreadId,
+  type ApplicationProjectEvent,
   type OrchestrationV2AppThread,
   type ProjectId,
 } from "@t3tools/contracts";
@@ -39,6 +40,7 @@ import * as EventStore from "../orchestration-v2/EventStore.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as ProjectService from "../project/ProjectService.ts";
@@ -91,11 +93,12 @@ const readProjectImportSummary = (logs: ReadonlyArray<string>) => {
   return JSON.parse(line!) as {
     created: number;
     existing: number;
+    moved: number;
     skipped: number;
     failed: number;
     results: ReadonlyArray<{
       workspaceRoot: string;
-      status: "created" | "existing" | "skipped" | "failed";
+      status: "created" | "existing" | "moved" | "skipped" | "failed";
       error?: string;
     }>;
   };
@@ -164,6 +167,27 @@ const withProjectService = <A, E>(
 
 const readProjects = (baseDir: string) =>
   withProjectService(baseDir, (projects) => projects.snapshot);
+
+const readProjectEvents = (baseDir: string) =>
+  Effect.gen(function* () {
+    const config = yield* makeConfig(baseDir);
+    const layer = OrchestrationEventStore.layer.pipe(
+      Layer.provideMerge(SqlitePersistence.layerConfig),
+      Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      Layer.provide(ServerConfig.layer(config)),
+      Layer.provide(Layer.succeed(References.MinimumLogLevel, config.logLevel)),
+    );
+    const events = yield* Effect.gen(function* () {
+      const store = yield* OrchestrationEventStore.OrchestrationEventStore;
+      const latest = yield* store.latestApplicationSequence;
+      return yield* store
+        .readApplicationEvents({ afterSequence: 0, throughSequence: latest })
+        .pipe(Stream.runCollect);
+    }).pipe(Effect.provide(layer));
+    return Array.from(events).filter(
+      (event): event is ApplicationProjectEvent => "aggregateKind" in event,
+    );
+  });
 
 it.effect(
   "adds, renames, and removes projects, and tracks folders on add, through the V2 project CLI domain",
@@ -321,6 +345,87 @@ it.effect("re-imports a workspace after its project was removed", () =>
     const reimported = (yield* readProjects(baseDir)).projects[0];
     assert.notEqual(reimported!.id, original!.id);
     assert.equal(reimported!.title, "Reimported");
+  }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
+it.effect("rebinds a project whose workspace root moved behind a symlink", () =>
+  Effect.gen(function* () {
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-v2-project-moved-"));
+    const owned = NodePath.join(root, "owned");
+    const canonicalRoot = NodePath.join(owned, "demo");
+    NodeFS.mkdirSync(canonicalRoot, { recursive: true });
+    const legacyParent = NodePath.join(root, "repos", "owned");
+    NodeFS.mkdirSync(NodePath.dirname(legacyParent), { recursive: true });
+    NodeFS.symlinkSync(owned, legacyParent);
+    const legacyRoot = NodePath.join(legacyParent, "demo");
+    const baseDir = NodePath.join(root, "state");
+
+    yield* runCli(["project", "add", legacyRoot, "--title", "Demo", "--base-dir", baseDir]);
+    const original = (yield* readProjects(baseDir)).projects[0];
+    assert.isDefined(original);
+    assert.equal(original?.workspaceRoot, legacyRoot);
+
+    const file = makeProjectImportFile(root, [{ title: "Demo", workspaceRoot: canonicalRoot }]);
+    const first = yield* runCliCaptured([
+      "project",
+      "import",
+      "--file",
+      file,
+      "--base-dir",
+      baseDir,
+    ]);
+    assert.equal(first.result._tag, "Success");
+    const firstSummary = readProjectImportSummary(first.logs);
+    assert.deepEqual(
+      {
+        created: firstSummary.created,
+        existing: firstSummary.existing,
+        moved: firstSummary.moved,
+        skipped: firstSummary.skipped,
+        failed: firstSummary.failed,
+      },
+      { created: 0, existing: 0, moved: 1, skipped: 0, failed: 0 },
+    );
+    assert.deepEqual(
+      firstSummary.results.map((result) => result.status),
+      ["moved"],
+    );
+
+    const afterMove = (yield* readProjects(baseDir)).projects;
+    assert.lengthOf(afterMove, 1);
+    assert.equal(afterMove[0]?.id, original?.id);
+    assert.equal(afterMove[0]?.workspaceRoot, canonicalRoot);
+    assert.equal(afterMove[0]?.title, "Demo");
+
+    const projectEvents = yield* readProjectEvents(baseDir);
+    assert.lengthOf(
+      projectEvents.filter((event) => event.type === "project.created"),
+      1,
+    );
+    const updates = projectEvents.filter((event) => event.type === "project.meta-updated");
+    assert.lengthOf(updates, 1);
+    assert.equal(updates[0]?.aggregateId, original?.id);
+    assert.equal(updates[0]?.payload.workspaceRoot, canonicalRoot);
+
+    const second = yield* runCliCaptured([
+      "project",
+      "import",
+      "--file",
+      file,
+      "--base-dir",
+      baseDir,
+    ]);
+    assert.equal(second.result._tag, "Success");
+    const secondSummary = readProjectImportSummary(second.logs);
+    assert.deepEqual(
+      {
+        created: secondSummary.created,
+        existing: secondSummary.existing,
+        moved: secondSummary.moved,
+      },
+      { created: 0, existing: 1, moved: 0 },
+    );
+    assert.lengthOf((yield* readProjects(baseDir)).projects, 1);
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
 
