@@ -588,6 +588,60 @@ describe("evaluatePullRequestWatch", () => {
     assert.deepEqual(evaluatePullRequestWatch(final.next, recovered, noRemarks).changes, []);
   });
 
+  it("reports once when the checks still running at a failure finish", () => {
+    const lint = check("lint", "failure");
+    const running = detail({ checks: [lint, check("test", "pending"), check("e2e", "pending")] });
+    const failure = evaluatePullRequestWatch(watch(), running, noRemarks);
+    assert.deepEqual(failure.changes, [{ kind: "checks-failed", failed: [lint] }]);
+    const partial = detail({ checks: [lint, check("test", "success"), check("e2e", "pending")] });
+    const waiting = evaluatePullRequestWatch(failure.next, partial, noRemarks);
+    assert.deepEqual(waiting.changes, []);
+    const finished = detail({ checks: [lint, check("test", "success"), check("e2e", "success")] });
+    const settled = evaluatePullRequestWatch(waiting.next, finished, noRemarks);
+    assert.deepEqual(settled.changes, [{ kind: "checks-finished", count: 3, failed: [lint] }]);
+    assert.deepEqual(evaluatePullRequestWatch(settled.next, finished, noRemarks).changes, []);
+
+    const e2e = check("e2e", "failure");
+    const lastFailed = detail({ checks: [lint, check("test", "success"), e2e] });
+    const failedLast = evaluatePullRequestWatch(waiting.next, lastFailed, noRemarks);
+    assert.deepEqual(failedLast.changes, [{ kind: "checks-failed", failed: [e2e] }]);
+    assert.deepEqual(evaluatePullRequestWatch(failedLast.next, lastFailed, noRemarks).changes, []);
+
+    // A workflow still awaiting approval when the others finish keeps the wake owed until it runs.
+    const test = check("test", "success");
+    const held = detail({
+      checks: [lint, test, { ...check("deploy", "action-required"), url: run(2) }],
+    });
+    const holding = evaluatePullRequestWatch(failure.next, held, noRemarks);
+    assert.deepEqual(
+      holding.changes.map((change) => change.kind),
+      ["checks-awaiting-approval"],
+    );
+    const approved = detail({
+      checks: [lint, test, { ...check("deploy", "pending"), url: run(2) }],
+    });
+    const deploying = evaluatePullRequestWatch(holding.next, approved, noRemarks);
+    assert.deepEqual(deploying.changes, []);
+    const deployed = detail({
+      checks: [lint, test, { ...check("deploy/job", "success"), url: `${run(2)}/job/2` }],
+    });
+    assert.deepEqual(evaluatePullRequestWatch(deploying.next, deployed, noRemarks).changes, [
+      { kind: "checks-finished", count: 3, failed: [lint] },
+    ]);
+    // An approval read that failed cannot show that nothing is held either.
+    const unreadApproval = {
+      ...check("Workflow approval status", "action-required"),
+      placeholder: true,
+    };
+    const blind = evaluatePullRequestWatch(
+      failure.next,
+      detail({ checks: [lint, test, unreadApproval] }),
+      noRemarks,
+    );
+    assert.deepEqual(blind.changes, []);
+    assert.deepEqual(blind.next.owedChecks, ["test", "e2e"]);
+  });
+
   it("clears old-head owed checks when a new head is pushed", () => {
     const required = { ...check("test", "success"), required: true };
     const early = detail({ checks: [required, check("e2e", "pending")] });

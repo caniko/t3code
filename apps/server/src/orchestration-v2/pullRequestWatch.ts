@@ -18,6 +18,11 @@ export type PullRequestWatchChange =
   | { readonly kind: "checks-failed"; readonly failed: ReadonlyArray<PullRequestCheck> }
   | { readonly kind: "checks-passed"; readonly count: number; readonly required: boolean }
   | { readonly kind: "checks-awaiting-approval"; readonly checks: ReadonlyArray<PullRequestCheck> }
+  | {
+      readonly kind: "checks-finished";
+      readonly count: number;
+      readonly failed: ReadonlyArray<PullRequestCheck>;
+    }
   | { readonly kind: "remarks"; readonly remarks: ReadonlyArray<PullRequestComment> }
   | { readonly kind: "no-checks"; readonly minutes: number }
   | { readonly kind: "conflicting" }
@@ -74,10 +79,12 @@ export function evaluatePullRequestWatch(
   const checks = detail.checks.filter((check) => check.placeholder !== true);
   const failed = checks.filter(isFailedCheck);
   const awaiting = checks.filter((check) => check.status === "action-required");
+  // A failure wake must still know which failures are new after the baseline moves below.
+  let newlyFailed: ReadonlyArray<PullRequestCheck> = [];
   if (checks.length > 0) {
     // A run awaiting approval waits on a person, like a review, so only running checks count.
     checksPending = checks.some((check) => check.status === "pending");
-    const newlyFailed = failed.filter((check) => !failedChecks.includes(check.name));
+    newlyFailed = failed.filter((check) => !failedChecks.includes(check.name));
     if (!checksBaseline && newlyFailed.length > 0) {
       changes.push({ kind: "checks-failed", failed: newlyFailed });
     }
@@ -140,6 +147,8 @@ export function evaluatePullRequestWatch(
       failed.length === 0 &&
       awaitingApproval.length === 0 &&
       checks.every((check) => check.status !== "pending");
+    const pending = checks.filter((check) => check.status === "pending").map((check) => check.name);
+    const owedAtFailure = owedChecks;
     owedChecks = owed;
     if (passedNow && (!passed || gateGrew)) {
       if (!checksBaseline) {
@@ -154,6 +163,15 @@ export function evaluatePullRequestWatch(
     } else if (settled && owed.length > 0) {
       changes.push({ kind: "checks-passed", count: checks.length, required: false });
       owedChecks = [];
+    } else if (!passedNow && failed.length > 0) {
+      // A failure wake ends the turn while other checks run, so their finish is owed one wake.
+      owedChecks =
+        newlyFailed.length > 0 ? pending : owedAtFailure.filter((name) => pending.includes(name));
+      if (newlyFailed.length === 0 && owedAtFailure.length > 0 && owedChecks.length === 0) {
+        // A run held for approval, or hidden by a failed approval read, finishes later.
+        if (unread || awaitingApproval.length > 0) owedChecks = owedAtFailure;
+        else changes.push({ kind: "checks-finished", count: checks.length, failed });
+      }
     }
     passed = passedNow;
     passedChecks = passedNow ? gateNames : [];
@@ -351,20 +369,16 @@ function listed<T>(items: ReadonlyArray<T>, line: (item: T) => string): Array<st
   return lines;
 }
 
+const checkLine = (check: PullRequestCheck) =>
+  `  - ${check.name}${check.status === "failure" ? "" : ` (${check.status})`}${check.url ? ` ${check.url}` : ""}`;
+
 function changeLines(
   change: PullRequestWatchChange,
   context: { readonly baseBranch: string; readonly commit: string },
 ): Array<string> {
   switch (change.kind) {
     case "checks-failed":
-      return [
-        `- Checks failed${context.commit}:`,
-        ...listed(
-          change.failed,
-          (check) =>
-            `  - ${check.name}${check.status === "failure" ? "" : ` (${check.status})`}${check.url ? ` ${check.url}` : ""}`,
-        ),
-      ];
+      return [`- Checks failed${context.commit}:`, ...listed(change.failed, checkLine)];
     case "checks-awaiting-approval":
       return [
         `- Checks are waiting for approval or action from a maintainer${context.commit}:`,
@@ -373,6 +387,11 @@ function changeLines(
     case "checks-passed":
       return [
         `- All ${change.count} ${change.required ? "required " : ""}${change.count === 1 ? "check" : "checks"} passed${context.commit}.`,
+      ];
+    case "checks-finished":
+      return [
+        `- All ${change.count} ${change.count === 1 ? "check" : "checks"} finished${context.commit}, and ${change.failed.length} failed:`,
+        ...listed(change.failed, checkLine),
       ];
     case "remarks":
       return [
@@ -403,6 +422,7 @@ const SUMMARY: Record<PullRequestWatchChange["kind"], string> = {
   "checks-failed": "checks failed",
   "checks-passed": "checks passed",
   "checks-awaiting-approval": "checks await approval",
+  "checks-finished": "checks finished",
   remarks: "new comments",
   "no-checks": "no checks reported",
   conflicting: "merge conflict",
@@ -470,6 +490,7 @@ export function pullRequestWatchMessage(input: {
   const failed = changes.some(
     (change) =>
       change.kind === "checks-failed" ||
+      change.kind === "checks-finished" ||
       change.kind === "conflicting" ||
       change.kind === "needs-rebase" ||
       change.kind === "merge-queue-removed",
