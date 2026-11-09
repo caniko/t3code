@@ -205,6 +205,26 @@ describe("evaluatePullRequestWatch", () => {
     assert.deepEqual(evaluatePullRequestWatch(final.next, recovered, noRemarks).changes, []);
   });
 
+  it("reports once when the checks still running at a failure finish", () => {
+    const lint = check("lint", "failure");
+    const running = detail({ checks: [lint, check("test", "pending"), check("e2e", "pending")] });
+    const failure = evaluatePullRequestWatch(watch(), running, noRemarks);
+    assert.deepEqual(failure.changes, [{ kind: "checks-failed", failed: [lint] }]);
+    const partial = detail({ checks: [lint, check("test", "success"), check("e2e", "pending")] });
+    const waiting = evaluatePullRequestWatch(failure.next, partial, noRemarks);
+    assert.deepEqual(waiting.changes, []);
+    const finished = detail({ checks: [lint, check("test", "success"), check("e2e", "success")] });
+    const settled = evaluatePullRequestWatch(waiting.next, finished, noRemarks);
+    assert.deepEqual(settled.changes, [{ kind: "checks-finished", count: 3, failed: [lint] }]);
+    assert.deepEqual(evaluatePullRequestWatch(settled.next, finished, noRemarks).changes, []);
+
+    const e2e = check("e2e", "failure");
+    const lastFailed = detail({ checks: [lint, check("test", "success"), e2e] });
+    const failedLast = evaluatePullRequestWatch(waiting.next, lastFailed, noRemarks);
+    assert.deepEqual(failedLast.changes, [{ kind: "checks-failed", failed: [e2e] }]);
+    assert.deepEqual(evaluatePullRequestWatch(failedLast.next, lastFailed, noRemarks).changes, []);
+  });
+
   it("clears old-head owed checks when a new head is pushed", () => {
     const required = { ...check("test", "success"), required: true };
     const early = detail({ checks: [required, check("e2e", "pending")] });
