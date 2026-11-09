@@ -72,4 +72,18 @@ describe("DesktopEnvironment", () => {
       assert.equal(production.stateDir, "/Users/alice/.t3/userdata");
     }),
   );
+
+  it.effect("moves Electron's app data without XDG_CONFIG_HOME", () =>
+    Effect.gen(function* () {
+      const linux = { platform: "linux" as const, homeDirectory: "/home/alice" };
+      const moved = yield* makeEnvironment(linux, {
+        T3CODE_DESKTOP_APP_DATA_DIR: "/home/alice/.local/share/t3/desktop-config",
+        XDG_CONFIG_HOME: "/home/alice/.config",
+      });
+      const standard = yield* makeEnvironment(linux);
+
+      assert.equal(moved.appDataDirectory, "/home/alice/.local/share/t3/desktop-config");
+      assert.equal(standard.appDataDirectory, "/home/alice/.config");
+    }),
+  );
 });

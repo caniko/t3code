@@ -35,6 +35,9 @@ const compactEnv = (env: Readonly<Record<string, string | undefined>>): Record<s
 
 export const DesktopConfig = Config.all({
   appDataDirectory: trimmedString("APPDATA"),
+  // Moves only Electron's own state; XDG_CONFIG_HOME would also move the config of
+  // everything the app launches (xdg-open's default browser, URL handlers, shells).
+  desktopAppDataDirectory: trimmedString("T3CODE_DESKTOP_APP_DATA_DIR"),
   xdgConfigHome: trimmedString("XDG_CONFIG_HOME"),
   xdgDataHome: trimmedString("XDG_DATA_HOME"),
   t3Home: trimmedString("T3CODE_HOME"),
