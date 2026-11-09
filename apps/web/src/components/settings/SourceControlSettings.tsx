@@ -390,7 +390,22 @@ export function SourceControlSettingsPanel() {
   };
   const hostSettingsPanel = (item: SourceControlProviderDiscoveryItem) => {
     const definition = sourceControlClients.find(item.kind);
-    if (!definition?.settings || environmentId === null) return undefined;
+    if (environmentId === null) return undefined;
+    if (!definition?.settings) {
+      if (definition === undefined || item.status !== "available" || !item.auth.accounts?.length)
+        return undefined;
+      return (
+        <SettingsSearchTarget id={sourceControlHostSettingsSearchId(item.kind)}>
+          <SourceControlAccountSettings
+            key={`accounts-${environmentId}`}
+            environmentId={environmentId}
+            definition={definition}
+            auth={item.auth}
+            onSaved={handleScan}
+          />
+        </SettingsSearchTarget>
+      );
+    }
     const { credentials } = definition;
     if (credentials) {
       return (

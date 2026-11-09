@@ -45,7 +45,7 @@ export function SourceControlAccountSettings({
 }: {
   readonly environmentId: EnvironmentId;
   readonly definition: SourceControlDefinition;
-  readonly credentials: SourceControlHostCredentials;
+  readonly credentials?: SourceControlHostCredentials;
   readonly auth: SourceControlProviderAuth;
   readonly onSaved: () => void;
 }) {
@@ -53,7 +53,8 @@ export function SourceControlAccountSettings({
     readHostCredentialSettings(settings, definition.kind),
   );
   const { label } = definition;
-  const { cliName } = credentials;
+  const cliName = credentials?.cliName ?? label;
+  const interactive = credentials !== undefined;
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
     label: `save ${label} account settings`,
   });
@@ -83,9 +84,15 @@ export function SourceControlAccountSettings({
   if (groups.length === 0) {
     return (
       <p className="text-xs text-muted-foreground">
-        Sign in with{" "}
-        <code className="rounded bg-muted px-1 py-px text-2xs">{credentials.loginCommand}</code> on
-        the server host, then rescan to choose accounts here.
+        {credentials ? (
+          <>
+            Sign in with{" "}
+            <code className="rounded bg-muted px-1 py-px text-2xs">{credentials.loginCommand}</code>{" "}
+            on the server host, then rescan to choose accounts here.
+          </>
+        ) : (
+          <>No {label} accounts were found on the server host.</>
+        )}
       </p>
     );
   }
@@ -94,8 +101,14 @@ export function SourceControlAccountSettings({
     <div className="grid gap-4">
       <div className="flex items-center justify-between gap-3">
         <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
-          Choose which <code className="rounded bg-muted px-1 py-px text-2xs">{cliName}</code> login
-          each {label} host uses, or turn a host off.
+          {interactive ? (
+            <>
+              Choose which <code className="rounded bg-muted px-1 py-px text-2xs">{cliName}</code>{" "}
+              login each {label} host uses, or turn a host off.
+            </>
+          ) : (
+            <>Signed-in {label} accounts on the server host.</>
+          )}
         </p>
         <Button
           size="icon-xs"
@@ -125,14 +138,16 @@ export function SourceControlAccountSettings({
                   </p>
                 ) : null}
               </div>
-              <Switch
-                checked={enabled}
-                disabled={saving}
-                aria-label={`Use ${label} on ${group.host}`}
-                onCheckedChange={(checked) => void save(group.host, { enabled: checked })}
-              />
+              {interactive ? (
+                <Switch
+                  checked={enabled}
+                  disabled={saving}
+                  aria-label={`Use ${label} on ${group.host}`}
+                  onCheckedChange={(checked) => void save(group.host, { enabled: checked })}
+                />
+              ) : null}
             </div>
-            {group.selectable.length > 1 ? (
+            {interactive && group.selectable.length > 1 ? (
               <div className="flex items-center justify-between gap-3">
                 <span className="text-xs text-muted-foreground">Account</span>
                 <div className="w-64 max-w-full">
@@ -194,7 +209,7 @@ export function SourceControlAccountSettings({
                 </div>
               </div>
             ) : null}
-            {stalePin ? (
+            {interactive && stalePin ? (
               <div className="flex items-center justify-between gap-3">
                 <p className="text-xs text-warning">
                   The chosen login is no longer signed in, so the active {cliName} login is used.

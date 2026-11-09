@@ -59,7 +59,7 @@ export const definition = defineSourceControl({
   label: "Forgejo",
   pickerLabel: "Forgejo / Gitea",
   icon,
-  searchKeywords: ["gitea", "tea", "codeberg"],
+  searchKeywords: ["gitea", "tea", "codeberg", "codefloe", "forgejo"],
   changeRequest: {
     shortLabel: "PR",
     shortLabelWithArticle: "a PR",
