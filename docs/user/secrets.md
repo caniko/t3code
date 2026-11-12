@@ -11,6 +11,8 @@ Install and sign in to the [1Password CLI](https://developer.1password.com/docs/
 1. Open **Settings → Secrets → Add provider** (configured per environment).
 2. Enter a name and the 1Password account shorthand, sign-in address (without `https://`), or ID from `op account list`.
 
+On a machine managed by Nix, a provider can instead read files from a directory. Add it to `settings.json` under `secretProviders` with `kind: "file"` and a `config.root`, then use a bare file name as the reference. T3 Code reads only regular files that its own user owns and that no one else can read.
+
 ## Use secret references
 
 Credential fields in Settings (provider env vars, source control tokens, usage keys, device host tokens) include a source picker: choose **Value** for a literal value or select your 1Password provider and paste a reference like `op://vault/item/field`.

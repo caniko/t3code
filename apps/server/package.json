@@ -87,6 +87,7 @@
     "@t3tools/provider-testing": "workspace:*",
     "@t3tools/secret-provider-core": "workspace:*",
     "@t3tools/secret-provider-definitions": "workspace:*",
+    "@t3tools/secret-provider-file": "workspace:*",
     "@t3tools/secret-provider-onepassword": "workspace:*",
     "@t3tools/shared": "workspace:*",
     "@t3tools/source-control-testing": "workspace:*",
