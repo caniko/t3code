@@ -23,6 +23,11 @@ To add one, open **Settings → Secrets**, select **Add provider**, and enter a 
 `op account list` shows. Secret providers belong to the environment you are connected to. Each
 environment keeps its own list.
 
+On a machine managed by Nix, a provider can instead read files from a directory. Add it to
+`settings.json` under `secretProviders` with `kind: "file"` and a `config.root`, then use a bare
+file name as the reference. T3 Code reads only regular files that its own user owns and that no
+one else can read.
+
 ## Use a secret reference
 
 Credential fields in Settings, such as provider environment variables and credentials, source
