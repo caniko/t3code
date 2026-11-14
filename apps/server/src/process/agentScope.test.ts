@@ -221,7 +221,7 @@ describe("AgentScope service", () => {
       withFakeSystemd(({ scope, units, calls }) =>
         Effect.gen(function* () {
           const agent = yield* scope.wrap({ command: "agent", args: [], name: "t", threadId: "a" });
-          expect(agent.args).toContain("--property=OOMPolicy=stop");
+          expect(agent.args).toContain("--property=OOMPolicy=continue");
           units.set(unitOf(agent), { activeState: "failed", result: "oom-kill" });
           expect(yield* scope.oomKilled("a")).toBe(true);
 
@@ -419,7 +419,7 @@ describe("AgentScope service", () => {
   );
 
   it.effect.each([true, false])(
-    "cleans up an OOM exit without losing its diagnosis (OOMPolicy=%s)",
+    "keeps an agent running after a tool OOM and still reaps its scope (OOMPolicy=%s)",
     (oomPolicy) =>
       withFakeSystemd(
         ({ scope, units, calls, cgroupRoot }) =>
@@ -430,24 +430,17 @@ describe("AgentScope service", () => {
               name: "t",
               threadId: "a",
             });
+            expect(agent.args.includes("--property=OOMPolicy=continue")).toBe(oomPolicy);
+            expect(agent.args).not.toContain("--property=OOMPolicy=stop");
             const unit = unitOf(agent);
             exitedAgent(units, cgroupRoot, unit, { populated: true, oomKills: undefined });
             yield* scope.stop(unit);
-            expect(stopsOf(calls)).toEqual(
-              oomPolicy ? [] : [["--user", "stop", "--no-block", unit]],
-            );
-
-            // The kernel records the kill before systemd records the OOM result.
             exitedAgent(units, cgroupRoot, unit, { populated: true, oomKills: 1 });
             yield* scope.stop(unit);
-            expect(stopsOf(calls)).toHaveLength(oomPolicy ? 0 : 2);
-
-            if (oomPolicy) {
-              units.set(unit, { activeState: "failed", result: "oom-kill" });
-              expect(yield* scope.oomKilled("a")).toBe(true);
-              units.delete(unit);
-              expect(yield* scope.oomKilled("a")).toBe(true);
-            }
+            expect(stopsOf(calls)).toEqual([
+              ["--user", "stop", "--no-block", unit],
+              ["--user", "stop", "--no-block", unit],
+            ]);
           }),
         { oomPolicy },
       ),
