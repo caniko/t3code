@@ -329,10 +329,6 @@ export const make = Effect.gen(function* () {
       state.populated === false
     )
       return;
-    // The kernel counts OOM kills before signaling the victim. Let OOMPolicy
-    // record the result before a manual stop can overwrite it; an unreadable
-    // counter cannot rule out that race. Older managers need us to stop it.
-    if (scope.supportsOomPolicy && (state.oomKills === undefined || state.oomKills > 0)) return;
     const stopped = yield* run(scope.systemctl, ["--user", "stop", "--no-block", unit]);
     if (stopped._tag === "None" || stopped.value.code !== 0) {
       yield* Effect.logWarning("Could not stop an exited agent's scope", {
@@ -397,8 +393,9 @@ export const make = Effect.gen(function* () {
       const scope = yield* systemd;
       if (scope === undefined) return agentScopeCommand({ command: resolved, args });
       const unit = `t3code-${name}-${NodeCrypto.randomUUID().slice(0, 8)}.scope`;
-      // A continuing shared scope cannot attribute a tool's OOM to one thread.
-      // Clear the launch thread's previous scope instead.
+      // A killed tool must not stop its agent, so every scope continues.
+      // A shared scope cannot attribute that OOM to one thread; clear the
+      // launch thread's previous scope instead.
       const continuing = shared === true && scope.supportsOomPolicy;
       const owned = threadId !== undefined && !continuing;
       if (threadId !== undefined)
@@ -412,9 +409,7 @@ export const make = Effect.gen(function* () {
         // unload the unit even when it fails.
         options: [
           ...SCOPE_OPTIONS,
-          ...(scope.supportsOomPolicy
-            ? [`--property=OOMPolicy=${continuing ? "continue" : "stop"}`]
-            : []),
+          ...(scope.supportsOomPolicy ? ["--property=OOMPolicy=continue"] : []),
           ...(owned ? [] : ["--collect"]),
         ],
       };
