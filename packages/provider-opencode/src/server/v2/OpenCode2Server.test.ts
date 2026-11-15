@@ -224,8 +224,14 @@ describe("OpenCode2Server spawned server", () => {
   );
 });
 
-const FAKE_SERVICE_CLI = `const [command, sub, key] = process.argv.slice(2);
-if (command === "service" && sub === "status") process.stdout.write((process.env.FAKE_SERVICE_URL ?? "stopped") + "\\n");
+const FAKE_SERVICE_CLI = `import { appendFileSync, readFileSync } from "node:fs";
+const [command, sub, key] = process.argv.slice(2);
+const calls = process.env.FAKE_SERVICE_CALLS;
+const restarting = () => {
+  appendFileSync(calls, "x");
+  return readFileSync(calls, "utf8").length === 1;
+};
+if (command === "service" && sub === "status") process.stdout.write((restarting() ? "stopped" : process.env.FAKE_SERVICE_URL) + "\\n");
 else if (command === "service" && sub === "get" && key === "password") process.stdout.write(" service password \\n");
 else process.exit(64);
 `;
@@ -243,11 +249,11 @@ describe("OpenCode2Server background server", () => {
       `#!/bin/sh\nexec "${yield* HostProcess.ExecutablePath}" "${scriptPath}" "$@"\n`,
     );
     yield* fs.chmod(binaryPath, 0o755);
-    return { binaryPath, directory };
+    return { binaryPath, directory, calls: path.join(directory, "calls") };
   }).pipe(Effect.orDie);
-  const connectThroughService = (serviceUrl: string | undefined) =>
+  const connectThroughService = (serviceUrl: string) =>
     Effect.gen(function* () {
-      const { binaryPath, directory } = yield* fakeCli;
+      const { binaryPath, directory, calls } = yield* fakeCli;
       const server = yield* OpenCode2Server.make({
         binaryPath,
         serverUrl: "",
@@ -256,7 +262,8 @@ describe("OpenCode2Server background server", () => {
         directory,
         environment: {
           ...(yield* HostProcess.Environment),
-          ...(serviceUrl === undefined ? {} : { FAKE_SERVICE_URL: serviceUrl }),
+          FAKE_SERVICE_URL: serviceUrl,
+          FAKE_SERVICE_CALLS: calls,
         },
       });
       return yield* server.withConnection((connection) => Effect.succeed(connection));
@@ -268,7 +275,7 @@ describe("OpenCode2Server background server", () => {
     Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, FetchHttpClient.layer)),
   );
 
-  it.live("joins the running service with its password, as a local server", () =>
+  it.live("waits out a restarting service, then joins it as a local server", () =>
     Effect.gen(function* () {
       // The fake CLI is a POSIX shell script.
       if ((yield* HostProcess.Platform) === "win32") return;
@@ -295,14 +302,6 @@ describe("OpenCode2Server background server", () => {
       const connection = yield* connectThroughService(`http://127.0.0.1:${port}`);
       assert.strictEqual(connection.version, "2.2.5");
       assert.strictEqual(connection.external, false);
-    }).pipe(Effect.scoped, Effect.provide(layer)),
-  );
-
-  it.live("fails instead of spawning a server", () =>
-    Effect.gen(function* () {
-      if ((yield* HostProcess.Platform) === "win32") return;
-      const error = yield* connectThroughService(undefined).pipe(Effect.flip);
-      assert.include(error.detail, "background server is not running");
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 });

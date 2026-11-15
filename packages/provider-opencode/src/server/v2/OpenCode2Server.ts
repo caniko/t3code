@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Base64Url from "effect/encoding/Base64Url";
 import * as P from "effect/Predicate";
 import * as Redacted from "effect/Redacted";
+import * as Schedule from "effect/Schedule";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as HttpClientError from "effect/http/HttpClientError";
@@ -16,6 +17,9 @@ import * as OpenCode2Client from "./OpenCode2Client.ts";
 
 const INFO_TIMEOUT = "5 seconds";
 const BACKGROUND_SERVER_CLI_TIMEOUT = "10 seconds";
+// A switch restarts the service for ~10 s (systemd allows 15 s stop + 45 s start), longer than
+// the adapter's reconnect budget, so discovery itself outlasts a restart.
+const BACKGROUND_SERVER_RETRY = { times: 30, schedule: Schedule.spaced("2 seconds") } as const;
 
 export interface OpenCode2Connection extends OpenCode2Client.OpenCode2Api {
   readonly url: string;
@@ -242,6 +246,7 @@ export const make = Effect.fn("OpenCode2Server.make")(function* (input: {
     return Effect.suspend(() =>
       background === undefined
         ? backgroundServer().pipe(
+            Effect.retry(BACKGROUND_SERVER_RETRY),
             Effect.tap((connection) =>
               Effect.sync(() => {
                 background = connection;
