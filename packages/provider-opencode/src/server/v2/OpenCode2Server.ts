@@ -15,6 +15,7 @@ import * as OpenCodeServerOwner from "../OpenCodeServerOwner.ts";
 import * as OpenCode2Client from "./OpenCode2Client.ts";
 
 const INFO_TIMEOUT = "5 seconds";
+const BACKGROUND_SERVER_CLI_TIMEOUT = "10 seconds";
 
 export interface OpenCode2Connection extends OpenCode2Client.OpenCode2Api {
   readonly url: string;
@@ -120,10 +121,12 @@ export const make = Effect.fn("OpenCode2Server.make")(function* (input: {
   readonly binaryPath: string;
   readonly serverUrl: string;
   readonly serverPassword: string;
+  readonly useBackgroundServer?: boolean;
   readonly directory: string;
   readonly environment: NodeJS.ProcessEnv;
 }) {
   const opencode = yield* OpenCode2Client.OpenCode2Client;
+  const runtime = yield* OpenCodeRuntime.OpenCodeRuntime;
   const processes = yield* OpenCodeRuntime.OpenCodeThreadProcesses;
   // Servers are built lazily, after `make`'s own scope and crypto have gone; keep them here.
   const ownerContext = Context.make(Scope.Scope, yield* Effect.scope).pipe(
@@ -197,7 +200,70 @@ export const make = Effect.fn("OpenCode2Server.make")(function* (input: {
     return withConnection;
   });
 
-  const inProcess = yield* serverFor(undefined);
+  // The server user's own `opencode service`: one server per database, since each server
+  // resumes every interrupted session it finds there. Same user and files, so not external.
+  // ponytail: a service restart resumes a running turn without T3's runtime MCP until the next
+  // turn re-adds it; gate recovery with OpenCode's environmentRequired sessions if that matters.
+  const backgroundServer = Effect.fn("OpenCode2Server.backgroundServer")(function* () {
+    const run = Effect.fn("OpenCode2Server.backgroundServer.run")(function* (
+      args: ReadonlyArray<string>,
+    ) {
+      const result = yield* runtime
+        .runOpenCodeCommand({ binaryPath: input.binaryPath, args, environment: input.environment })
+        .pipe(
+          Effect.timeoutOrElse({
+            duration: BACKGROUND_SERVER_CLI_TIMEOUT,
+            orElse: () =>
+              Effect.fail(
+                new OpenCodeRuntime.OpenCodeRuntimeError({
+                  operation: "OpenCode2Server.backgroundServer",
+                  detail: `The OpenCode CLI did not answer within ${BACKGROUND_SERVER_CLI_TIMEOUT}.`,
+                }),
+              ),
+          }),
+        );
+      // Only the CLI's line ending: a configured password may carry other whitespace.
+      return result.code === 0 ? result.stdout.replace(/\r?\n$/, "") : "";
+    });
+    const url = (yield* run(["service", "status"])).trim();
+    if (!URL.canParse(url)) {
+      return yield* new OpenCodeRuntime.OpenCodeRuntimeError({
+        operation: "OpenCode2Server.backgroundServer",
+        detail: "The OpenCode background server is not running (`opencode service start`).",
+      });
+    }
+    const password = yield* run(["service", "get", "password"]);
+    return yield* connectTo(url, Redacted.make(password, { label: "OPENCODE_PASSWORD" }), false);
+  });
+  let background: OpenCode2Connection | undefined;
+  const withBackgroundServer: OpenCode2Server["Service"]["withConnection"] = Effect.fn(
+    "OpenCode2Server.withBackgroundServer",
+  )(function (use) {
+    return Effect.suspend(() =>
+      background === undefined
+        ? backgroundServer().pipe(
+            Effect.tap((connection) =>
+              Effect.sync(() => {
+                background = connection;
+              }),
+            ),
+          )
+        : Effect.succeed(background),
+    ).pipe(
+      Effect.flatMap((connection) =>
+        use(connection).pipe(
+          // A restarted service may have moved; rediscover rather than retry a dead address.
+          Effect.onError(() =>
+            Effect.sync(() => {
+              if (background === connection) background = undefined;
+            }),
+          ),
+        ),
+      ),
+    );
+  });
+
+  const inProcess = input.useBackgroundServer ? withBackgroundServer : yield* serverFor(undefined);
   const runnerServers = new Map<string, OpenCode2Server["Service"]["withConnection"]>();
   const runners = yield* Semaphore.make(1);
   const serverForThread = Effect.fn("OpenCode2Server.serverForThread")(function* (

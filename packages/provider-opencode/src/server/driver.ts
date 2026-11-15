@@ -276,6 +276,7 @@ export const OpenCodeDriver: ProviderDriver<
       binaryPath: effectiveConfig.binaryPath,
       serverUrl: effectiveConfig.serverUrl,
       serverPassword: effectiveConfig.serverPassword,
+      useBackgroundServer: effectiveConfig.useBackgroundServer,
       directory: host.paths.cwd,
       environment: processEnv,
     }).pipe(

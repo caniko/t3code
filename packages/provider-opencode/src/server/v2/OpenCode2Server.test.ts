@@ -223,3 +223,86 @@ describe("OpenCode2Server spawned server", () => {
     ),
   );
 });
+
+const FAKE_SERVICE_CLI = `const [command, sub, key] = process.argv.slice(2);
+if (command === "service" && sub === "status") process.stdout.write((process.env.FAKE_SERVICE_URL ?? "stopped") + "\\n");
+else if (command === "service" && sub === "get" && key === "password") process.stdout.write(" service password \\n");
+else process.exit(64);
+`;
+
+describe("OpenCode2Server background server", () => {
+  const fakeCli = Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-opencode2-service-" });
+    const binaryPath = path.join(directory, "opencode");
+    const scriptPath = path.join(directory, "opencode.mjs");
+    yield* fs.writeFileString(scriptPath, FAKE_SERVICE_CLI);
+    yield* fs.writeFileString(
+      binaryPath,
+      `#!/bin/sh\nexec "${yield* HostProcess.ExecutablePath}" "${scriptPath}" "$@"\n`,
+    );
+    yield* fs.chmod(binaryPath, 0o755);
+    return { binaryPath, directory };
+  }).pipe(Effect.orDie);
+  const connectThroughService = (serviceUrl: string | undefined) =>
+    Effect.gen(function* () {
+      const { binaryPath, directory } = yield* fakeCli;
+      const server = yield* OpenCode2Server.make({
+        binaryPath,
+        serverUrl: "",
+        serverPassword: "",
+        useBackgroundServer: true,
+        directory,
+        environment: {
+          ...(yield* HostProcess.Environment),
+          ...(serviceUrl === undefined ? {} : { FAKE_SERVICE_URL: serviceUrl }),
+        },
+      });
+      return yield* server.withConnection((connection) => Effect.succeed(connection));
+    });
+  const layer = Layer.mergeAll(
+    OpenCode2Client.layer,
+    OpenCodeRuntime.layer.pipe(Layer.provide(OpenCodeServerLedger.layerTest)),
+  ).pipe(
+    Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer, FetchHttpClient.layer)),
+  );
+
+  it.live("joins the running service with its password, as a local server", () =>
+    Effect.gen(function* () {
+      // The fake CLI is a POSIX shell script.
+      if ((yield* HostProcess.Platform) === "win32") return;
+      const { createServer } = yield* Effect.promise(() => import("node:http"));
+      const expected = `Basic ${Buffer.from("opencode: service password ").toString("base64")}`;
+      const http = createServer((request, response) => {
+        const ok = request.headers.authorization === expected;
+        response.writeHead(ok ? 200 : 401, { "content-type": "application/json" });
+        response.end(
+          ok
+            ? JSON.stringify({ version: "2.2.5", pid: 1, urls: [], paths: { tmp: "/tmp" } })
+            : UNAUTHORIZED_BODY,
+        );
+      });
+      const port = yield* Effect.acquireRelease(
+        Effect.callback<number>((resume) => {
+          http.listen(0, "127.0.0.1", () => {
+            const address = http.address();
+            resume(Effect.succeed(typeof address === "object" && address ? address.port : 0));
+          });
+        }),
+        () => Effect.sync(() => http.close()),
+      );
+      const connection = yield* connectThroughService(`http://127.0.0.1:${port}`);
+      assert.strictEqual(connection.version, "2.2.5");
+      assert.strictEqual(connection.external, false);
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.live("fails instead of spawning a server", () =>
+    Effect.gen(function* () {
+      if ((yield* HostProcess.Platform) === "win32") return;
+      const error = yield* connectThroughService(undefined).pipe(Effect.flip);
+      assert.include(error.detail, "background server is not running");
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+});
