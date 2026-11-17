@@ -26,6 +26,7 @@ import {
   ProviderInstanceId,
   ProviderSessionId,
   ThreadId,
+  type OrchestrationV2ProviderFailure,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2TurnItem,
   type OrchestrationV2UserInputQuestion,
@@ -614,6 +615,7 @@ const makePromptInactivityHarness = Effect.fnUntraced(function* (input: {
   ) => AcpSessionRuntime.AcpSessionRuntime["Service"]["prompt"];
   readonly cancelled?: Deferred.Deferred<void>;
   readonly followAgentWorkState?: boolean;
+  readonly recordedFailure?: OrchestrationV2ProviderFailure;
 }) {
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const natives: Array<AcpSessionRuntime.AcpSessionRuntime["Service"]> = [];
@@ -625,6 +627,11 @@ const makePromptInactivityHarness = Effect.fnUntraced(function* (input: {
       capabilities: AcpProviderCapabilitiesV2,
       promptInactivityTimeout: "15 minutes",
       ...(input.followAgentWorkState === true ? { followAgentWorkState: true } : {}),
+      ...(input.recordedFailure === undefined
+        ? {}
+        : {
+            watchPromptOutcome: () => Effect.succeed(() => Effect.succeed(input.recordedFailure)),
+          }),
       makeRuntime: makeMockRuntime({
         childProcessSpawner,
         mockAgentPath: yield* bundledMockAgentPath,
@@ -5067,6 +5074,29 @@ describe("AcpAdapterV2", () => {
       assert.include(silent?.failure?.message, "15 minutes");
       assert.equal(next?.status, "completed");
       assert.lengthOf(harness.natives, 2);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("reports the error an agent recorded before falling silent", () =>
+    Effect.gen(function* () {
+      const recordedFailure = {
+        class: "provider_error",
+        message: "This model is currently experiencing high demand.",
+        code: "UNAVAILABLE",
+        retryable: true,
+        resetAt: null,
+      } as const;
+      const harness = yield* makePromptInactivityHarness({
+        environment: (runtimeOrdinal) =>
+          runtimeOrdinal === 1 ? { T3_ACP_HANG_PROMPT_FOREVER: "1" } : {},
+        recordedFailure,
+      });
+      yield* harness.startTurn(1);
+      yield* TestClock.adjust("15 minutes");
+      yield* harness.startTurn(2);
+      const [silent] = yield* harness.terminals(1);
+      assert.equal(silent?.status, "failed");
+      assert.deepInclude(silent?.failure, recordedFailure);
     }).pipe(Effect.provide(layerTest)),
   );
 

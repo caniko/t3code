@@ -339,6 +339,10 @@ export function acpPerTurnPromptUsage(
   };
 }
 
+type PromptOutcomeCheck = (
+  result: EffectAcpSchema.PromptResponse,
+) => Effect.Effect<OrchestrationV2ProviderFailure | undefined>;
+
 export interface AcpAdapterV2Flavor {
   readonly buildAttachmentPrompt?: (input: {
     readonly text: string;
@@ -352,16 +356,10 @@ export interface AcpAdapterV2Flavor {
   readonly promptFailure?: (cause: unknown) => OrchestrationV2ProviderFailure;
   /**
    * Runs before `session/prompt`. The returned check sees a prompt the agent ended
-   * without an error or cancel, and reports a failure its stop reason hid. A reported
-   * failure restarts the runtime before the next turn.
+   * without an error or cancel, or one the inactivity timeout retires, and reports a
+   * failure its stop reason hid. A reported failure restarts the runtime before the next turn.
    */
-  readonly watchPromptOutcome?: (
-    sessionId: string,
-  ) => Effect.Effect<
-    (
-      result: EffectAcpSchema.PromptResponse,
-    ) => Effect.Effect<OrchestrationV2ProviderFailure | undefined>
-  >;
+  readonly watchPromptOutcome?: (sessionId: string) => Effect.Effect<PromptOutcomeCheck>;
   readonly requiresSignIn?: (cause: unknown) => boolean;
   /**
    * Runs before attachment paths, T3 instructions and native slash-command detection,
@@ -8295,6 +8293,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           context: ActiveAcpTurn,
           generation: number,
           timeoutMillis: number,
+          checkPromptOutcome: PromptOutcomeCheck | undefined,
         ) {
           const retired = yield* runRuntimeCallbackAtGeneration(
             generation,
@@ -8316,13 +8315,19 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               yield* cancelPendingRuntimeRequests();
               yield* terminalizeOpenForegroundTools(context, "failed");
               const minutes = Math.max(1, Math.round(timeoutMillis / 60_000));
+              // An agent can give up on an upstream error without ending the prompt.
+              const recorded =
+                checkPromptOutcome === undefined
+                  ? undefined
+                  : yield* checkPromptOutcome({ stopReason: "end_turn" });
               yield* finalizeTurn(
                 context,
                 "failed",
-                makeProviderFailure({
-                  class: "provider_error",
-                  message: `${flavor.runtimeHarness ?? driver} sent nothing for ${minutes} ${minutes === 1 ? "minute" : "minutes"}, so T3 Code stopped the turn and restarted the agent. Send a message to continue.`,
-                }),
+                recorded ??
+                  makeProviderFailure({
+                    class: "provider_error",
+                    message: `${flavor.runtimeHarness ?? driver} sent nothing for ${minutes} ${minutes === 1 ? "minute" : "minutes"}, so T3 Code stopped the turn and restarted the agent. Send a message to continue.`,
+                  }),
               );
               return "retired" as const;
             }),
@@ -8346,6 +8351,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           context: ActiveAcpTurn,
           generation: number,
           timeoutMillis: number,
+          checkPromptOutcome: PromptOutcomeCheck | undefined,
         ) {
           yield* Deferred.await(context.promptDispatched);
           context.lastProgressAt = yield* Clock.currentTimeMillis;
@@ -8357,7 +8363,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               continue;
             }
             const outcome = yield* runtimeTransitionPermit.withPermit(
-              retireInactivePrompt(context, generation, timeoutMillis),
+              retireInactivePrompt(context, generation, timeoutMillis, checkPromptOutcome),
             );
             if (outcome !== "rearm") return;
           }
@@ -8869,6 +8875,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 context,
                 promptGeneration,
                 promptInactivityTimeoutMillis,
+                checkPromptOutcome,
               ).pipe(Effect.forkIn(sessionScope));
             }
             const compactSession = isCompactionMessage(turnInput.message)
