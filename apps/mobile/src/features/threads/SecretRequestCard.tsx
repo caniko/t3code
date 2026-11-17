@@ -1,6 +1,7 @@
 import { pipe } from "effect/Function";
 import {
   SECRET_REQUEST_DEFAULT_PLACEHOLDER,
+  secretRequestAgenixDestination,
   secretRequestAnswerInput,
   secretRequestDisplay,
   secretRequestFailureMessage,
@@ -132,6 +133,11 @@ function PendingSecretRequestForm(props: {
             {item.reason}
           </Text>
         ) : null}
+        {secretRequestAgenixDestination(item).map((line) => (
+          <Text key={line} className="font-sans text-xs text-foreground-muted" selectable>
+            {line}
+          </Text>
+        ))}
       </View>
       {link !== null ? (
         <View className="gap-1.5">

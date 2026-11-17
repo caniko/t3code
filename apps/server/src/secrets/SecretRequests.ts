@@ -1,12 +1,14 @@
 // Answers stay in the secret store behind one-use refs; orchestration records only request status.
-// Consuming tools keep values out of transcripts, projections, clients and model context.
-// A `file` request instead moves its value to an owner-only file for the agent's own shell.
-// A secret the user pasted in chat goes straight to such a file, with no card.
+// A `file` request instead moves its value to an owner-only file for the agent's own shell, as
+// does a secret pasted in chat. An `agenix` request hands its value to the configured store
+// command on stdin and keeps nothing.
 import {
   CommandId,
+  SecretAgenixResult,
   SecretRef,
   SecretRequestError,
   type ProjectId,
+  type SecretAgenixTarget,
   type SecretReference,
   type SecretRequestAnswerInput,
   type ThreadId,
@@ -28,6 +30,8 @@ import * as Semaphore from "effect/Semaphore";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as Metrics from "../observability/Metrics.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 
 const SECRET_REF_PREFIX = "secret-ref:";
@@ -42,6 +46,38 @@ const StoredSecret = Schema.fromJsonString(
 );
 const encodeStored = Schema.encodeEffect(StoredSecret);
 const decodeStored = Schema.decodeUnknownOption(StoredSecret);
+
+const decodeAgenixResult = Schema.decodeUnknownOption(Schema.fromJsonString(SecretAgenixResult));
+const decodeAgenixError = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      error: Schema.Struct({
+        code: Schema.String,
+        message: Schema.String,
+        path: Schema.optional(Schema.String),
+      }),
+    }),
+  ),
+);
+const AGENIX_FLAGS = [
+  ["user", "--user"],
+  ["rootModule", "--root-module"],
+  ["host", "--host"],
+  ["name", "--name"],
+  ["category", "--category"],
+  ["expires", "--expires"],
+  ["custodian", "--custodian"],
+  ["project", "--project"],
+  ["verifyUrl", "--verify-url"],
+] as const;
+// `--flag=value` so a value starting with `-` is never read as another flag.
+const agenixStoreArgs = (target: SecretAgenixTarget) => [
+  ...AGENIX_FLAGS.flatMap(([key, flag]) => {
+    const value = target[key];
+    return value === undefined ? [] : [`${flag}=${value}`];
+  }),
+  ...(target.env === undefined ? ["--bare"] : target.env.map((name) => `--env=${name}`)),
+];
 
 export class SecretRequests extends Context.Service<
   SecretRequests,
@@ -77,6 +113,8 @@ const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
   const resolver = yield* SecretResolver.SecretResolver;
+  const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const processRunner = yield* ProcessRunner.ProcessRunner;
   // Beside the store's own files so the same owner-only directory and cleanup rules apply.
   const filesDir = store.directory === undefined ? undefined : path.join(store.directory, "files");
 
@@ -99,7 +137,10 @@ const make = Effect.gen(function* () {
   ) {
     // The resolver keeps failed reads for the server's life; a retry after unlocking must re-read.
     yield* resolver.invalidate([reference]);
-    const [value] = yield* resolver.read([reference]);
+    // Read once: the value must not stay in the resolver's server-lifetime cache.
+    const [value] = yield* resolver
+      .read([reference])
+      .pipe(Effect.ensuring(resolver.invalidate([reference])));
     if (value === undefined || value.trim() === "") {
       return yield* new SecretRequestError({
         reason: "reference_unreadable",
@@ -107,6 +148,52 @@ const make = Effect.gen(function* () {
       });
     }
     return value;
+  });
+
+  // The value goes to the command on stdin only: never argv, env, a file or a log.
+  const storeInAgenix = Effect.fn("SecretRequests.storeInAgenix")(function* (
+    target: SecretAgenixTarget | undefined,
+    value: string,
+  ) {
+    const settings = yield* serverSettings.getSettings.pipe(
+      Effect.mapError((cause) => new SecretRequestError({ reason: "load_failed", cause })),
+    );
+    const [command, ...prefix] = settings.agenixSecretCommand;
+    if (command === undefined || target === undefined) {
+      return yield* new SecretRequestError({ reason: "agenix_not_configured" });
+    }
+    const output = yield* processRunner
+      .run({
+        command,
+        args: [...prefix, ...agenixStoreArgs(target)],
+        stdin: value,
+        timeout: "5 minutes",
+        maxOutputBytes: 64 * 1024,
+        outputMode: "truncate",
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) => new SecretRequestError({ reason: "agenix_failed", detail: cause.message }),
+        ),
+      );
+    if (output.code === 0) {
+      const result = decodeAgenixResult(output.stdout.trim());
+      if (Option.isSome(result)) return result.value;
+      return yield* new SecretRequestError({
+        reason: "agenix_failed",
+        detail: "The store command exited 0 without a result; check whether it stored the value.",
+      });
+    }
+    const failed = decodeAgenixError(output.stdout.trim());
+    // Usage errors (clap) lead with `error:`; anything else ends with its reason.
+    const lines = output.stderr.trim().split("\n");
+    const stderr = lines.find((line) => line.startsWith("error:")) ?? lines.at(-1);
+    return yield* new SecretRequestError({
+      reason: "agenix_failed",
+      detail: Option.isSome(failed)
+        ? `${failed.value.error.message} (${failed.value.error.code})`
+        : stderr || `The store command exited with code ${output.code ?? "unknown"}.`,
+    });
   });
 
   const answer: SecretRequests["Service"]["answer"] = Effect.fn("SecretRequests.answer")(
@@ -138,9 +225,16 @@ const make = Effect.gen(function* () {
           : input.answer.type === "reference"
             ? yield* readReference(input.answer.reference)
             : undefined;
+      const agenix = item.delivery === "agenix";
+      const agenixResult =
+        agenix && secret !== undefined ? yield* storeInAgenix(item.agenix, secret) : undefined;
+      const stored =
+        agenixResult === undefined
+          ? ""
+          : ` Stored at ${agenixResult.path} in ${agenixResult.committed_sha}.`;
       // Create before recording so racing answers cannot overwrite values or show saved before storage.
       // Existing values on pending cards finish earlier saves whose recording failed.
-      if (secret !== undefined) {
+      if (secret !== undefined && !agenix) {
         const encoded = yield* encodeStored({
           projectId: records.thread.projectId,
           value: secret,
@@ -172,13 +266,22 @@ const make = Effect.gen(function* () {
           ...(item.url === undefined ? {} : { url: item.url }),
           ...(item.placeholder === undefined ? {} : { placeholder: item.placeholder }),
           ...(item.delivery === undefined ? {} : { delivery: item.delivery }),
+          ...(item.agenix === undefined ? {} : { agenix: item.agenix }),
+          ...(agenixResult === undefined ? {} : { agenixResult }),
           secretStatus,
         })
         .pipe(
-          Effect.mapError((cause) => new SecretRequestError({ reason: "record_failed", cause })),
+          Effect.mapError(
+            (cause) =>
+              new SecretRequestError({
+                reason: "record_failed",
+                cause,
+                ...(stored === "" ? {} : { detail: stored.trim() }),
+              }),
+          ),
           // Clear failed saves so the pending card can be answered again.
           Effect.tapError(() =>
-            secret !== undefined
+            secret !== undefined && !agenix
               ? refFor(input.threadId, item.id).pipe(
                   Effect.flatMap((ref) => removeLogged(storeName(ref))),
                 )
@@ -197,6 +300,9 @@ const make = Effect.gen(function* () {
         );
       const card = recorded.turnItems.find((candidate) => candidate.id === item.id);
       if (card?.type === "secret_request" && card.secretStatus !== "saved") {
+        if (agenix) {
+          return yield* new SecretRequestError({ reason: "agent_stopped", detail: stored.trim() });
+        }
         yield* removeLogged(storeName(yield* refFor(input.threadId, item.id)));
         return yield* new SecretRequestError({ reason: "agent_stopped" });
       }

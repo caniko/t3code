@@ -20,7 +20,36 @@ export type SecretRequestItem = Extract<
 export const secretRequestPrivacyNote = (item: Pick<SecretRequestItem, "delivery">) =>
   item.delivery === "file"
     ? "Kept out of chat, in a private file this agent's commands can read for 24 hours"
-    : "Stored securely, never shown to the agent";
+    : item.delivery === "agenix"
+      ? "Sent straight to agenix; T3 keeps no copy and the agent sees only where it went"
+      : "Stored securely, never shown to the agent";
+
+/** Where an `agenix` card stores its value, so the user can check it before saving. */
+export function secretRequestAgenixDestination(
+  item: Pick<SecretRequestItem, "agenix">,
+): ReadonlyArray<string> {
+  const target = item.agenix;
+  if (target === undefined) return [];
+  const owner =
+    target.user !== undefined
+      ? `user ${target.user}`
+      : target.rootModule !== undefined
+        ? `root module ${target.rootModule}`
+        : `host ${target.host}`;
+  const details = [
+    target.category === undefined ? null : `category ${target.category}`,
+    target.expires === undefined ? null : `expires ${target.expires}`,
+    target.custodian === undefined ? null : `custodian ${target.custodian}`,
+    target.project === undefined ? null : `project ${target.project}`,
+  ].filter((detail) => detail !== null);
+  return [
+    `Stores ${target.name} for ${owner}, ${target.env === undefined ? "bare" : `as ${target.env.join(", ")}`}`,
+    ...(details.length === 0 ? [] : [details.join(" · ")]),
+    ...(target.verifyUrl === undefined
+      ? []
+      : [`Checked first at ${target.verifyUrl}, which receives the value as a Bearer token`]),
+  ];
+}
 export const SECRET_REQUEST_DEFAULT_PLACEHOLDER = "Paste the secret";
 
 // Backticks, <angle brackets> and markdown link targets (balanced parentheses allowed) keep their
@@ -111,14 +140,20 @@ const PENDING_ELSEWHERE_DISPLAY: SecretRequestDisplay = {
  * thread (a fork) can only be answered where it was asked.
  */
 export function secretRequestDisplay(
-  item: Pick<SecretRequestItem, "secretStatus">,
+  item: Pick<SecretRequestItem, "secretStatus" | "agenixResult">,
   visibility: "local" | "inherited" | "synthetic",
 ): SecretRequestDisplay {
   switch (item.secretStatus) {
     case "pending":
       return visibility === "local" ? PENDING_DISPLAY : PENDING_ELSEWHERE_DISPLAY;
     case "saved":
-      return SAVED_DISPLAY;
+      return item.agenixResult === undefined
+        ? SAVED_DISPLAY
+        : {
+            kind: "answered",
+            outcome: "saved",
+            label: `Stored in agenix at ${item.agenixResult.path}`,
+          };
     case "declined":
       return DECLINED_DISPLAY;
     case "cancelled":

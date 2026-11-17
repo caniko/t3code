@@ -35,6 +35,7 @@ import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ProcessRunner from "../processRunner.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
@@ -274,6 +275,8 @@ describe("orchestrator MCP toolkit", () => {
         Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
         Layer.provideMerge(
           SecretRequests.layer.pipe(
+            Layer.provide(ServerSettings.layerTest()),
+            Layer.provide(ProcessRunner.layer),
             Layer.provide(layerMemorySecretStore),
             Layer.provide(Layer.mock(SecretResolver.SecretResolver)({})),
             Layer.provide(layerOrchestration),

@@ -10594,6 +10594,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ...(command.url === undefined ? {} : { url: command.url }),
             ...(command.placeholder === undefined ? {} : { placeholder: command.placeholder }),
             ...(command.delivery === undefined ? {} : { delivery: command.delivery }),
+            ...(command.agenix === undefined ? {} : { agenix: command.agenix }),
+            ...(command.agenixResult === undefined ? {} : { agenixResult: command.agenixResult }),
             secretStatus: command.secretStatus,
           };
       if (
