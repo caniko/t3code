@@ -698,6 +698,23 @@ export const AntigravityDriver: ProviderDriver<
             }),
       ),
     );
+    if (enabled && authConfigIssue === null) {
+      const savedTokenExists = (name: string) =>
+        fileSystem
+          .exists(path.join(profileDirectory, "antigravity-acp", name))
+          .pipe(Effect.orElseSucceed(() => false));
+      const signedIn =
+        !antigravityAuthUsesBrowser(auth.authMethod) ||
+        (yield* savedTokenExists("antigravity-oauth-token")) ||
+        (yield* savedTokenExists("acp_token.json"));
+      if (signedIn) {
+        // The cause can carry the agent's raw reply to a credential.
+        yield* refreshModels().pipe(
+          Effect.catch(() => Effect.logWarning("Antigravity could not load models at start.")),
+          Effect.forkScoped,
+        );
+      }
+    }
 
     return {
       instanceId,
