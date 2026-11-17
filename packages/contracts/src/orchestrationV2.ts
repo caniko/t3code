@@ -1,5 +1,6 @@
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
+import { SecretAgenixResult, SecretAgenixTarget } from "./secretRequest.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -1555,8 +1556,11 @@ export const OrchestrationV2SecretRequestStatus = Schema.Literals([
 ]);
 export type OrchestrationV2SecretRequestStatus = typeof OrchestrationV2SecretRequestStatus.Type;
 
-/** `file`: the value goes to an owner-only file the agent's shell commands can read. */
-export const OrchestrationV2SecretRequestDelivery = Schema.Literal("file");
+/**
+ * `file`: the value goes to an owner-only file the agent's shell commands can read.
+ * `agenix`: the value goes straight to the configured store command; T3 keeps nothing.
+ */
+export const OrchestrationV2SecretRequestDelivery = Schema.Literals(["file", "agenix"]);
 
 const OrchestrationV2SecretRequestFields = {
   type: Schema.Literal("secret_request"),
@@ -1564,6 +1568,8 @@ const OrchestrationV2SecretRequestFields = {
   reason: Schema.String,
   placeholder: Schema.optional(Schema.String),
   delivery: Schema.optional(OrchestrationV2SecretRequestDelivery),
+  agenix: Schema.optional(SecretAgenixTarget),
+  agenixResult: Schema.optional(SecretAgenixResult),
   secretStatus: OrchestrationV2SecretRequestStatus,
 } as const;
 
@@ -3549,6 +3555,8 @@ const OrchestrationV2InternalCommand = Schema.Union([
     reason: Schema.String,
     placeholder: Schema.optional(Schema.String),
     delivery: Schema.optional(OrchestrationV2SecretRequestDelivery),
+    agenix: Schema.optional(SecretAgenixTarget),
+    agenixResult: Schema.optional(SecretAgenixResult),
     secretStatus: OrchestrationV2SecretRequestStatus,
   }),
   /**

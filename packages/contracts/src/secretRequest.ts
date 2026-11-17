@@ -3,6 +3,46 @@ import * as Schema from "effect/Schema";
 import { ThreadId, TrimmedNonEmptyString, TurnItemId } from "./baseSchemas.ts";
 import { SecretReference } from "./secretReference.ts";
 
+const AgenixName = TrimmedNonEmptyString.check(Schema.isMaxLength(200));
+
+/** Where `delivery: "agenix"` stores a value; becomes the store command's flags. */
+export const SecretAgenixTarget = Schema.Struct({
+  user: Schema.optional(AgenixName),
+  rootModule: Schema.optional(AgenixName),
+  host: Schema.optional(AgenixName),
+  name: AgenixName,
+  /** Environment variables the secret is wired to; leave out for a bare secret. */
+  env: Schema.optional(
+    Schema.Array(Schema.String.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/))).check(
+      Schema.isMinLength(1),
+    ),
+  ),
+  category: Schema.optional(AgenixName),
+  expires: Schema.optional(Schema.String.check(Schema.isPattern(/^(?:\d{4}-\d{2}-\d{2}|never)$/))),
+  custodian: Schema.optional(AgenixName),
+  project: Schema.optional(AgenixName),
+  /** Called with the value as a Bearer token before it is stored; pass/fail only. */
+  verifyUrl: Schema.optional(TrimmedNonEmptyString.check(Schema.isPattern(/^https:\/\//))),
+}).check(
+  Schema.makeFilter(
+    (target) =>
+      [target.user, target.rootModule, target.host].filter((owner) => owner !== undefined)
+        .length === 1,
+    { expected: "exactly one of user, rootModule or host" },
+  ),
+);
+export type SecretAgenixTarget = typeof SecretAgenixTarget.Type;
+
+/** The store command's result: metadata only, never the value. */
+export const SecretAgenixResult = Schema.Struct({
+  path: Schema.String,
+  committed_sha: Schema.String,
+  verify: Schema.String,
+  rekey: Schema.String,
+  rops_id: Schema.optional(Schema.String),
+});
+export type SecretAgenixResult = typeof SecretAgenixResult.Type;
+
 /** Server stores the value under a one-use SecretRef; the thread learns only status. */
 export const SecretRequestAnswerInput = Schema.Struct({
   threadId: ThreadId,
@@ -42,6 +82,9 @@ const SECRET_REQUEST_FAILURE_MESSAGES = {
   consume_failed: "Could not use that secretRef. Try again.",
   not_a_file_request:
     'The user did not save this secret for shell use. Ask again with request_secret and delivery: "file".',
+  agenix_not_configured:
+    'This T3 server has no agenix store command (setting "agenixSecretCommand"). Ask with another delivery.',
+  agenix_failed: "Could not store the secret in agenix.",
 } as const;
 
 export const SecretRequestFailureReason = Schema.Literals(
@@ -57,6 +100,8 @@ export class SecretRequestError extends Schema.TaggedError<SecretRequestError>()
     reason: SecretRequestFailureReason,
     /** The secret provider a `reference_unreadable` answer named. */
     provider: Schema.optionalKey(Schema.String),
+    /** Shown after the message; never holds the value. */
+    detail: Schema.optionalKey(Schema.String),
     cause: Schema.optionalKey(Schema.Defect()),
   },
 ) {
@@ -64,6 +109,7 @@ export class SecretRequestError extends Schema.TaggedError<SecretRequestError>()
     if (this.reason === "reference_unreadable" && this.provider !== undefined) {
       return `Could not read the secret from the secret provider "${this.provider}". Unlock it and try again, or enter the value.`;
     }
-    return SECRET_REQUEST_FAILURE_MESSAGES[this.reason];
+    const message = SECRET_REQUEST_FAILURE_MESSAGES[this.reason];
+    return this.detail === undefined ? message : `${message} ${this.detail}`;
   }
 }

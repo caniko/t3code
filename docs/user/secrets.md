@@ -61,3 +61,18 @@ The value never appears in the conversation. Most requests keep it from the agen
 passes it to the tool that needs it. When an agent has to run a command with the value, the card
 says so instead: the value goes into a private file that the agent's commands can read for about 24
 hours.
+
+## Store a secret in agenix
+
+On a machine whose secrets live in agenix, an agent asking for a secret to keep, such as an API
+token, should use an agenix card. The card shows where the value will go: the user, root module or
+host, the secret's name, whether it is bare or wired to environment variables, and its expiry. If
+it names a verify URL, that address receives the value as a Bearer token before anything is stored.
+
+When you save, T3 Code hands the value to the store command on its standard input and keeps no
+copy. The agent learns only the stored path and commit. If the command fails, for example because
+the token did not verify, the card shows why and stays open: fix the value and save again, or
+decline.
+
+The command is `canix secret store` unless `settings.json` sets `agenixSecretCommand` to another
+argument list. An empty list turns agenix cards off.

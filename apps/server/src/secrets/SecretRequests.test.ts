@@ -11,10 +11,12 @@ import {
   SecretRef,
   ThreadId,
   TurnItemId,
+  type SecretAgenixTarget,
 } from "@t3tools/contracts";
 import { defineSecretProviderDriver } from "@t3tools/secret-provider-core/server/driver";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import { defineSecretProvider } from "@t3tools/secret-provider-core/shared/definition";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -28,6 +30,8 @@ import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as SecretRequests from "./SecretRequests.ts";
 
@@ -74,7 +78,9 @@ const withService = <A, E>(
   }) => Effect.Effect<A, E>,
   options: {
     readonly threadId?: ThreadId;
-    readonly delivery?: "file";
+    readonly delivery?: "file" | "agenix";
+    readonly agenix?: SecretAgenixTarget;
+    readonly agenixCommand?: ReadonlyArray<string>;
     readonly directory?: string;
     readonly runStatus?: string;
     readonly removeFails?: boolean;
@@ -93,6 +99,8 @@ const withService = <A, E>(
       NodeCrypto.layer,
       NodeServices.layer,
       options.resolver ?? fakeVault().layer,
+      ServerSettings.layerTest({ agenixSecretCommand: [...(options.agenixCommand ?? [])] }),
+      ProcessRunner.layer.pipe(Layer.provide(NodeServices.layer)),
       Layer.succeed(
         ServerSecretStore.ServerSecretStore,
         ServerSecretStore.ServerSecretStore.of({
@@ -148,6 +156,7 @@ const withService = <A, E>(
                 label: "GitHub token",
                 reason: "Used as GH_TOKEN.",
                 ...(options.delivery === undefined ? {} : { delivery: options.delivery }),
+                ...(options.agenix === undefined ? {} : { agenix: options.agenix }),
                 secretStatus,
               },
             ],
@@ -205,22 +214,26 @@ it.effect("a saved answer becomes a one-use ref, and the thread only learns it w
 );
 
 it.effect("a secret provider reference is read once and saved like a typed value", () =>
-  withService(({ service, dispatched }) =>
-    Effect.gen(function* () {
-      yield* service.answer({
-        threadId,
-        turnItemId,
-        answer: {
-          type: "reference",
-          reference: { provider: vault, reference: "fake://github/token" },
-        },
-      });
-      assert.include(dispatched[0] as object, { secretStatus: "saved" });
-      assert.notInclude(JSON.stringify(dispatched), "fake://");
-      const ref = Option.getOrThrow(yield* service.savedRef({ threadId, turnItemId }));
-      assert.equal(yield* service.consume({ ref, projectId }), "ghp_from_vault");
-    }),
-  ),
+  Effect.gen(function* () {
+    const { state, layer } = fakeVault();
+    const context = yield* Layer.build(layer);
+    const reference = { provider: vault, reference: "fake://github/token" };
+    yield* withService(
+      ({ service, dispatched }) =>
+        Effect.gen(function* () {
+          yield* service.answer({ threadId, turnItemId, answer: { type: "reference", reference } });
+          assert.include(dispatched[0] as object, { secretStatus: "saved" });
+          assert.notInclude(JSON.stringify(dispatched), "fake://");
+          const ref = Option.getOrThrow(yield* service.savedRef({ threadId, turnItemId }));
+          assert.equal(yield* service.consume({ ref, projectId }), "ghp_from_vault");
+        }),
+      { resolver: Layer.succeedContext(context) },
+    );
+    // Nothing stays in the resolver's cache once the answer is read.
+    state.unlocked = false;
+    const resolver = Context.get(context, SecretResolver.SecretResolver);
+    assert.deepEqual(yield* resolver.read([reference]), [undefined]);
+  }),
 );
 
 it.effect(
@@ -693,4 +706,120 @@ it.effect("a pasted secret is refused without a secrets directory", () =>
       assert.equal(failed.reason, "store_failed");
     }),
   ),
+);
+
+const agenixTarget: SecretAgenixTarget = {
+  user: "can",
+  name: "--host=evil",
+  expires: "never",
+  verifyUrl: "https://api.example.com/verify",
+};
+
+/** A fake `canix secret store` that records what it was given and answers like the real one. */
+const fakeStoreCommand = Effect.fn("fakeStoreCommand")(function* (directory: string, mode: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const script = path.join(directory, "fake-store.cjs");
+  const seen = path.join(directory, "seen.json");
+  yield* fs.writeFileString(
+    script,
+    `const fs = require("node:fs");
+const [, , seen, mode, ...flags] = process.argv;
+const stdin = fs.readFileSync(0, "utf8");
+fs.writeFileSync(seen, JSON.stringify({ flags, env: process.env, stdin }));
+if (mode === "fail") {
+  process.stdout.write(JSON.stringify({ error: { code: "verify_failed", message: "The token did not verify." } }));
+  process.exit(1);
+}
+if (mode === "stderr") {
+  process.stderr.write("error: unexpected argument '--x' found\\n\\nUsage: canix secret store\\n\\nFor more information, try '--help'.\\n");
+  process.exit(2);
+}
+process.stdout.write(JSON.stringify({ path: "age/can/x.age", committed_sha: "abc123", verify: "pass", rekey: "not-needed", extra: "dropped" }));
+`,
+  );
+  return { command: [process.execPath, script, seen, mode], seen };
+});
+
+it.live("an agenix answer goes to the store command on stdin only, and T3 keeps nothing", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "secret-agenix-test-" });
+    const store = yield* fakeStoreCommand(directory, "ok");
+    const value = "cf_token'$(id)";
+    yield* withService(
+      ({ service, stored, dispatched }) =>
+        Effect.gen(function* () {
+          yield* service.answer({ threadId, turnItemId, answer: { type: "save", secret: value } });
+          const seen = JSON.parse(yield* fs.readFileString(store.seen));
+          assert.equal(seen.stdin, value);
+          assert.deepEqual(seen.flags, [
+            "--user=can",
+            "--name=--host=evil",
+            "--expires=never",
+            "--verify-url=https://api.example.com/verify",
+            "--bare",
+          ]);
+          assert.notInclude(JSON.stringify(seen.env), "cf_token");
+          assert.deepEqual(valuesOf(stored), []);
+          assert.isFalse(yield* fs.exists(path.join(directory, "files")));
+          assert.include(dispatched[0] as object, { secretStatus: "saved", delivery: "agenix" });
+          assert.deepEqual((dispatched[0] as { agenixResult?: unknown }).agenixResult, {
+            path: "age/can/x.age",
+            committed_sha: "abc123",
+            verify: "pass",
+            rekey: "not-needed",
+          });
+          assert.notInclude(JSON.stringify(dispatched), "cf_token");
+        }),
+      { delivery: "agenix", agenix: agenixTarget, agenixCommand: store.command, directory },
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("a failed or missing store command leaves the card open and keeps nothing", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const directory = yield* fs.makeTempDirectoryScoped({ prefix: "secret-agenix-test-" });
+    const cases = [
+      { mode: "fail", message: "The token did not verify. (verify_failed)" },
+      { mode: "stderr", message: "error: unexpected argument '--x' found" },
+      { mode: "none", message: "no agenix store command" },
+    ];
+    for (const { mode, message } of cases) {
+      const store = yield* fakeStoreCommand(directory, mode);
+      yield* withService(
+        ({ service, stored, dispatched }) =>
+          Effect.gen(function* () {
+            const failed = yield* service
+              .answer({ threadId, turnItemId, answer: { type: "save", secret: "cf_token" } })
+              .pipe(Effect.flip);
+            assert.include(failed.message, message);
+            assert.notInclude(failed.message, "cf_token");
+            assert.deepEqual(dispatched, []);
+            assert.deepEqual(valuesOf(stored), []);
+          }),
+        {
+          delivery: "agenix",
+          agenix: agenixTarget,
+          agenixCommand: mode === "none" ? [] : store.command,
+          directory,
+        },
+      );
+    }
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("an agenix target names exactly one owner", () =>
+  Effect.sync(() => {
+    const decode = (agenix: object) =>
+      decodeSecretInputExit({ label: "Token", reason: "CI.", delivery: "agenix", agenix });
+    assert.isTrue(Exit.isSuccess(decode({ host: "atlas", name: "x" })));
+    assert.isTrue(Exit.isFailure(decode({ name: "x" })));
+    assert.isTrue(Exit.isFailure(decode({ user: "can", host: "atlas", name: "x" })));
+    assert.isTrue(Exit.isFailure(decode({ user: "can", name: "x", expires: "soon" })));
+    assert.isTrue(Exit.isFailure(decode({ user: "can", name: "x", verifyUrl: "http://a" })));
+    assert.isTrue(Exit.isFailure(decode({ user: "can", name: "x", env: ["CF-TOKEN"] })));
+  }),
 );

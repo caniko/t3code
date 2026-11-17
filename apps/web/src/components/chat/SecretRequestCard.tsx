@@ -1,6 +1,7 @@
 import { pipe } from "effect/Function";
 import {
   SECRET_REQUEST_DEFAULT_PLACEHOLDER,
+  secretRequestAgenixDestination,
   secretRequestAnswerInput,
   secretRequestDisplay,
   secretRequestFailureMessage,
@@ -150,6 +151,11 @@ function PendingSecretRequestForm(props: {
         {item.reason.trim() ? (
           <p className="text-sm wrap-anywhere text-muted-foreground">{item.reason}</p>
         ) : null}
+        {secretRequestAgenixDestination(item).map((line) => (
+          <p key={line} className="text-xs wrap-anywhere text-muted-foreground">
+            {line}
+          </p>
+        ))}
       </div>
       <div className="flex min-w-0 items-center gap-2">
         {sources.length > 0 ? (

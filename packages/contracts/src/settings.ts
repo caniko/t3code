@@ -1449,6 +1449,10 @@ export const ServerSettings = Schema.Struct({
   secretProviders: Schema.Record(SecretProviderId, SecretProviderConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  /** argv `request_secret` runs for `delivery: "agenix"`, value on stdin; empty refuses it. Edit in settings.json. */
+  agenixSecretCommand: Schema.Array(Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed(["canix", "secret", "store"])),
+  ),
 
   usagePriceOverrides: Schema.Record(TrimmedNonEmptyString, UsageModelPriceOverride).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),

@@ -197,7 +197,7 @@ const DeleteScheduledTaskTool = Tool.make("delete_scheduled_task", {
 
 const RequestSecretTool = Tool.make("request_secret", {
   description:
-    'Ask for one secret per single-line card; never combine values. Open it, don\'t offer it. Returns one-use `secretRef`, or `delivery: "file"` a file read only in its command, e.g. `adb pair <ip:port> "$(cat <file>)"`. Asked how: call now. Pasted secret for child/script: `value`. Never from an old thread.',
+    'Ask for one secret per single-line card; never combine values. Open it, don\'t offer it. A secret to keep (token, key): `delivery: "agenix"` with an `agenix` target; it goes straight into agenix and you get only its path and commit. Otherwise one-use `secretRef`, or `delivery: "file"` a file read only in its command, e.g. `adb pair <ip:port> "$(cat <file>)"`. Asked how: call now. Pasted secret for child/script: `value`. Never from an old thread.',
   parameters: OrchestratorMcpRequestSecretInput,
   success: OrchestratorMcpRequestSecretResult,
   failure: OrchestratorMcpFailure,
