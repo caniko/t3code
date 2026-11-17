@@ -1,3 +1,4 @@
+import * as ProcessRunner from "../processRunner.ts";
 import * as WorktreeBranchSync from "./WorktreeBranchSync.ts";
 import * as GuestShareService from "../guest/GuestShareService.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
@@ -331,7 +332,7 @@ const layerWorkflowsProvided = WorkflowRuntime.layer.pipe(
   Layer.provide(PeerMcpClient.layer.pipe(Layer.provideMerge(PeerLinks.layer))),
 );
 const layerSecretRequestsProvided = SecretRequests.layer.pipe(
-  Layer.provide(layerThreadManagementProvided),
+  Layer.provide(Layer.mergeAll(layerThreadManagementProvided, ProcessRunner.layer)),
 );
 // Cards are shown from /mcp and answered over WebSocket; one instance serializes both.
 const layerFeedbackStoreProvided = FeedbackStore.layer.pipe(

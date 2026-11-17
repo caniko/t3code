@@ -183,6 +183,7 @@
   "0cb7a36802fe8089": "Filter {number} needs a path under body, headers or query.",
   "1fa38fb049c6b56e": "Filter {number} needs a path under body, headers or query, and at least one value.",
   "31ec02bdcb3920d1": "Filter {number} needs a path under body, headers or query, and a value.",
+  "a10d5b8a973379b4": "Sent straight to agenix; T3 keeps no copy and the agent sees only where it went",
   "62ae4688ece05590": "Stored securely, never shown to the agent",
   "81f613bb68d85bb7": "Kept out of chat, in a private file this agent's commands can read for 24 hours",
   "07b56c0c12bd2de1": "Kept out of chat, in private files this agent's commands can read for 24 hours",

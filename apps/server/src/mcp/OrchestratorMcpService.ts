@@ -66,6 +66,7 @@ import {
   latestProviderTurnForAttempt,
   resolveProjectProviderInstanceEnabled,
   SECRET_REQUEST_UNSAVED_NOTE,
+  SecretRequestError,
 } from "@t3tools/contracts";
 import { getProviderOptionCurrentValue, withLegacyUltracodeEffort } from "@t3tools/shared/model";
 import { backgroundWorkHoldsCompletion } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
@@ -2662,14 +2663,37 @@ const make = Effect.gen(function* () {
       }
       if (
         input.fields !== undefined &&
-        (input.value !== undefined || input.delivery === "secretRef")
+        (input.value !== undefined || (input.delivery !== undefined && input.delivery !== "file"))
       ) {
         return yield* failure(
           "invalid_request",
-          '`fields` values are saved as files. Leave out `value` and `delivery: "secretRef"`.',
+          '`fields` values are saved as files. Leave out `value` and use `delivery: "file"` or omit it.',
         );
       }
       const delivery = input.fields === undefined ? input.delivery : "file";
+      if ((input.delivery === "agenix") !== (input.agenix !== undefined)) {
+        return yield* failure(
+          "invalid_request",
+          '`delivery: "agenix"` and `agenix` go together: pass both or neither.',
+        );
+      }
+      if (input.delivery === "agenix") {
+        if (input.value !== undefined) {
+          return yield* failure(
+            "invalid_request",
+            "A pasted `value` is already in the transcript. Ask the user to enter it on an agenix card instead.",
+          );
+        }
+        const settings = yield* serverSettings.getSettings.pipe(
+          Effect.mapError(() => failure("orchestration_error", "Unable to read server settings.")),
+        );
+        if (settings.agenixSecretCommand.length === 0) {
+          return yield* failure(
+            "invalid_request",
+            new SecretRequestError({ reason: "agenix_not_configured" }).message,
+          );
+        }
+      }
       // A secret the user already pasted needs no card: it goes straight to a file.
       if (input.value !== undefined) {
         if (input.delivery === "secretRef") {
@@ -2713,8 +2737,9 @@ const make = Effect.gen(function* () {
             reason: input.reason,
             ...(input.url === undefined ? {} : { url: input.url }),
             ...(input.placeholder === undefined ? {} : { placeholder: input.placeholder }),
-            ...(delivery === "file" ? { delivery: "file" as const } : {}),
+            ...(delivery === "file" || delivery === "agenix" ? { delivery } : {}),
             ...(input.fields === undefined ? {} : { fields: input.fields }),
+            ...(input.agenix === undefined ? {} : { agenix: input.agenix }),
             secretStatus,
           })
           .pipe(
@@ -2805,6 +2830,22 @@ const make = Effect.gen(function* () {
       yield* Effect.annotateCurrentSpan({ "secret_request.status": status });
       yield* Metrics.increment(Metrics.secretRequestsTotal, { status });
       if (status !== "saved") return { status, note: SECRET_REQUEST_UNSAVED_NOTE[status] };
+      if (delivery === "agenix") {
+        const records = yield* threadManagement
+          .getThreadRecords(threadId, ["turnItems"], {
+            turnItemTypes: ["secret_request"],
+            messageRoles: [],
+          })
+          .pipe(Effect.orElseSucceed(() => undefined));
+        const item = records?.turnItems.find((candidate) => candidate.id === turnItemId);
+        if (item?.type !== "secret_request" || item.agenixResult === undefined) {
+          return yield* failure(
+            "orchestration_error",
+            "The user stored the secret, but its result could not be read. Do not ask again; ask the user to check agenix.",
+          );
+        }
+        return { status, agenix: item.agenixResult };
+      }
       if (delivery === "file") {
         const saved = yield* secretRequests
           .saveToFile({ threadId, turnItemId })

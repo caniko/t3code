@@ -1,5 +1,6 @@
 import { pipe } from "effect/Function";
 import {
+  secretRequestAgenixDestination,
   secretRequestAnswerInput,
   secretRequestDisplay,
   secretRequestFailureMessage,
@@ -213,6 +214,11 @@ function PendingSecretRequestForm(props: {
         {item.reason.trim() ? (
           <p className="text-sm wrap-anywhere text-muted-foreground">{item.reason}</p>
         ) : null}
+        {secretRequestAgenixDestination(item).map((line) => (
+          <p key={line} className="text-xs wrap-anywhere text-muted-foreground">
+            {line}
+          </p>
+        ))}
       </div>
       {link !== null ? (
         <div className="flex min-w-0 flex-col items-start gap-1.5">

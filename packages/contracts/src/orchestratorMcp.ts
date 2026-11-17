@@ -43,6 +43,7 @@ import {
   OrchestrationV2TurnItemStatus,
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
+import { SecretAgenixResult, SecretAgenixTarget } from "./secretRequest.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000));
@@ -851,8 +852,11 @@ export const OrchestratorMcpRequestSecretInput = Schema.Struct({
     description: "Sign-in or setup page for the value. Shown as a button.",
   }),
   placeholder: Schema.optional(TrimmedNonEmptyString),
-  delivery: Schema.optional(Schema.Literals(["secretRef", "file"])).annotate({
-    description: "secretRef (default) for a T3 tool; file for a command.",
+  delivery: Schema.optional(Schema.Literals(["secretRef", "file", "agenix"])).annotate({
+    description: "agenix: a secret to keep. secretRef (default): a T3 tool. file: a command.",
+  }),
+  agenix: Schema.optional(SecretAgenixTarget).annotate({
+    description: "One of user/rootModule/host. env omitted: bare. verifyUrl gets it as Bearer.",
   }),
   fields: Schema.optional(RequestSecretFields).annotate({
     description:
@@ -890,6 +894,10 @@ export const OrchestratorMcpRequestSecretResult = Schema.Union([
     files: Schema.Record(Schema.String, Schema.String).annotate({
       description: "One file per field name, used like `file`.",
     }),
+  }),
+  Schema.Struct({
+    status: Schema.Literal("saved").annotate({ description: "Stored and committed in agenix." }),
+    agenix: SecretAgenixResult,
   }),
   Schema.Struct({
     status: Schema.Literals(["declined", "cancelled", "timed_out"]).annotate({

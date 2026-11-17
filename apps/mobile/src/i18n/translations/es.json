@@ -183,6 +183,7 @@
   "0cb7a36802fe8089": "El filtro {number} necesita una ruta dentro de body, headers o query.",
   "1fa38fb049c6b56e": "El filtro {number} necesita una ruta dentro de body, headers o query, y al menos un valor.",
   "31ec02bdcb3920d1": "El filtro {number} necesita una ruta dentro de body, headers o query, y un valor.",
+  "a10d5b8a973379b4": "Se envía directamente a agenix. T3 no guarda una copia y el agente solo ve dónde se almacenó.",
   "62ae4688ece05590": "Guardado de forma segura, nunca se muestra al agente",
   "81f613bb68d85bb7": "Fuera del chat, en un archivo privado que los comandos de este agente pueden leer durante 24 horas",
   "07b56c0c12bd2de1": "Fuera del chat, en archivos privados que los comandos de este agente pueden leer durante 24 horas",

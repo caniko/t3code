@@ -24,15 +24,19 @@ export const secretRequestPrivacyNote = (
   item: Pick<SecretRequestItem, "delivery" | "fields">,
   resolve: MFunctionType = mFallback,
 ) =>
-  item.delivery !== "file"
-    ? resolve(msg("Stored securely, never shown to the agent"))
-    : item.fields === undefined
-      ? resolve(
-          msg("Kept out of chat, in a private file this agent's commands can read for 24 hours"),
-        )
-      : resolve(
-          msg("Kept out of chat, in private files this agent's commands can read for 24 hours"),
-        );
+  item.delivery === "agenix"
+    ? resolve(
+        msg("Sent straight to agenix; T3 keeps no copy and the agent sees only where it went"),
+      )
+    : item.delivery !== "file"
+      ? resolve(msg("Stored securely, never shown to the agent"))
+      : item.fields === undefined
+        ? resolve(
+            msg("Kept out of chat, in a private file this agent's commands can read for 24 hours"),
+          )
+        : resolve(
+            msg("Kept out of chat, in private files this agent's commands can read for 24 hours"),
+          );
 const SECRET_REQUEST_DEFAULT_PLACEHOLDER = msg("Paste the secret");
 
 export interface SecretRequestInput {
@@ -64,6 +68,32 @@ export function secretRequestInputs(
     placeholder: field.placeholder ?? "",
     secret: field.secret !== false,
   }));
+}
+/** Where an `agenix` card stores its value, so the user can check it before saving. */
+export function secretRequestAgenixDestination(
+  item: Pick<SecretRequestItem, "agenix">,
+): ReadonlyArray<string> {
+  const target = item.agenix;
+  if (target === undefined) return [];
+  const owner =
+    target.user !== undefined
+      ? `user ${target.user}`
+      : target.rootModule !== undefined
+        ? `root module ${target.rootModule}`
+        : `host ${target.host}`;
+  const details = [
+    target.category === undefined ? null : `category ${target.category}`,
+    target.expires === undefined ? null : `expires ${target.expires}`,
+    target.custodian === undefined ? null : `custodian ${target.custodian}`,
+    target.project === undefined ? null : `project ${target.project}`,
+  ].filter((detail) => detail !== null);
+  return [
+    `Stores ${target.name} for ${owner}, ${target.env === undefined ? "bare" : `as ${target.env.join(", ")}`}`,
+    ...(details.length === 0 ? [] : [details.join(" · ")]),
+    ...(target.verifyUrl === undefined
+      ? []
+      : [`Checked first at ${target.verifyUrl}, which receives the value as a Bearer token`]),
+  ];
 }
 
 // Backticks, <angle brackets> and markdown link targets (balanced parentheses allowed) keep their
@@ -135,7 +165,7 @@ const PENDING_DISPLAY: SecretRequestDisplay = { kind: "pending" };
  * thread (a fork) can only be answered where it was asked.
  */
 export function secretRequestDisplay(
-  item: Pick<SecretRequestItem, "secretStatus">,
+  item: Pick<SecretRequestItem, "secretStatus" | "agenixResult">,
   visibility: "local" | "inherited" | "synthetic",
   resolve: MFunctionType = mFallback,
 ): SecretRequestDisplay {
@@ -151,7 +181,10 @@ export function secretRequestDisplay(
       return {
         kind: "answered",
         outcome: "saved",
-        label: resolve(msg("Saved securely and kept private")),
+        label:
+          item.agenixResult === undefined
+            ? resolve(msg("Saved securely and kept private"))
+            : `Stored in agenix at ${item.agenixResult.path}`,
       };
     case "declined":
       return { kind: "answered", outcome: "declined", label: resolve(msg("Declined")) };

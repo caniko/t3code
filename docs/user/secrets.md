@@ -27,3 +27,11 @@ When an agent calls `request_secret`, T3 Code displays a private card in the thr
 
 - Enter a value (or pick a 1Password reference if configured and permitted) and click **Save securely**, or **Decline**.
 - Values never appear in conversation history. For T3 tools, the secret is passed directly without exposing it to the agent; for shell commands, the card tells you that the value is written to a private temporary file readable by the agent's commands for ~24 hours.
+
+## Store a secret in agenix
+
+On a machine whose secrets live in agenix, an agent asking for a secret to keep, such as an API token, should use an agenix card. The card shows where the value will go: the user, root module or host, the secret's name, whether it is bare or wired to environment variables, and its expiry. If it names a verify URL, that address receives the value as a Bearer token before anything is stored.
+
+When you save, T3 Code hands the value to the store command on its standard input and keeps no copy. The agent learns only the stored path and commit. If the command fails, for example because the token did not verify, the card shows why and stays open: fix the value and save again, or decline.
+
+The command is `canix secret store` unless `settings.json` sets `agenixSecretCommand` to another argument list. An empty list turns agenix cards off.

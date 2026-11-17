@@ -1,5 +1,6 @@
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
+import { SecretAgenixResult, SecretAgenixTarget } from "./secretRequest.ts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -1838,8 +1839,11 @@ export const OrchestrationV2SecretRequestStatus = Schema.Literals([
 ]);
 export type OrchestrationV2SecretRequestStatus = typeof OrchestrationV2SecretRequestStatus.Type;
 
-/** `file`: the value goes to an owner-only file the agent's shell commands can read. */
-export const OrchestrationV2SecretRequestDelivery = Schema.Literal("file");
+/**
+ * `file`: the value goes to an owner-only file the agent's shell commands can read.
+ * `agenix`: the value goes straight to the configured store command; T3 keeps nothing.
+ */
+export const OrchestrationV2SecretRequestDelivery = Schema.Literals(["file", "agenix"]);
 
 /** One input of a multi-value card. `secret: false` shows what the user types, such as an email. */
 export const OrchestrationV2SecretRequestField = Schema.Struct({
@@ -1858,6 +1862,8 @@ const OrchestrationV2SecretRequestFields = {
   placeholder: Schema.optional(Schema.String),
   delivery: Schema.optional(OrchestrationV2SecretRequestDelivery),
   fields: Schema.optional(Schema.Array(OrchestrationV2SecretRequestField)),
+  agenix: Schema.optional(SecretAgenixTarget),
+  agenixResult: Schema.optional(SecretAgenixResult),
   secretStatus: OrchestrationV2SecretRequestStatus,
 } as const;
 
@@ -4052,6 +4058,8 @@ const OrchestrationV2InternalCommand = Schema.Union([
     placeholder: Schema.optional(Schema.String),
     delivery: Schema.optional(OrchestrationV2SecretRequestDelivery),
     fields: Schema.optional(Schema.Array(OrchestrationV2SecretRequestField)),
+    agenix: Schema.optional(SecretAgenixTarget),
+    agenixResult: Schema.optional(SecretAgenixResult),
     secretStatus: OrchestrationV2SecretRequestStatus,
   }),
   /** Internal so no client can mark a report sent without it being stored and sent. */

@@ -185,6 +185,7 @@
   "0cb7a36802fe8089": "Le filtre {number} a besoin d’un chemin sous body, headers ou query.",
   "1fa38fb049c6b56e": "Le filtre {number} a besoin d’un chemin sous body, headers ou query, et d’au moins une valeur.",
   "31ec02bdcb3920d1": "Le filtre {number} a besoin d’un chemin sous body, headers ou query, et d’une valeur.",
+  "a10d5b8a973379b4": "Envoyé directement à agenix. T3 ne conserve aucune copie et l’agent ne voit que l’emplacement de stockage.",
   "62ae4688ece05590": "Stocké de façon sécurisée, jamais montré à l’agent",
   "81f613bb68d85bb7": "Hors de la discussion, dans un fichier privé que les commandes de cet agent peuvent lire pendant 24 heures",
   "07b56c0c12bd2de1": "Hors de la discussion, dans des fichiers privés que les commandes de cet agent peuvent lire pendant 24 heures",

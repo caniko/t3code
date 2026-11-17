@@ -1674,3 +1674,95 @@ it("requestSecret delivers a fields card as one file per field", async () => {
     });
   }).pipe(Effect.provide(layer), Effect.runPromise);
 });
+
+it("requestSecret refuses an incomplete or unconfigured agenix request and returns only the store result", async () => {
+  const agenixResult = {
+    path: "age/can/x.age",
+    committed_sha: "abc123",
+    verify: "pass",
+    rekey: "queued",
+    rops_id: "r1",
+  };
+  const agenix = { user: "can", name: "x" };
+  const run = (command: ReadonlyArray<string>, input: Record<string, unknown>) => {
+    const dispatched: Array<{ readonly type: string; readonly turnItemId?: string }> = [];
+    const projection = () => {
+      const card = dispatched.find((command) => command.type === "secret_request.record");
+      return {
+        thread: baseThread({
+          threadId: parentThreadId,
+          title: "Parent",
+          instanceId: parentInstanceId,
+          model: "gpt-5.4",
+        }),
+        runs: [
+          { ...makeRun({ id: activeRunId, ordinal: 1, status: "running" }), rootNodeId: taskId },
+        ],
+        visibleTurnItems: [],
+        turnItems:
+          card === undefined
+            ? []
+            : [
+                {
+                  type: "secret_request",
+                  id: card.turnItemId,
+                  secretStatus: "saved",
+                  agenixResult,
+                },
+              ],
+        runtimeRequests: [],
+        messages: [],
+        contextTransfers: [],
+        subagents: [],
+        updatedAt: now,
+      } as unknown as OrchestrationV2ThreadProjection;
+    };
+    const layer = layerOrchestratorService.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(ThreadManagementService.ThreadManagementService)({
+            getThreadRecords: () => Effect.sync(projection),
+            getThreadShell: () =>
+              Effect.sync(() => projection().thread as unknown as OrchestrationV2ThreadShell),
+            dispatch: (command) => Effect.sync(() => void dispatched.push(command) as never),
+          } satisfies Partial<ThreadManagementService.ThreadManagementService["Service"]>),
+          ServerSettings.layerTest({ agenixSecretCommand: [...command] }),
+          Layer.mock(ProviderRegistry.ProviderRegistry)({
+            getProviders: Effect.succeed([]),
+          } satisfies Partial<ProviderRegistry.ProviderRegistry["Service"]>),
+          Layer.mock(ProjectService.ProjectService)({}),
+          Layer.mock(SecretRequests.SecretRequests)({}),
+          Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+          Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+          Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({}),
+          NodeCrypto.layer,
+        ),
+      ),
+    );
+    return Effect.gen(function* () {
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      const result = yield* service
+        .requestSecret(makeScope(), { label: "Token", reason: "CI.", ...input } as never)
+        .pipe(Effect.result);
+      return { result, dispatched };
+    }).pipe(Effect.provide(layer));
+  };
+  const canix = ["canix", "secret", "store"];
+  const outcomes = await Effect.all([
+    run(canix, { delivery: "agenix" }),
+    run(canix, { agenix }),
+    run(canix, { delivery: "agenix", agenix, value: "pasted" }),
+    run(canix, { delivery: "agenix", agenix, fields: [{ name: "token", label: "Token" }] }),
+    run([], { delivery: "agenix", agenix }),
+    run(canix, { delivery: "agenix", agenix }),
+  ]).pipe(Effect.runPromise);
+  for (const { result, dispatched } of outcomes.slice(0, 5)) {
+    expect(result._tag).toBe("Failure");
+    expect(dispatched).toEqual([]);
+  }
+  expect(JSON.stringify(outcomes[4]!.result)).toContain("agenixSecretCommand");
+  const saved = outcomes[5]!;
+  expect(saved.result._tag).toBe("Success");
+  expect(saved.result).toMatchObject({ success: { status: "saved", agenix: agenixResult } });
+  expect(saved.dispatched[0]).toMatchObject({ delivery: "agenix", agenix });
+});
