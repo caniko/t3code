@@ -211,6 +211,98 @@ const layerSession = Layer.mergeAll(
   ),
 );
 
+it.live("sends the T3 HTTP bridge and profile MCP servers on new and resumed sessions", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const random = yield* SecureRandom.SecureRandom;
+    const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const mockAgentPath = yield* path.fromFileUrl(
+      new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+    );
+    const profileDirectory = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-ag-mcp-" });
+    const requestLog = path.join(profileDirectory, "requests.ndjson");
+    yield* fileSystem.makeDirectory(path.join(profileDirectory, "config"));
+    yield* fileSystem.writeFileString(
+      path.join(profileDirectory, "config", "mcp_config.json"),
+      JSON.stringify({
+        mcpServers: {
+          fleetix: { command: "fleetix", args: ["mcp"] },
+          "open-pencil": { url: "https://pencil.example.com/mcp" },
+          "t3-code": { command: "not-the-t3-bridge" },
+        },
+      }),
+    );
+    const adapterFlavor = makeAntigravityAcpAdapterFlavor({
+      instanceId: ProviderInstanceId.make("antigravity-mcp-test"),
+      profileDirectory,
+      fileSystem,
+      path,
+      random,
+      host: yield* ProviderHost.ProviderHost,
+      selfInvocation: yield* resolveSelfInvocation(),
+      withProcess: (_stop, task) => task,
+      defaultModel: Effect.undefined,
+      makeRuntime: (input) =>
+        makeAntigravityAcpRuntime({
+          ...input,
+          childProcessSpawner,
+          spawn: {
+            command: process.execPath,
+            args: [mockAgentPath],
+            cwd: input.cwd,
+            env: {
+              T3_ACP_ANTIGRAVITY: "1",
+              T3_ACP_MCP_HTTP: "1",
+              T3_ACP_REQUEST_LOG_PATH: requestLog,
+            },
+          },
+        }).pipe(Effect.provideService(SecureRandom.SecureRandom, random)),
+    });
+    const bridge = { name: "t3-code", command: "stdio-bridge", args: [], env: [] };
+    const httpBridge = (token: string) => ({
+      type: "http" as const,
+      name: "t3-code",
+      url: "http://localhost:4321/mcp",
+      headers: [{ name: "Authorization", value: token }],
+    });
+    const runtime = yield* adapterFlavor.makeRuntime!({
+      cwd: profileDirectory,
+      runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        cwd: profileDirectory,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      }),
+      mcpServers: [bridge],
+      httpMcpServers: [httpBridge("new-session")],
+      clientCapabilities: {},
+      clientInfo: { name: "t3-code", version: "0.0.0" },
+      protocolLogging: {},
+      onTermination: () => Effect.void,
+    });
+    yield* runtime.start();
+    yield* runtime.resumeSession("mock-session-1", {
+      mcpServers: [bridge],
+      httpMcpServers: [httpBridge("resumed-session")],
+    });
+    const expected = (token: string) => [
+      httpBridge(token),
+      { type: "stdio", name: "fleetix", command: "fleetix", args: ["mcp"], env: [] },
+      { type: "http", name: "open-pencil", url: "https://pencil.example.com/mcp", headers: [] },
+    ];
+    const activations = (yield* fileSystem.readFileString(requestLog))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { method?: string; params?: { mcpServers?: unknown } })
+      .filter(({ method }) => method === "session/new" || method === "session/resume")
+      .map(({ method, params }) => [method, params?.mcpServers]);
+    assert.deepEqual(activations, [
+      ["session/new", expected("new-session")],
+      ["session/resume", expected("resumed-session")],
+    ]);
+  }).pipe(Effect.provide(layerSession)),
+);
+
 describe("AntigravityAdapterV2 compaction", () => {
   it.live.each([
     { nativeGoals: false, compact: false },

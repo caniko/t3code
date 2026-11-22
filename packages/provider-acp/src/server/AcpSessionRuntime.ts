@@ -2381,14 +2381,17 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
   ): ReadonlyArray<EffectAcpSchema.McpServer> => {
     const mcpCapabilities = initializeResult.agentCapabilities?.mcpCapabilities;
     const acpServers = activationOptions?.acpMcpServers ?? options.acpMcpServers ?? [];
-    if (mcpCapabilities?.acp === true && acpServers.length > 0) {
-      return acpServers;
-    }
     const httpServers = activationOptions?.httpMcpServers ?? options.httpMcpServers ?? [];
-    if (mcpCapabilities?.http === true && httpServers.length > 0) {
-      return httpServers;
-    }
-    return activationOptions?.mcpServers ?? options.mcpServers ?? [];
+    const servers = activationOptions?.mcpServers ?? options.mcpServers ?? [];
+    const preferred =
+      mcpCapabilities?.acp === true && acpServers.length > 0
+        ? acpServers
+        : mcpCapabilities?.http === true
+          ? httpServers
+          : [];
+    if (preferred.length === 0) return servers;
+    const preferredNames = new Set(preferred.map((server) => server.name));
+    return [...preferred, ...servers.filter((server) => !preferredNames.has(server.name))];
   };
 
   const sessionSetupFields = (initializeResult: EffectAcpSchema.InitializeResponse) => {
