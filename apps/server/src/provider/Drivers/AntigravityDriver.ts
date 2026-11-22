@@ -197,7 +197,7 @@ export const AntigravityDriver: ProviderDriver<
       Effect.orElseSucceed(() => undefined),
     );
     for (const directory of [
-      directories.runtimeTemp,
+      directories.runtimeTempStore,
       path.join(profileDirectory, "antigravity-acp", "tmp"),
     ]) {
       const removeRetired = yield* retireAntigravityRuntimeTempDirs(directory).pipe(
@@ -256,7 +256,7 @@ export const AntigravityDriver: ProviderDriver<
         baseEnv: processEnvironment,
         auth,
         userHome,
-        tempDirectory: directories.runtimeTemp,
+        tempDirectory: directories.runtimeTempStore,
       }).pipe(
         Effect.provideService(FileSystem.FileSystem, fileSystem),
         Effect.provideService(Path.Path, path),
@@ -296,6 +296,19 @@ export const AntigravityDriver: ProviderDriver<
               ),
             ),
       );
+      const { runtimeTemp: alias, runtimeTempStore: store } = directories;
+      // /tmp cleanup can remove the alias while the server is running. Never replace an occupant.
+      const useAlias =
+        alias !== store &&
+        (yield* fileSystem.symlink(store, alias).pipe(
+          Effect.as(true),
+          Effect.catch(() =>
+            fileSystem.readLink(alias).pipe(
+              Effect.map((target) => target === store),
+              Effect.orElseSucceed(() => false),
+            ),
+          ),
+        ));
       return {
         executable,
         spawn: buildAntigravityAcpSpawnInput({
@@ -304,7 +317,9 @@ export const AntigravityDriver: ProviderDriver<
           cwd,
           baseEnv,
           auth,
-          runtimeTempDirectory,
+          runtimeTempDirectory: useAlias
+            ? path.join(alias, path.basename(runtimeTempDirectory))
+            : runtimeTempDirectory,
         }),
       };
     });

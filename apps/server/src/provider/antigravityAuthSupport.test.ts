@@ -199,6 +199,7 @@ describe("Antigravity process environment", () => {
       );
       expect(first.profile.toLowerCase()).not.toBe(second.profile.toLowerCase());
       expect(first.runtimeTemp.toLowerCase()).not.toBe(second.runtimeTemp.toLowerCase());
+      expect(first.runtimeTempStore.toLowerCase()).not.toBe(second.runtimeTempStore.toLowerCase());
     }).pipe(Effect.provide(Layer.mergeAll(NodeCrypto.layer, NodePath.layerPosix))),
   );
 
@@ -220,6 +221,29 @@ describe("Antigravity process environment", () => {
         extracted(path.join(directories.profile, "antigravity-acp", "tmp")).length,
       ).toBeGreaterThanOrEqual(260);
     }).pipe(Effect.provide(Layer.mergeAll(NodeCrypto.layer, NodePath.layerWin32))),
+  );
+
+  it.effect("leaves room for a Unix socket in a tool's subdirectory of TMPDIR", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const instanceId = ProviderInstanceId.make("antigravity");
+      const first = yield* resolveAntigravityInstanceDirectories(
+        "/home/a-twenty-char-person/.t3/userdata",
+        instanceId,
+      );
+      const second = yield* resolveAntigravityInstanceDirectories(
+        "/other/.t3/userdata",
+        instanceId,
+      );
+      expect(first.runtimeTemp).not.toBe(second.runtimeTemp);
+      const socket = path.join(
+        first.runtimeTemp,
+        "run-AbC123",
+        "app-backend-tmp-AbC123",
+        "backend-ipc-123456.sock",
+      );
+      expect(Buffer.byteLength(socket)).toBeLessThan(104);
+    }).pipe(Effect.provide(Layer.mergeAll(NodeCrypto.layer, NodePath.layerPosix))),
   );
 });
 

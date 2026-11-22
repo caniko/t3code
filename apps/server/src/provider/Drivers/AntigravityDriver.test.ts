@@ -92,6 +92,14 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
   );
   const requestLog = path.join(root, "requests.jsonl");
   const directories = yield* resolveAntigravityInstanceDirectories(config.stateDir, instanceId);
+  yield* Effect.addFinalizer(() =>
+    fs.readLink(directories.runtimeTemp).pipe(
+      Effect.flatMap((target) =>
+        target === directories.runtimeTempStore ? fs.remove(directories.runtimeTemp) : Effect.void,
+      ),
+      Effect.ignore,
+    ),
+  );
   const profileDirectory = directories.profile;
   const instancePath = `${path.join(root, "instance-bin")}:${baseEnv.PATH ?? ""}`;
 
@@ -276,7 +284,13 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
       yield* launch.handle.exitCode.pipe(Effect.ignore);
       expect(yield* launch.handle.isRunning).toBe(false);
       if (launch.cwd) expect(yield* fs.exists(launch.cwd)).toBe(false);
-      if (launch.tempDirectory) expect(yield* fs.exists(launch.tempDirectory)).toBe(false);
+      if (launch.tempDirectory) {
+        const storedTemp = path.join(
+          directories.runtimeTempStore,
+          path.basename(launch.tempDirectory),
+        );
+        expect(yield* fs.exists(storedTemp)).toBe(false);
+      }
     }
   });
   return {
@@ -719,6 +733,37 @@ it.layer(layerTest)("AntigravityDriver", (it) => {
   );
 
   it.effect.skipIf(windowsHost)(
+    "recreates the short TMPDIR alias between launches and preserves a regular-file collision",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness();
+        const { runtimeTemp: alias, runtimeTempStore: store } = h.directories;
+        const launchTempParent = () => {
+          const temp = h.launches.findLast((launch) => launch.tempDirectory)?.tempDirectory;
+          return temp && h.path.dirname(temp);
+        };
+        yield* h.refresh();
+        expect(alias).not.toBe(store);
+        expect(launchTempParent()).toBe(alias);
+        expect(yield* h.fs.readLink(alias)).toBe(store);
+
+        yield* h.fs.remove(alias);
+        yield* h.refresh();
+        expect(launchTempParent()).toBe(alias);
+        expect(yield* h.fs.readLink(alias)).toBe(store);
+
+        yield* h.fs.remove(alias);
+        yield* Effect.acquireRelease(h.fs.writeFileString(alias, "keep me", { flag: "wx" }), () =>
+          h.fs.remove(alias).pipe(Effect.ignore),
+        );
+        yield* h.refresh();
+        expect(launchTempParent()).toBe(store);
+        expect(yield* h.fs.readFileString(alias)).toBe("keep me");
+        yield* h.assertClosed;
+      }),
+  );
+
+  it.effect.skipIf(windowsHost)(
     "removes runtime temp directories left by a previous server on create",
     () =>
       Effect.gen(function* () {
@@ -731,7 +776,7 @@ it.layer(layerTest)("AntigravityDriver", (it) => {
           instanceId,
         );
         const legacyRoot = path.join(directories.profile, "antigravity-acp", "tmp");
-        for (const root of [directories.runtimeTemp, legacyRoot]) {
+        for (const root of [directories.runtimeTempStore, legacyRoot]) {
           const orphan = path.join(root, "run-orphan", "_MEI123", "google3");
           yield* fs.makeDirectory(orphan, { recursive: true });
           yield* fs.writeFileString(path.join(orphan, "payload.bin"), "stale");
@@ -751,7 +796,7 @@ it.layer(layerTest)("AntigravityDriver", (it) => {
             }),
           ),
         );
-        expect(yield* fs.exists(directories.runtimeTemp)).toBe(false);
+        expect(yield* fs.exists(directories.runtimeTempStore)).toBe(false);
         expect(yield* fs.exists(legacyRoot)).toBe(false);
       }),
   );
