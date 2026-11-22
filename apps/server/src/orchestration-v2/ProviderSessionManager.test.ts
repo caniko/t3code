@@ -3,6 +3,8 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@t3tools/shared/AgentScope";
+import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
+import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import {
   EnvironmentId,
   MessageId,
@@ -25,6 +27,7 @@ import {
   TurnItemId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -37,6 +40,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
+import { McpSchema } from "effect/ai";
 import { HttpServer } from "effect/http";
 
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
@@ -44,9 +48,12 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as McpProviderSession from "@t3tools/provider-core/server/mcpSession";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
+import { OrchestratorToolkit } from "../mcp/toolkits/orchestrator/tools.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { makeAntigravityAdapterV2 } from "./Adapters/AntigravityAdapterV2.ts";
 import {
   CodexProviderCapabilitiesV2,
   normalizeCodexThreadLoadModelSelection,
@@ -652,6 +659,9 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
 function layerTest(input: {
   readonly state: Ref.Ref<TestProviderRuntimeState>;
   readonly idleTimeoutMs?: number;
+  readonly withProvider?: (
+    adapter: ProviderAdapter.ProviderAdapterV2["Service"],
+  ) => ProviderAdapter.ProviderAdapterV2["Service"];
   readonly maxIdlePinMs?: number;
   readonly failEventStream?: boolean;
   readonly normalizeThreadLoadModelSelection?: (selection: ModelSelection) => ModelSelection;
@@ -741,7 +751,11 @@ function layerTest(input: {
       ...(input.eventStreamsEnded === undefined
         ? {}
         : { eventStreamsEnded: input.eventStreamsEnded }),
-    }).pipe(Effect.map(ProviderAdapterRegistry.layerSingle)),
+    }).pipe(
+      Effect.map((adapter) =>
+        ProviderAdapterRegistry.layerSingle(input.withProvider?.(adapter) ?? adapter),
+      ),
+    ),
   );
   const layerConfiguredMcpRegistry =
     input.pauseResolve === undefined
@@ -3157,6 +3171,111 @@ it.effect(
         ),
       );
     }),
+);
+
+it.effect("ProviderSessionManagerV2 exposes background wait to an Antigravity MCP session", () =>
+  Effect.gen(function* () {
+    const instanceId = ProviderInstanceId.make("antigravity");
+    const antigravity = yield* makeAntigravityAdapterV2({
+      instanceId,
+      selfInvocation: yield* resolveSelfInvocation(),
+      makeRuntime: () => Effect.die("native process is not needed for MCP discovery"),
+      withProcess: (_stop, task) => task,
+      defaultModel: Effect.undefined,
+    });
+    const state = yield* Ref.make(emptyState);
+    yield* Effect.gen(function* () {
+      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+      const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+      const registry = yield* McpSessionRegistry.McpSessionRegistry;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadId = ThreadId.make("thread-antigravity-background-wait");
+      const selection = { instanceId, model: "gemini-test-low" };
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: instanceId,
+        threadId,
+      });
+      const created = yield* makeThreadCreatedEvent({
+        idAllocator,
+        threadId,
+        now: yield* DateTime.now,
+      });
+      yield* eventSink.write({
+        events: [
+          {
+            ...created,
+            payload: {
+              ...created.payload,
+              providerInstanceId: instanceId,
+              modelSelection: selection,
+            },
+          },
+        ],
+      });
+      yield* manager.open({
+        threadId,
+        providerSessionId,
+        modelSelection: selection,
+        runtimePolicy,
+      });
+
+      const config = yield* mcpSessions.read(threadId);
+      assert.isDefined(config);
+      const caller = yield* registry.resolve(config!.authorizationHeader.replace(/^Bearer\s+/, ""));
+      assert.equal(caller?.thread.providerInstanceId, instanceId);
+      assert.isTrue(caller?.capabilities.has("background-wait"));
+      const enabled = Context.getOrUndefined(
+        OrchestratorToolkit.tools.t3_background_wait.annotations,
+        McpSchema.EnabledWhen,
+      );
+      assert.isDefined(enabled);
+      assert.isTrue(
+        yield* Effect.sync(() =>
+          enabled!({
+            protocolVersion: "2025-11-25",
+            capabilities: {},
+            clientInfo: { name: "antigravity", version: "1.5" },
+          }),
+        ).pipe(Effect.provideService(McpInvocationContext.McpInvocationContext, caller!)),
+      );
+    }).pipe(
+      Effect.provide(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          withProvider: (adapter) => ({
+            ...antigravity,
+            openSession: (input) =>
+              adapter.openSession(input).pipe(
+                Effect.map((runtime) => ({
+                  ...runtime,
+                  instanceId,
+                  driver: antigravity.driver,
+                  providerSession: {
+                    ...runtime.providerSession,
+                    providerInstanceId: instanceId,
+                    driver: antigravity.driver,
+                  },
+                })),
+              ),
+          }),
+        }),
+      ),
+    );
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        NodeServices.layer,
+        NodeCrypto.layer,
+        IdAllocator.layer,
+        McpProviderSessions.layer,
+        TestProviderHost.layer().pipe(
+          Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+        ),
+      ),
+    ),
+  ),
 );
 
 it.effect("ProviderSessionManagerV2 duplicate detach preserves replacement MCP credentials", () =>
