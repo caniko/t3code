@@ -656,13 +656,12 @@ function withAntigravityEditPatches(
   });
 }
 
-export function normalizeAntigravityToolCall(
+function antigravityCommand(
   toolCall: AcpToolCallState,
-  readPreEditFile = readAntigravityPreEditFile,
-): AcpToolCallState {
-  const input = Option.getOrUndefined(decodeNativeToolFields(toolCall.data.rawInput));
-  const output = Option.getOrUndefined(decodeNativeToolFields(toolCall.data.rawOutput));
-  const nativeCommand =
+  input: typeof NativeToolFields.Type | undefined,
+  output: typeof NativeToolFields.Type | undefined,
+): string | undefined {
+  const command =
     input?.CommandLine ??
     input?.command_line ??
     input?.commandLine ??
@@ -670,7 +669,25 @@ export function normalizeAntigravityToolCall(
     output?.commandLine ??
     output?.command_line ??
     toolCall.command;
-  const command = nativeCommand?.trim() ? boundCommandLine(nativeCommand.trim()) : undefined;
+  return command?.trim() ? command : undefined;
+}
+
+export function extractAntigravityCommand(toolCall: AcpToolCallState): string | undefined {
+  return antigravityCommand(
+    toolCall,
+    Option.getOrUndefined(decodeNativeToolFields(toolCall.data.rawInput)),
+    Option.getOrUndefined(decodeNativeToolFields(toolCall.data.rawOutput)),
+  );
+}
+
+export function normalizeAntigravityToolCall(
+  toolCall: AcpToolCallState,
+  readPreEditFile = readAntigravityPreEditFile,
+): AcpToolCallState {
+  const input = Option.getOrUndefined(decodeNativeToolFields(toolCall.data.rawInput));
+  const output = Option.getOrUndefined(decodeNativeToolFields(toolCall.data.rawOutput));
+  const nativeCommand = antigravityCommand(toolCall, input, output);
+  const command = nativeCommand === undefined ? undefined : boundCommandLine(nativeCommand.trim());
   const nativeCwd =
     input?.Cwd ??
     input?.WorkingDirectory ??

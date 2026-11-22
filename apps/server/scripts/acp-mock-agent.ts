@@ -72,6 +72,8 @@ const editUpdatesThenRequest =
     : Schema.decodeSync(Schema.fromJsonString(Schema.Array(Schema.Unknown)))(
         process.env.T3_ACP_EMIT_EDIT_UPDATES_THEN_REQUEST,
       );
+const trackedCommandField = process.env.T3_ACP_TRACKED_COMMAND_FIELD ?? "command";
+const trackedCommand = process.env.T3_ACP_TRACKED_COMMAND ?? "git status";
 const clientFsProbePath = process.env.T3_ACP_CLIENT_FS_PROBE_PATH;
 const clientFsProbeLogPath = process.env.T3_ACP_CLIENT_FS_PROBE_LOG_PATH;
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -1640,7 +1642,9 @@ const program = Effect.gen(function* () {
             title: "git status",
             kind: emitTrackedToolCallKindThenHang as AcpSchema.ToolKind,
             status: "pending",
-            rawInput: { command: "git status" },
+            rawInput: {
+              [trackedCommandField]: trackedCommand,
+            },
           },
         });
         if (!failPrompt && promptCount !== failPromptOrdinal) return yield* Effect.never;
