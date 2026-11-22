@@ -2,6 +2,7 @@ import type { OrchestrationV2HistoricalMessage } from "@t3tools/contracts";
 import {
   type AgentFeedbackMode,
   ChatAttachment,
+  ChatAttachmentId,
   CheckpointId,
   MessageId,
   ModelSelection,
@@ -522,6 +523,7 @@ export class ProviderAdapterProtocolError extends Schema.TaggedError<ProviderAda
     driver: ProviderDriverKind,
     detail: Schema.String,
     reason: Schema.optional(ProviderAdapterFailureReason),
+    rejectedAttachmentId: Schema.optionalKey(ChatAttachmentId),
     cause: Schema.optional(Schema.Defect()),
     payload: Schema.optional(Schema.Unknown),
   },

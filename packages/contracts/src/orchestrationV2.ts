@@ -49,7 +49,7 @@ import {
   TurnItemId,
 } from "./baseSchemas.ts";
 import { AuthMcpClientAccess } from "./auth.ts";
-import { ChatAttachment } from "./chatAttachment.ts";
+import { ChatAttachment, ChatAttachmentId } from "./chatAttachment.ts";
 import { ThreadGuestShare } from "./guestShare.ts";
 import { StoredThreadTags, ThreadTag } from "./threadTags.ts";
 import { ThreadTitleRegenerationOutcome } from "./threadTitle.ts";
@@ -1751,6 +1751,7 @@ export const OrchestrationV2ProviderFailure = Schema.Struct({
   message: OrchestrationV2ProviderFailureMessage,
   code: Schema.NullOr(OrchestrationV2ProviderFailureCode),
   retryable: Schema.NullOr(Schema.Boolean),
+  rejectedAttachmentId: Schema.optionalKey(ChatAttachmentId),
   resetAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   verificationUrl: Schema.optionalKey(GoogleAccountVerificationUrl),
 });

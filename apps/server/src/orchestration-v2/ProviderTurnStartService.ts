@@ -222,8 +222,9 @@ const refusedBeforePrompt = (error: unknown): boolean =>
   PROMPT_REFUSAL_TAGS.some((tag) => Predicate.isTagged(error, tag)) ||
   (isProviderAdapterTurnStartError(error) && error.refusedBeforePrompt === true) ||
   (isProviderAdapterProtocolError(error) &&
-    error.driver === CLAUDE_PROVIDER &&
-    error.detail === CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL) ||
+    (error.rejectedAttachmentId !== undefined ||
+      (error.driver === CLAUDE_PROVIDER &&
+        error.detail === CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL))) ||
   (Predicate.hasProperty(error, "cause") && refusedBeforePrompt(error.cause));
 
 // The provider may have acted on a request it never answered, so a retry could duplicate it.
@@ -1477,11 +1478,18 @@ export const layer: Layer.Layer<
             if (message !== undefined && isSlashCommandMessage(message)) continue;
             lastPromptOrdinal = Math.max(lastPromptOrdinal, source.ordinal);
           }
+          const rejectedAttachmentIds = new Set(
+            missedHistory.flatMap((item) =>
+              item.type === "error" && item.failure.rejectedAttachmentId !== undefined
+                ? [item.failure.rejectedAttachmentId]
+                : [],
+            ),
+          );
           const attachments = missedHistory.flatMap((item) =>
             item.type === "user_message" &&
             item.runId !== null &&
             (runsById.get(item.runId)?.ordinal ?? 0) > lastPromptOrdinal
-              ? item.attachments
+              ? item.attachments.filter((attachment) => !rejectedAttachmentIds.has(attachment.id))
               : [],
           );
           return { handoffs, attachments };

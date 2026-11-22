@@ -9974,14 +9974,21 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               promptCapabilities: setup?.initializeResult.agentCapabilities?.promptCapabilities,
             })
             .pipe(
-              Effect.mapError(
-                (cause) =>
-                  new ProviderAdapter.ProviderAdapterProtocolError({
-                    driver,
-                    detail: "Failed to build ACP attachment prompt",
-                    payload: cause,
-                  }),
-              ),
+              Effect.mapError((cause) => {
+                const invalidParams = cause._tag === "AcpRequestError" && cause.code === -32602;
+                const rejectedId = invalidParams
+                  ? unknownRecord(cause.data)?.rejectedAttachmentId
+                  : undefined;
+                const rejected = attachments.find((attachment) => attachment.id === rejectedId);
+                return new ProviderAdapter.ProviderAdapterProtocolError({
+                  driver,
+                  detail: invalidParams
+                    ? "Failed to build ACP attachment prompt"
+                    : "Failed to read ACP prompt attachments",
+                  ...(rejected === undefined ? {} : { rejectedAttachmentId: rejected.id }),
+                  payload: cause,
+                });
+              }),
             );
         });
 

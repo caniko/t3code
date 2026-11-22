@@ -63,6 +63,9 @@ import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import { userFacingDatabaseErrorMessage } from "./UserFacingErrors.ts";
 
+const isTurnStartError = Schema.is(ProviderAdapter.ProviderAdapterTurnStartError);
+const isProtocolError = Schema.is(ProviderAdapter.ProviderAdapterProtocolError);
+
 export interface ProviderEventRoutingState {
   readonly ownedThreadIds: ReadonlySet<ThreadId>;
   // After root settlement, new children belong to the live run unless their coordinator still holds this run open.
@@ -2352,8 +2355,18 @@ export const layer: Layer.Layer<
               Effect.forkDetach,
             ),
           ),
-          Effect.catchCause((cause) =>
-            Effect.logError("orchestration V2 provider turn start failed", {
+          Effect.catchCause((cause) => {
+            const squashed = Cause.squash(cause);
+            const protocolError = isTurnStartError(squashed) ? squashed.cause : squashed;
+            const rejectedAttachmentId = isProtocolError(protocolError)
+              ? protocolError.rejectedAttachmentId
+              : undefined;
+            const failure = makeProviderFailure({
+              cause: squashed,
+              class: Exit.isFailure(shouldStart) ? "unknown" : "provider_error",
+              ...(rejectedAttachmentId === undefined ? {} : { code: "provider_prompt_rejected" }),
+            });
+            return Effect.logError("orchestration V2 provider turn start failed", {
               runId: input.run.id,
               cause,
             }).pipe(
@@ -2376,10 +2389,9 @@ export const layer: Layer.Layer<
                           },
                           openRunOwnedSubagents: openSubagents,
                           terminal: makeFailedTerminalEvent(
-                            makeProviderFailure({
-                              cause: Cause.squash(cause),
-                              class: Exit.isFailure(shouldStart) ? "unknown" : "provider_error",
-                            }),
+                            rejectedAttachmentId === undefined
+                              ? failure
+                              : { ...failure, rejectedAttachmentId },
                             latestItemOrdinal + 1,
                           ),
                           failureItemPersisted: false,
@@ -2398,8 +2410,8 @@ export const layer: Layer.Layer<
                     cause: { start: cause, write: writeCause },
                   }),
               ),
-            ),
-          ),
+            );
+          }),
         );
       }),
     } satisfies RunExecutionServiceV2Shape);

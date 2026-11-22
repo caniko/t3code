@@ -428,6 +428,10 @@ export const buildAntigravityPrompt = Effect.fn("buildAntigravityPrompt")(functi
   let totalBytes = 0;
 
   for (const attachment of input.attachments ?? []) {
+    const rejectAttachment = (message: string) =>
+      EffectAcpErrors.AcpRequestError.invalidParams(message, {
+        rejectedAttachmentId: attachment.id,
+      });
     const isPastedText =
       attachment.type === "file" &&
       "source" in attachment &&
@@ -451,23 +455,20 @@ export const buildAntigravityPrompt = Effect.fn("buildAntigravityPrompt")(functi
             : !(pdf || textFile) || input.promptCapabilities?.embeddedContext !== true)));
     const attachmentPath = input.resolveAttachmentPath(attachment);
     if (!attachmentPath) {
-      return yield* EffectAcpErrors.AcpRequestError.invalidParams(
-        `Invalid attachment '${attachment.name}'.`,
-      );
+      return yield* rejectAttachment(`Invalid attachment '${attachment.name}'.`);
     }
+    const readError = `Could not read attachment '${attachment.name}'.`;
     const info = yield* fileSystem
       .stat(attachmentPath)
       .pipe(
-        Effect.mapError(() =>
-          EffectAcpErrors.AcpRequestError.invalidParams(
-            `Could not read attachment '${attachment.name}'.`,
-          ),
+        Effect.mapError((cause) =>
+          cause.reason._tag === "NotFound"
+            ? rejectAttachment(readError)
+            : EffectAcpErrors.AcpRequestError.internalError(readError),
         ),
       );
     if (info.type !== "File") {
-      return yield* EffectAcpErrors.AcpRequestError.invalidParams(
-        `Could not read attachment '${attachment.name}'.`,
-      );
+      return yield* rejectAttachment(readError);
     }
     if (isPathOnly) continue;
     const size = Number(info.size);
@@ -486,15 +487,13 @@ export const buildAntigravityPrompt = Effect.fn("buildAntigravityPrompt")(functi
     }
     totalBytes += size;
     if (size > limit || totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
-      return yield* EffectAcpErrors.AcpRequestError.invalidParams(
+      return yield* rejectAttachment(
         `Image '${attachment.name}' is too large. Antigravity accepts images up to 10 MiB and 50 MiB of native attachments per message.`,
       );
     }
     const uri = yield* path.toFileUrl(attachmentPath).pipe(
       Effect.map((url) => url.href),
-      Effect.mapError(() =>
-        EffectAcpErrors.AcpRequestError.invalidParams(`Invalid attachment '${attachment.name}'.`),
-      ),
+      Effect.mapError(() => rejectAttachment(`Invalid attachment '${attachment.name}'.`)),
     );
     if (pdf) {
       blocks.push({ type: "resource_link", uri, name: attachment.name, mimeType, size });
@@ -503,15 +502,11 @@ export const buildAntigravityPrompt = Effect.fn("buildAntigravityPrompt")(functi
     const bytes = yield* fileSystem.stream(attachmentPath, { bytesToRead: limit + 1 }).pipe(
       Stream.runCollect,
       Effect.map((chunks) => Buffer.concat(chunks)),
-      Effect.mapError(() =>
-        EffectAcpErrors.AcpRequestError.invalidParams(
-          `Could not read attachment '${attachment.name}'.`,
-        ),
-      ),
+      Effect.mapError(() => EffectAcpErrors.AcpRequestError.internalError(readError)),
     );
     totalBytes += bytes.length - size;
     if (bytes.length > limit || totalBytes > MAX_TOTAL_ATTACHMENT_BYTES) {
-      return yield* EffectAcpErrors.AcpRequestError.invalidParams(
+      return yield* EffectAcpErrors.AcpRequestError.internalError(
         `Attachment '${attachment.name}' changed while being read and is too large.`,
       );
     }
