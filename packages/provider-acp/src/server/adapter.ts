@@ -533,6 +533,8 @@ export interface AcpAdapterV2Flavor {
    * is not inferred from the setup result.
    */
   readonly modelOptionArrivesLate?: boolean;
+  /** Reopen a session with `session/resume` when the agent offers both it and `session/load`. */
+  readonly preferResumeSession?: boolean;
   readonly getModelContextWindow?: (
     selection: ModelSelection,
     session: AcpSessionRuntime.AcpSessionRuntimeStartResult,
@@ -8998,9 +9000,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               });
             }
             yield* reportStartupPhase("resume");
-            return canLoadSession
-              ? yield* runtime.loadSession(sessionId, activationOptions)
-              : yield* runtime.resumeSession(sessionId, activationOptions);
+            return canResumeSession && (flavor.preferResumeSession === true || !canLoadSession)
+              ? yield* runtime.resumeSession(sessionId, activationOptions)
+              : yield* runtime.loadSession(sessionId, activationOptions);
           }).pipe(
             Effect.onError(() => Ref.set(loadingSessionId, null)),
             Effect.ensuring(Effect.suspend(() => reportStartupPhase(undefined))),
