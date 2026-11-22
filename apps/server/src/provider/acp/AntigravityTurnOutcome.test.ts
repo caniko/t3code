@@ -87,10 +87,35 @@ const STATUS_NOT_FOUND_ERROR = Buffer.concat([
   ),
 ]);
 // Antigravity 1.5 states the quota reset only as a Go duration in its message.
-const STATUS_QUOTA_ERROR = Buffer.concat([
+const STATUS_QUOTA_MESSAGE_RESET_ERROR = Buffer.concat([
   Buffer.from([0x12, 0x6e]),
   Buffer.from(
     "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4m42s.",
+  ),
+]);
+const STATUS_QUOTA_ERROR = Buffer.concat([
+  Buffer.from([0x12, 0x68]),
+  Buffer.from(
+    'RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 11m36s.\u001a\u0080\u0005HTTP 429 Too Many Requests\n\n{\n  "error": {\n    "code": 429,\n    "details": [\n      {\n        "@type": "type.googleapis.com/google.rpc.ErrorInfo",\n        "domain": "cloudcode-pa.googleapis.com",\n        "metadata": {\n          "model": "gemini-4-neon-high",\n          "quotaResetDelay": "11m36.055910958s",\n          "quotaResetTimeStamp": "2026-11-21T04:36:37Z"\n        },\n        "reason": "QUOTA_EXHAUSTED"\n      },\n      {\n        "@type": "type.googleapis.com/google.rpc.RetryInfo",\n        "retryDelay": "696.055910958s"\n      }\n    ],\n    "message": "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 11m36s.",\n    "status": "RESOURCE_EXHAUSTED"\n  }\n}',
+  ),
+]);
+const STATUS_QUOTA_DELAY_ERROR = Buffer.concat([
+  Buffer.from([0x12, 0x68]),
+  Buffer.from(
+    'RESOURCE_EXHAUSTED (code 429): Individual quota reached.\u001a\u0080\u0002HTTP 429 Too Many Requests\n\n{"error":{"code":429,"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"42s"},{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED","metadata":{"quotaResetDelay":"11m36.055910958s","quotaResetTimeStamp":"1970-01-01T00:00:00Z"}}],"status":"RESOURCE_EXHAUSTED"}}',
+  ),
+]);
+const STATUS_QUOTA_ZERO_DELAY_ERROR = Buffer.concat([
+  Buffer.from([0x12, 0x68]),
+  Buffer.from(
+    'RESOURCE_EXHAUSTED (code 429): Individual quota reached.\u001a\u0080\u0002HTTP 429 Too Many Requests\n\n{"error":{"code":429,"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"QUOTA_EXHAUSTED","metadata":{"quotaResetDelay":"0s","quotaResetTimeStamp":"1970-01-01T00:00:00Z"}},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"42s"}],"status":"RESOURCE_EXHAUSTED"}}',
+  ),
+]);
+const STATUS_RATE_LIMIT_ERROR = Buffer.concat([
+  // 0x4e (78 = 'N') is the protobuf length varint of the status string and must not corrupt status.
+  Buffer.from([0x12, 0x4e]),
+  Buffer.from(
+    'RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).\u001a\u0080\u0002HTTP 429 Too Many Requests\n\n{"error":{"code":429,"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED"},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"42s"}],"status":"RESOURCE_EXHAUSTED"}}',
   ),
 ]);
 // The model's reply quoting the agent's quota notice is an ordinary planner response.
@@ -158,7 +183,7 @@ describe("watchAntigravityPromptOutcome", () => {
       assert.deepInclude(
         (yield* turn([
           [USER_INPUT, input],
-          [ERROR_MESSAGE, STATUS_QUOTA_ERROR],
+          [ERROR_MESSAGE, STATUS_QUOTA_MESSAGE_RESET_ERROR],
         ]))?.failure,
         { class: "usage_limit", resetAt: "1970-01-01T00:04:42.000Z" },
       );
@@ -179,6 +204,58 @@ describe("watchAntigravityPromptOutcome", () => {
         yield* turn([
           [USER_INPUT, input],
           [ERROR_MESSAGE, RATE_LIMIT_ERROR],
+        ]),
+        reusable({
+          class: "usage_limit",
+          message: "Resource has been exhausted (e.g. check quota).",
+          code: "RESOURCE_EXHAUSTED",
+          retryable: true,
+          resetAt: "1970-01-01T00:00:42.000Z",
+        }),
+      );
+      assert.deepEqual(
+        yield* turn([
+          [USER_INPUT, input],
+          [ERROR_MESSAGE, STATUS_QUOTA_ERROR],
+        ]),
+        reusable({
+          class: "usage_limit",
+          message: "You have reached your Antigravity quota for this period.",
+          code: "RESOURCE_EXHAUSTED",
+          retryable: true,
+          resetAt: "2026-11-21T04:36:37.000Z",
+        }),
+      );
+      assert.deepEqual(
+        yield* turn([
+          [USER_INPUT, input],
+          [ERROR_MESSAGE, STATUS_QUOTA_DELAY_ERROR],
+        ]),
+        reusable({
+          class: "usage_limit",
+          message: "You have reached your Antigravity quota for this period.",
+          code: "RESOURCE_EXHAUSTED",
+          retryable: true,
+          resetAt: "1970-01-01T00:11:36.056Z",
+        }),
+      );
+      assert.deepEqual(
+        yield* turn([
+          [USER_INPUT, input],
+          [ERROR_MESSAGE, STATUS_QUOTA_ZERO_DELAY_ERROR],
+        ]),
+        reusable({
+          class: "usage_limit",
+          message: "You have reached your Antigravity quota for this period.",
+          code: "RESOURCE_EXHAUSTED",
+          retryable: true,
+          resetAt: "1970-01-01T00:00:42.000Z",
+        }),
+      );
+      assert.deepEqual(
+        yield* turn([
+          [USER_INPUT, input],
+          [ERROR_MESSAGE, STATUS_RATE_LIMIT_ERROR],
         ]),
         reusable({
           class: "usage_limit",
