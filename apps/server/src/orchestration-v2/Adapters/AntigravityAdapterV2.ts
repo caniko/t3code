@@ -4,7 +4,9 @@ import {
   ProviderInstanceId,
   type OrchestrationV2ProviderCapabilities,
   type ProviderSetupError,
+  type ServerProviderSkill,
 } from "@t3tools/contracts";
+import { SKILL_MENTION_PATTERN } from "@t3tools/shared/composerInlineTokens";
 import type { SelfInvocation } from "@t3tools/shared/nodeRuntime";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
@@ -13,6 +15,7 @@ import * as Path from "effect/Path";
 import * as Exit from "effect/Exit";
 import * as Semaphore from "effect/Semaphore";
 import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 import * as EffectAcpErrors from "effect-acp/errors";
 
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
@@ -65,6 +68,8 @@ import {
 } from "@t3tools/provider-acp/server/adapter";
 
 const ANTIGRAVITY_PROVIDER = ProviderDriverKind.make("antigravity");
+const MAX_SKILL_BODY_BYTES = 64 * 1024;
+const MAX_INLINE_SKILL_BYTES = 256 * 1024;
 
 const AntigravityProviderCapabilitiesV2 = {
   ...AcpProviderCapabilitiesV2,
@@ -112,6 +117,7 @@ export interface AntigravityAdapterV2Options {
   readonly continuationRequests?: Parameters<typeof makeAcpAdapterV2>[0]["continuationRequests"];
   /** The agent's GEMINI_HOME. Its session logs show turns that ended on an upstream error. */
   readonly profileDirectory?: string;
+  readonly discoverSkills?: (cwd: string) => Effect.Effect<ReadonlyArray<ServerProviderSkill>>;
 }
 
 /**
@@ -260,6 +266,48 @@ export function makeAntigravityAcpAdapterFlavor(
     mcpOverHttp: true,
     sessionCarriesPullRequestLinking: antigravityAppendsSystemPrompt,
     makeRuntime,
+    rewriteUserText: Effect.fn("AntigravityAdapterV2.rewriteUserText")(function* (text, turnInput) {
+      const cwd = turnInput.runtimePolicy.cwd;
+      if (!cwd || options.discoverSkills === undefined) return text;
+      // Handoff history can mention skills that were invoked on earlier turns.
+      const ownText = text.slice(turnInput.inlineContextLength ?? 0);
+      const names = new Set(
+        Array.from(ownText.matchAll(SKILL_MENTION_PATTERN), (match) => match[2]),
+      );
+      if (names.size === 0) return text;
+
+      const fromUser = turnInput.message.createdBy === "user";
+      const skills = new Map(
+        (yield* options.discoverSkills(cwd)).map((skill) => [skill.name, skill]),
+      );
+      const blocks: string[] = [];
+      let remaining = MAX_INLINE_SKILL_BYTES;
+      for (const name of names) {
+        const skill = name === undefined ? undefined : skills.get(name);
+        if (!skill?.enabled || (skill.userInvocationOnly && !fromUser)) continue;
+        const limit = Math.min(MAX_SKILL_BODY_BYTES, remaining);
+        if (limit === 0) break;
+        const bytes = yield* options.fileSystem.stat(skill.path).pipe(
+          Effect.flatMap((info) =>
+            info.type === "File" && info.size <= BigInt(limit)
+              ? options.fileSystem.stream(skill.path, { bytesToRead: limit + 1 }).pipe(
+                  Stream.runCollect,
+                  Effect.map((chunks) => Buffer.concat(chunks)),
+                )
+              : Effect.undefined,
+          ),
+          Effect.orElseSucceed(() => undefined),
+        );
+        if (bytes === undefined || bytes.length > limit) continue;
+        const body = bytes.toString("utf8").trim();
+        if (!body) continue;
+        blocks.push(`<skill name="${skill.name}" path="${skill.path}">\n${body}\n</skill>`);
+        remaining -= bytes.length;
+      }
+      if (blocks.length === 0) return text;
+      const invoker = fromUser ? "user" : "agent";
+      return `${text}\n\nThe ${invoker} invoked these skills. Follow their instructions:\n\n${blocks.join("\n\n")}`;
+    }),
     buildAttachmentPrompt: ({ text, attachments, resolveAttachmentPath, promptCapabilities }) =>
       buildAntigravityPrompt({
         input: text,

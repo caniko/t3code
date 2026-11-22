@@ -443,6 +443,77 @@ describe("AntigravityAdapterV2 compaction", () => {
   );
 });
 
+describe("AntigravityAdapterV2 skill mentions", () => {
+  it.effect("inlines user-only skills only when the user mentions them on the current turn", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const home = yield* fileSystem.makeTempDirectoryScoped();
+      const skillPath = path.join(home, "ship", "SKILL.md");
+      const ordinaryPath = path.join(home, "review", "SKILL.md");
+      yield* fileSystem.makeDirectory(path.dirname(skillPath), { recursive: true });
+      yield* fileSystem.makeDirectory(path.dirname(ordinaryPath), { recursive: true });
+      yield* fileSystem.writeFileString(skillPath, "Ship instructions.\n");
+      yield* fileSystem.writeFileString(ordinaryPath, "Review instructions.\n");
+      const instanceId = ProviderInstanceId.make("antigravity-test");
+      const { rewriteUserText } = makeAntigravityAcpAdapterFlavor({
+        instanceId,
+        random: undefined as never,
+        fileSystem,
+        path,
+        host: undefined as never,
+        selfInvocation: undefined as never,
+        makeRuntime: () => Effect.die("not spawned in this test"),
+        withProcess: (_stop, task) => task,
+        defaultModel: Effect.undefined,
+        discoverSkills: () =>
+          Effect.succeed([
+            {
+              name: "ship",
+              path: skillPath,
+              scope: "user",
+              enabled: true,
+              userInvocationOnly: true,
+            },
+            { name: "review", path: ordinaryPath, scope: "user", enabled: true },
+          ]),
+      });
+      const history = "<history>\nuser: $ship\n</history>\n\n";
+      const rewrite = (text: string, messageCreatedBy: "user" | "agent" = "user") =>
+        rewriteUserText!(`${history}${text}`, {
+          ...makeTurnInput({
+            threadId: ThreadId.make("thread-antigravity-skills"),
+            providerThread: { id: "provider-thread" } as never,
+            instanceId,
+            runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              cwd: process.cwd(),
+            }),
+            now: DateTime.makeUnsafe(0),
+            messageCreatedBy,
+            messageCreationSource: messageCreatedBy === "agent" ? "provider" : "web",
+            messageText: `${history}${text}`,
+          }),
+          inlineContextLength: history.length,
+        });
+
+      assert.equal(yield* rewrite("Fix the typo"), `${history}Fix the typo`);
+      assert.equal(
+        yield* rewrite("Fix it. $ship $ship"),
+        `${history}Fix it. $ship $ship\n\nThe user invoked these skills. Follow their instructions:\n\n<skill name="ship" path="${skillPath}">\nShip instructions.\n</skill>`,
+      );
+      assert.equal(yield* rewrite("Fix it. $ship $ship", "agent"), `${history}Fix it. $ship $ship`);
+      const delegated = yield* rewrite("$ship €review", "agent");
+      assert.include(delegated, "Review instructions.");
+      assert.notInclude(delegated, "Ship instructions.");
+      assert.notInclude(delegated, "The user invoked");
+      yield* fileSystem.writeFileString(skillPath, "x".repeat(128 * 1024));
+      assert.equal(yield* rewrite("$ship"), `${history}$ship`);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+});
+
 describe("AntigravityAdapterV2 session open", () => {
   it.effect.each([
     {

@@ -44,6 +44,7 @@ const SKILL_READ_CHUNK_BYTES = 1024;
 const SkillFrontmatter = Schema.Struct({
   name: Schema.optional(Schema.NullOr(Schema.String)),
   description: Schema.optional(Schema.NullOr(Schema.String)),
+  "disable-model-invocation": Schema.optional(Schema.Unknown),
 });
 const decodeSkillFrontmatter = Schema.decodeUnknownSync(SkillFrontmatter);
 const SkillConfigEntry = Schema.Struct({
@@ -121,7 +122,11 @@ function parseSkillFrontmatter(contents: string, fileName: string) {
     const description = frontmatter.description?.trim();
     // Native names are not trimmed. Do not rename one to fit the picker contract.
     if (!name || name !== name.trim()) return undefined;
-    return { name, ...(description ? { description } : {}) };
+    return {
+      name,
+      ...(description ? { description } : {}),
+      ...(frontmatter["disable-model-invocation"] === true ? { userInvocationOnly: true } : {}),
+    };
   } catch {
     return undefined;
   }
@@ -230,7 +235,7 @@ function resolveSkillsConfigPath(path: Path.Path, rawPath: string, baseDir: stri
 export const discoverAntigravitySkills = Effect.fn("discoverAntigravitySkills")(function* (input: {
   readonly cwd: string;
   readonly userHome: string;
-  /** The instance's GEMINI_HOME, where agy loads plugins from. */
+  /** The instance's GEMINI_HOME, where agy loads plugins and user skills. */
   readonly profileDirectory: string;
 }): Effect.fn.Return<
   ReadonlyArray<ServerProviderSkill>,
@@ -243,10 +248,16 @@ export const discoverAntigravitySkills = Effect.fn("discoverAntigravitySkills")(
     path,
     path.join(input.userHome, ".gemini"),
   );
+  const [profileConfigSkills, profileCliSkills] = antigravityUserSkillDirectories(
+    path,
+    input.profileDirectory,
+  );
   const roots = [
     { directory: configSkills, scope: "user" },
+    { directory: profileConfigSkills, scope: "user" },
     { directory: path.resolve(input.cwd, ".gemini", "skills"), scope: "project" },
     { directory: cliSkills, scope: "user" },
+    { directory: profileCliSkills, scope: "user" },
     { directory: path.resolve(input.cwd, ".agents", "skills"), scope: "project", agentRoot: true },
     { directory: path.resolve(input.cwd, ".agent", "skills"), scope: "project", agentRoot: true },
   ];
@@ -387,8 +398,20 @@ export const discoverAntigravitySkills = Effect.fn("discoverAntigravitySkills")(
     }
   });
 
+  const scannedRoots = new Set<string>();
+  const scanRoot = Effect.fn("scanAntigravitySkillRoot")(function* (
+    directory: string,
+    scope: string,
+    mode: "agent-root" | "directory",
+    pluginName?: string,
+  ) {
+    const realPath = yield* readIfPresent(fileSystem.realPath(directory), directory);
+    if (realPath === undefined || scannedRoots.has(realPath)) return;
+    scannedRoots.add(realPath);
+    yield* scanDirectory(directory, scope, mode, EMPTY_SKILL_FILTER, pluginName);
+  });
   for (const root of roots) {
-    yield* scanDirectory(root.directory, root.scope, root.agentRoot ? "agent-root" : "directory");
+    yield* scanRoot(root.directory, root.scope, root.agentRoot ? "agent-root" : "directory");
   }
 
   for (const config of [
@@ -447,13 +470,7 @@ export const discoverAntigravitySkills = Effect.fn("discoverAntigravitySkills")(
       const pluginDirectory = path.join(pluginsDirectory, plugin);
       const info = yield* readIfPresent(fileSystem.stat(pluginDirectory), pluginDirectory);
       if (info?.type !== "Directory") continue;
-      yield* scanDirectory(
-        path.join(pluginDirectory, "skills"),
-        "user",
-        "directory",
-        EMPTY_SKILL_FILTER,
-        plugin,
-      );
+      yield* scanRoot(path.join(pluginDirectory, "skills"), "user", "directory", plugin);
     }
   }
   return [...skillsByName.values()].sort((left, right) => left.name.localeCompare(right.name));

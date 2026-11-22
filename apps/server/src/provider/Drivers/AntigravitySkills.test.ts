@@ -94,6 +94,53 @@ it.layer(NodeServices.layer)("discoverAntigravitySkills", (it) => {
     }),
   );
 
+  it.effect("discovers user-only skills kept in the instance profile", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const input = yield* makeWorkspace();
+      const skillPath = yield* writeSkill(
+        path.join(input.profileDirectory, "config", "skills", "ship"),
+        "---\nname: ship\ndescription: Ship it.\ndisable-model-invocation: true\n---\n",
+      );
+
+      assert.deepEqual(yield* discoverAntigravitySkills(input), [
+        {
+          name: "ship",
+          description: "Ship it.",
+          path: skillPath,
+          scope: "user",
+          enabled: true,
+          userInvocationOnly: true,
+        },
+      ]);
+    }),
+  );
+
+  it.effect.skipIf(!symlinksSupported)("scans a linked user skill root once", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const input = yield* makeWorkspace();
+      const root = path.join(input.userHome, ".gemini", "config", "skills");
+      const alias = path.join(input.profileDirectory, "config", "skills");
+      const skillPath = yield* writeSkill(path.join(root, "ship"), "---\nname: ship\n---\n");
+      yield* fileSystem.makeDirectory(path.dirname(alias), { recursive: true });
+      yield* fileSystem.symlink(root, alias);
+      const reads: string[] = [];
+      const skills = yield* discoverAntigravitySkills(input).pipe(
+        Effect.provideService(FileSystem.FileSystem, {
+          ...fileSystem,
+          readDirectory: (directory, options) => {
+            if (directory === root || directory === alias) reads.push(directory);
+            return fileSystem.readDirectory(directory, options);
+          },
+        }),
+      );
+      assert.deepEqual(skills, [{ name: "ship", path: skillPath, scope: "user", enabled: true }]);
+      assert.deepEqual(reads, [root]);
+    }),
+  );
+
   it.effect("reads skills from enabled plugins in the instance's Antigravity profile", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

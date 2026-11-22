@@ -603,6 +603,11 @@ export const AntigravityDriver: ProviderDriver<
       ),
     );
     const defaultModel = currentCatalog.pipe(Effect.map((catalog) => catalog?.defaultChatModel));
+    const discoverSkills = (cwd: string) =>
+      discoverAntigravitySkills({ cwd, userHome, profileDirectory }).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
+      );
     const orchestrationAdapter = yield* makeAntigravityAdapterV2({
       instanceId,
       selfInvocation,
@@ -615,6 +620,7 @@ export const AntigravityDriver: ProviderDriver<
         ),
       ),
       profileDirectory,
+      discoverSkills: (cwd) => discoverSkills(cwd).pipe(Effect.orElseSucceed(() => [])),
       onSessionStarted: (started, cwd, session) =>
         provider
           .onSessionStarted(started, cwd, session)
@@ -727,9 +733,7 @@ export const AntigravityDriver: ProviderDriver<
       snapshotForCwd: (cwd) =>
         !enabled
           ? provider.snapshot.getSnapshot
-          : discoverAntigravitySkills({ cwd, userHome, profileDirectory }).pipe(
-              Effect.provideService(FileSystem.FileSystem, fileSystem),
-              Effect.provideService(Path.Path, path),
+          : discoverSkills(cwd).pipe(
               Effect.flatMap((skills) => provider.snapshotForCwd(cwd, skills)),
               Effect.mapError(
                 (cause) =>
