@@ -58,6 +58,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
@@ -1143,6 +1144,55 @@ const optionValues = (question: OrchestrationV2UserInputQuestion | undefined) =>
   question?.options.map((option) => option.value ?? option.label);
 
 describe("AcpAdapterV2", () => {
+  it.effect("stops a prompt stalled in pre-send logging when cancel times out", () =>
+    Effect.gen(function* () {
+      const logging = yield* Deferred.make<void>();
+      const releaseLog = yield* Deferred.make<void>();
+      const route = yield* Semaphore.make(1);
+      const outgoing: string[] = [];
+      const runtime = yield* AcpSessionRuntime.make({
+        spawn: {
+          command: process.execPath,
+          args: [yield* bundledMockAgentPath],
+          env: { T3_ACP_SESSION_LIFECYCLE: "1" },
+        },
+        cwd: process.cwd(),
+        clientInfo: { name: "test", version: "1" },
+        authMethodId: "test",
+        interruptPromptOnCancel: false,
+        cancelTimeout: "1 second",
+        requestLogger: (event) =>
+          event.method === "session/prompt" && event.status === "started"
+            ? Deferred.succeed(logging, undefined).pipe(Effect.andThen(Deferred.await(releaseLog)))
+            : Effect.void,
+        protocolLogging: {
+          logOutgoing: true,
+          logger: (event) =>
+            Effect.sync(() => {
+              const method = rawProtocolMethod(event);
+              if (method === "session/prompt" || method === "session/cancel") outgoing.push(method);
+            }),
+        },
+      });
+      yield* runtime.start();
+      const prompt = yield* runtime
+        .prompt(
+          { prompt: [{ type: "text", text: "Test prompt" }] },
+          { withDispatch: (enqueue) => route.withPermit(enqueue) },
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(logging);
+      const cancel = yield* runtime.cancel.pipe(Effect.forkChild({ startImmediately: true }));
+      yield* TestClock.adjust("1 second");
+      yield* Fiber.join(cancel);
+      yield* Deferred.succeed(releaseLog, undefined);
+      const response = yield* Fiber.join(prompt);
+      assert.deepEqual(outgoing, []);
+      assert.equal(response.stopReason, "cancelled");
+      yield* route.withPermit(Effect.void);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   beforeAll(() => bundleAgents);
 
   it.live.each(["during pre-send logging", "before verification"] as const)(

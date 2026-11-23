@@ -1272,11 +1272,11 @@ interface EnsureActiveAssistantSegmentResult {
 interface AcpActivePrompt {
   readonly fiber: Fiber.Fiber<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
   readonly completed: Deferred.Deferred<void>;
-  /** Settles once the prompt is queued to the agent, or its call has ended without that. */
+  /** Settles only after the prompt is queued to the agent. */
   readonly queued: Deferred.Deferred<void>;
 }
 
-// A fiber stopped before its call began never settles queued, so its end counts too.
+// A sender can exit without ever queuing a prompt.
 const awaitPromptQueued = (prompt: Pick<AcpActivePrompt, "fiber" | "queued">) =>
   Effect.raceFirst(Deferred.await(prompt.queued), Fiber.await(prompt.fiber).pipe(Effect.asVoid));
 
@@ -2636,29 +2636,33 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
       sessionId: started.sessionId,
       ...(options.cancelMeta === undefined ? {} : { _meta: options.cancelMeta }),
     } satisfies EffectAcpSchema.CancelNotification;
-    // An agent drops a cancel that reaches it before the prompt it targets, so the cancel waits
-    // until the prompt is queued, for at most the cancel timeout.
-    const promptQueued = Option.isSome(activePrompt)
-      ? awaitPromptQueued(activePrompt.value).pipe(
-          Effect.timeoutOption(options.cancelTimeout ?? defaultCancelTimeout),
+    const waitForPrompt = options.cancelBehavior === "wait-for-prompt";
+    const interruptPrompt = !waitForPrompt && options.interruptPromptOnCancel !== false;
+    if (Option.isSome(activePrompt)) {
+      const prompt = activePrompt.value;
+      if (
+        interruptPrompt ||
+        Option.isNone(
+          yield* awaitPromptQueued(prompt).pipe(
+            Effect.timeoutOption(options.cancelTimeout ?? defaultCancelTimeout),
+          ),
         )
-      : Effect.void;
-    if (options.cancelBehavior !== "wait-for-prompt") {
-      if (options.interruptPromptOnCancel === false) {
-        yield* promptQueued;
-        return yield* acp.agent.cancel(cancelPayload);
+      ) {
+        // The sender must finish before we check admission, or it can enqueue after cancel.
+        yield* Fiber.interrupt(prompt.fiber);
       }
-      if (Option.isSome(activePrompt)) {
-        yield* Fiber.interrupt(activePrompt.value.fiber).pipe(Effect.ignore);
+      if (!(yield* Deferred.isDone(prompt.queued))) {
+        return;
       }
+    }
+    if (interruptPrompt) {
       // Write cancel before a replacement prompt can reach the agent.
       yield* acp.agent.cancel(cancelPayload).pipe(Effect.ignore);
       return;
     }
 
-    yield* promptQueued;
     yield* acp.agent.cancel(cancelPayload);
-    if (Option.isNone(activePrompt)) {
+    if (!waitForPrompt || Option.isNone(activePrompt)) {
       return;
     }
     const completed = yield* Effect.gen(function* () {
@@ -2900,10 +2904,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
                   requestPayload,
                   acp.agent
                     .prompt(requestPayload)
-                    .pipe(
-                      Effect.provideService(EffectAcpProtocol.AcpOutgoingQueued, queued),
-                      Effect.ensuring(Deferred.succeed(queued, undefined)),
-                    ),
+                    .pipe(Effect.provideService(EffectAcpProtocol.AcpOutgoingQueued, queued)),
                 );
                 const dispatch = promptOptions?.withDispatch;
                 const fiber = yield* (

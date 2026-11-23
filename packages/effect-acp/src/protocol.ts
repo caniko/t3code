@@ -436,6 +436,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
       if (options.testHooks?.onOutgoingWriteAdmitted !== undefined) {
         yield* options.testHooks.onOutgoingWriteAdmitted();
       }
+      const queued = yield* AcpOutgoingQueued;
       yield* Queue.offer(outgoing, {
         payload: encoded,
         ...(acknowledgement === undefined ? {} : { acknowledgement }),
@@ -455,6 +456,11 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
               cause: "Output queue closed",
             }),
         ),
+        // Cancellation must not observe an admitted prompt as unsent.
+        Effect.tap(() =>
+          queued === undefined ? Effect.void : Deferred.succeed(queued, undefined),
+        ),
+        Effect.uninterruptible,
         Effect.tapError((error) =>
           acknowledgement === undefined
             ? Effect.void
@@ -465,10 +471,6 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
               }).pipe(Effect.andThen(Deferred.fail(acknowledgement, error)), Effect.asVoid),
         ),
       );
-      const queued = yield* AcpOutgoingQueued;
-      if (queued !== undefined) {
-        yield* Deferred.succeed(queued, undefined);
-      }
       if (acknowledgement !== undefined) {
         yield* Deferred.await(acknowledgement);
       }
