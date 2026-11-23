@@ -8,6 +8,7 @@ import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import { ProtobufReader } from "effect/protobuf";
 import * as Schema from "effect/Schema";
 import type * as EffectAcpSchema from "effect-acp/compat";
 
@@ -19,6 +20,8 @@ const ERROR_STEP_TYPE = 17;
 const PLANNER_RESPONSE_STEP_TYPE = 15;
 // The harness error text leads the payload; a Go stack trace follows it.
 const MAX_ERROR_PAYLOAD_BYTES = 16_384;
+const POOL_DENIAL = "request failed (code 429): all eligible accounts are rate limited";
+const POOL_DENIAL_BYTES = new TextEncoder().encode(POOL_DENIAL);
 // The Go harness's rendering of a Google API error, as the agent's api_errors.py reads it.
 // Status is a gRPC code, or an HTTP status line such as "502 Bad Gateway". A message
 // stops at the next error, so each start scans its own span and the match stays linear.
@@ -225,6 +228,41 @@ function verificationErrorInfo(text: string) {
   return undefined;
 }
 
+function delimitedField(bytes: Uint8Array, field: number) {
+  const reader = ProtobufReader.make(bytes);
+  let value: Uint8Array | undefined;
+  while (!reader.isDone()) {
+    const tag = reader.tag();
+    if (
+      ProtobufReader.fieldNumber(tag) === field &&
+      ProtobufReader.wireType(tag) === ProtobufReader.WireType.Len
+    ) {
+      value = reader.bytesView();
+    } else {
+      reader.skip(tag);
+    }
+  }
+  return value;
+}
+
+function isPoolDenial(payload: Uint8Array) {
+  try {
+    // Antigravity 1.5.12 stores the normalized message at 24.3.2 and 24.3.9, not in HTTP diagnostics.
+    const errorStep = delimitedField(payload, 24);
+    const error = errorStep && delimitedField(errorStep, 3);
+    return (
+      error !== undefined &&
+      [2, 9].some((field) => {
+        const message = delimitedField(error, field);
+        return message !== undefined && Buffer.compare(message, POOL_DENIAL_BYTES) === 0;
+      })
+    );
+  } catch (error) {
+    if (error instanceof ProtobufReader.ProtobufReaderError) return false;
+    throw error;
+  }
+}
+
 function turnFailure(
   stopReason: EffectAcpSchema.StopReason,
   step: LastStep | undefined,
@@ -236,16 +274,23 @@ function turnFailure(
       readonly resumeWith?: string;
     }
   | undefined {
-  const errorText =
-    step?.type === ERROR_STEP_TYPE
-      ? new TextDecoder().decode(step.payload ?? new Uint8Array())
-      : undefined;
-  // The agent maps only the SDK's QUOTA_EXHAUSTED stop reason to `refusal`.
-  if (errorText === undefined && stopReason !== "refusal") return undefined;
-  const text = errorText ?? "";
-  const apiError = API_ERROR.exec(text) ?? statusError(text);
+  const payload = step?.type === ERROR_STEP_TYPE ? step.payload : undefined;
+  if (payload === undefined && stopReason !== "refusal") return undefined;
   const reusable = (failure: OrchestrationV2ProviderFailure) =>
     ({ failure, threadDisposition: "reusable" }) as const;
+  if (stopReason === "end_turn" && payload != null && isPoolDenial(payload)) {
+    return reusable(
+      makeProviderFailure({
+        class: "usage_limit",
+        message: POOL_DENIAL,
+        code: "FLEETIX_POOL_QUOTA",
+        retryable: true,
+      }),
+    );
+  }
+  const text = payload == null ? "" : new TextDecoder().decode(payload);
+  const apiError = API_ERROR.exec(text) ?? statusError(text);
+  // The agent maps only the SDK's QUOTA_EXHAUSTED stop reason to `refusal`.
   if (stopReason === "refusal" || QUOTA_EXHAUSTED.test(text)) {
     return reusable(
       makeProviderFailure({

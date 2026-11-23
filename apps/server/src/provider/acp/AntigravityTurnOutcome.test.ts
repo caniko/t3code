@@ -5,6 +5,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import { ProtobufWriter } from "effect/protobuf";
 import type * as EffectAcpSchema from "effect-acp/compat";
 import type { OrchestrationV2ProviderFailure } from "@t3tools/contracts";
 
@@ -118,6 +119,32 @@ const STATUS_RATE_LIMIT_ERROR = Buffer.concat([
     'RESOURCE_EXHAUSTED (code 429): Resource has been exhausted (e.g. check quota).\u001a\u0080\u0002HTTP 429 Too Many Requests\n\n{"error":{"code":429,"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED"},{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"42s"}],"status":"RESOURCE_EXHAUSTED"}}',
   ),
 ]);
+const POOL_DENIAL = "request failed (code 429): all eligible accounts are rate limited";
+const poolQuotaPayload = (
+  message: string,
+  body = JSON.stringify({ type: "error", error: { type: "usage_limit_reached", message } }),
+  summary = message,
+) => {
+  const { Len } = ProtobufWriter.WireType;
+  return ProtobufWriter.make()
+    .tag(24, Len)
+    .fork()
+    .tag(3, Len)
+    .fork()
+    .tag(1, Len)
+    .string("Agent execution terminated due to error.")
+    .tag(2, Len)
+    .string(message)
+    .tag(3, Len)
+    .string(`HTTP 429 Too Many Requests\n\n${body}`)
+    .tag(5, Len)
+    .string(body)
+    .tag(9, Len)
+    .string(summary)
+    .join()
+    .join()
+    .finish();
+};
 // The model's reply quoting the agent's quota notice is an ordinary planner response.
 const QUOTED_NOTICE = Buffer.from(
   "Usage Limit Reached\n\nYou have reached your current quota for this period. Your limit will reset in 1 hour.",
@@ -213,6 +240,46 @@ describe("watchAntigravityPromptOutcome", () => {
           resetAt: "1970-01-01T00:00:42.000Z",
         }),
       );
+      const unrelated429 = "request failed (code 429): some other error";
+      const poolDenial = poolQuotaPayload(POOL_DENIAL);
+      for (const payload of [
+        poolDenial,
+        poolQuotaPayload(POOL_DENIAL, '{"quotaResetTimeStamp":"2026-11-23T18:00:00Z"}'),
+        poolQuotaPayload(POOL_DENIAL, '{"quotaResetDelay":"1h","retryDelay":"42s"}', unrelated429),
+        poolQuotaPayload(unrelated429, "", POOL_DENIAL),
+      ]) {
+        assert.deepEqual(
+          yield* turn([
+            [USER_INPUT, input],
+            [ERROR_MESSAGE, payload],
+          ]),
+          reusable({
+            class: "usage_limit",
+            message: POOL_DENIAL,
+            code: "FLEETIX_POOL_QUOTA",
+            retryable: true,
+          }),
+        );
+      }
+      assert.isUndefined(yield* turn([]));
+      assert.isUndefined(yield* turn([[PLANNER_RESPONSE, poolDenial]]));
+      assert.isUndefined(
+        yield* turn([
+          [ERROR_MESSAGE, poolDenial],
+          [PLANNER_RESPONSE, reply],
+        ]),
+      );
+      for (const payload of [
+        poolQuotaPayload(`API error (attempt 2): ${POOL_DENIAL}`),
+        poolQuotaPayload(`${POOL_DENIAL} [diagnostic suffix]`),
+        poolQuotaPayload(unrelated429),
+        poolQuotaPayload(unrelated429, POOL_DENIAL),
+        poolDenial.subarray(0, -1),
+      ]) {
+        const outcome = yield* turn([[ERROR_MESSAGE, payload]]);
+        assert.equal(outcome?.failure.class, "provider_error");
+        assert.isNull(outcome?.failure.code);
+      }
       assert.deepEqual(
         yield* turn([
           [USER_INPUT, input],
