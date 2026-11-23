@@ -30,6 +30,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSessionId,
+  ProjectId,
   RunId,
   ThreadId,
   type OrchestrationV2ProviderThread,
@@ -104,6 +105,7 @@ import {
 
 import { extractAntigravityCommand } from "../../provider/acp/AntigravityProtocol.ts";
 import { appendUserInputAttachmentPaths } from "../../provider/userInputAttachments.ts";
+import * as ServerSettings from "../../serverSettings.ts";
 
 import { makeGrokAcpAdapterFlavor } from "@t3tools/provider-grok/testing";
 import {
@@ -488,6 +490,7 @@ function makeMockRuntime(input: {
     | Readonly<Record<string, string>>
     | ((runtimeOrdinal: number) => Readonly<Record<string, string>>);
   readonly protocolEvents?: Queue.Queue<EffectAcpProtocol.AcpProtocolLogEvent>;
+  readonly requestLogger?: AcpSessionRuntime.AcpSessionRuntimeOptions["requestLogger"];
   readonly cancelBehavior?: AcpSessionRuntime.AcpSessionRuntimeOptions["cancelBehavior"];
   // Also opts into replay-idle readiness, which runtimes leave off by default.
   readonly sessionLoadReplayIdleGap?: Duration.Input;
@@ -530,6 +533,7 @@ function makeMockRuntime(input: {
       const context = yield* Layer.build(
         AcpSessionRuntime.layer({
           ...runtimeInput,
+          ...(input.requestLogger === undefined ? {} : { requestLogger: input.requestLogger }),
           ...(input.cancelBehavior === undefined ? {} : { cancelBehavior: input.cancelBehavior }),
           ...(input.sessionLoadReplayIdleGap === undefined
             ? {}
@@ -1140,6 +1144,118 @@ const optionValues = (question: OrchestrationV2UserInputQuestion | undefined) =>
 
 describe("AcpAdapterV2", () => {
   beforeAll(() => bundleAgents);
+
+  it.live.each(["during pre-send logging", "before verification"] as const)(
+    "serializes a project disable %s with Fleetix pool continuation prompt enqueue",
+    (timing) =>
+      Effect.gen(function* () {
+        const settings = yield* ServerSettings.ServerSettingsService;
+        const instanceId = ProviderInstanceId.make("antigravity");
+        const projectId = ProjectId.make("pool-project");
+        const threadId = ThreadId.make("pool-thread");
+        const route = "a".repeat(64);
+        const logging = yield* Deferred.make<void>();
+        const releaseLog = yield* Deferred.make<void>();
+        const disabled = yield* Deferred.make<void>();
+        const protocolEvents = yield* Queue.unbounded<EffectAcpProtocol.AcpProtocolLogEvent>();
+        const adapter = yield* makeAcpAdapterV2({
+          instanceId,
+          selfInvocation: yield* resolveSelfInvocation(),
+          flavor: {
+            driver: ProviderDriverKind.make("antigravity"),
+            capabilities: AcpProviderCapabilitiesV2,
+            fleetixPoolQuotaRoute: () => route,
+            makeRuntime: makeMockRuntime({
+              childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+              mockAgentPath: yield* bundledMockAgentPath,
+              environment: { T3_ACP_EMIT_TRACKED_TOOL_CALL_KIND_THEN_HANG: "execute" },
+              protocolEvents,
+              requestLogger: (event) =>
+                event.method === "session/prompt" && event.status === "started"
+                  ? Deferred.succeed(logging, undefined).pipe(
+                      Effect.andThen(Deferred.await(releaseLog)),
+                    )
+                  : Effect.void,
+            }),
+          },
+        });
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const modelSelection = { instanceId, model: "default" };
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("pool-session"),
+          modelSelection,
+          runtimePolicy,
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const disable = settings.updateSettings({
+          projectSettingsOverrides: {
+            [projectId]: { providerInstances: { [instanceId]: { enabled: false } } },
+          },
+        });
+        if (timing === "before verification") yield* disable;
+        yield* runtime.startTurn({
+          ...makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+          }),
+          withFleetixPoolQuotaRoute: (runtimeRoute, enqueue) =>
+            settings
+              .withSettingsSnapshot((snapshot) =>
+                runtimeRoute === route &&
+                snapshot.projectSettingsOverrides[projectId]?.providerInstances?.[instanceId]
+                  ?.enabled !== false
+                  ? enqueue
+                  : Effect.undefined,
+              )
+              .pipe(Effect.orElseSucceed(() => undefined)),
+        });
+        if (timing === "before verification") {
+          const terminal = yield* runtime.events.pipe(
+            Stream.filter((event) => event.type === "turn.terminal"),
+            Stream.runHead,
+          );
+          assert.equal(Option.getOrThrow(terminal).status, "failed");
+          assert.isFalse(yield* Deferred.isDone(logging));
+          assert.isFalse(
+            (yield* Queue.takeAll(protocolEvents)).some(
+              (event) =>
+                event.direction === "outgoing" && rawProtocolMethod(event) === "session/prompt",
+            ),
+          );
+          return;
+        }
+        yield* Deferred.await(logging);
+        const mutation = yield* disable.pipe(
+          Effect.tap(() => Deferred.succeed(disabled, undefined)),
+          Effect.forkChild({ startImmediately: true }),
+        );
+        assert.isFalse(yield* Deferred.isDone(disabled), "settings changed before prompt enqueue");
+        yield* Deferred.succeed(releaseLog, undefined);
+        yield* Fiber.join(mutation);
+        yield* Stream.fromQueue(protocolEvents).pipe(
+          Stream.filter(
+            (event) =>
+              event.direction === "incoming" &&
+              rawProtocolMethod(event) === "session/update" &&
+              typeof event.payload === "string" &&
+              event.payload.includes("tracked-tool-call"),
+          ),
+          Stream.runHead,
+        );
+      }).pipe(Effect.provide(Layer.merge(layerTest, ServerSettings.layerTest()))),
+  );
 
   it.live("keeps a completed tool's status when its linked ACP terminal streams output", () =>
     Effect.gen(function* () {

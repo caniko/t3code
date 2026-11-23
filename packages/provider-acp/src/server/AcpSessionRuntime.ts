@@ -1197,7 +1197,9 @@ export class AcpSessionRuntime extends Context.Service<
       options?: {
         readonly dispatched?: Deferred.Deferred<void>;
         readonly released?: Deferred.Deferred<void>;
-        readonly beforeDispatch?: Effect.Effect<void, EffectAcpErrors.AcpError>;
+        readonly withDispatch?: <A>(
+          enqueue: Effect.Effect<A>,
+        ) => Effect.Effect<A, EffectAcpErrors.AcpError>;
       },
     ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
     readonly cancel: Effect.Effect<void, EffectAcpErrors.AcpError>;
@@ -1275,7 +1277,7 @@ interface AcpActivePrompt {
 }
 
 // A fiber stopped before its call began never settles queued, so its end counts too.
-const awaitPromptQueued = (prompt: AcpActivePrompt) =>
+const awaitPromptQueued = (prompt: Pick<AcpActivePrompt, "fiber" | "queued">) =>
   Effect.raceFirst(Deferred.await(prompt.queued), Fiber.await(prompt.fiber).pipe(Effect.asVoid));
 
 export const make = Effect.fn("AcpSessionRuntime.make")(function* (
@@ -2885,8 +2887,6 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
             promptDispatchSemaphore.withPermit(
               Effect.gen(function* () {
                 const started = yield* getStartedState;
-                if (promptOptions?.beforeDispatch !== undefined)
-                  yield* promptOptions.beforeDispatch;
                 yield* closeActiveAssistantSegment({ queue: eventQueue, assistantSegmentRef });
                 yield* Ref.set(assistantUpdatesOpenRef, true);
                 const requestPayload = {
@@ -2895,7 +2895,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
                 } satisfies EffectAcpSchema.PromptRequest;
                 const completed = yield* Deferred.make<void>();
                 const queued = yield* Deferred.make<void>();
-                const fiber = yield* runLoggedRequest(
+                const request = runLoggedRequest(
                   "session/prompt",
                   requestPayload,
                   acp.agent
@@ -2904,6 +2904,23 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
                       Effect.provideService(EffectAcpProtocol.AcpOutgoingQueued, queued),
                       Effect.ensuring(Deferred.succeed(queued, undefined)),
                     ),
+                );
+                const dispatch = promptOptions?.withDispatch;
+                const fiber = yield* (
+                  dispatch === undefined
+                    ? request
+                    : dispatch(
+                        Effect.uninterruptibleMask((restore) =>
+                          Effect.gen(function* () {
+                            const fiber = yield* Effect.forkChild(request);
+                            yield* restore(awaitPromptQueued({ fiber, queued })).pipe(
+                              // Stop the sender before an interrupted dispatch releases the route.
+                              Effect.onInterrupt(() => Fiber.interrupt(fiber)),
+                            );
+                            return fiber;
+                          }),
+                        ),
+                      ).pipe(Effect.flatMap(Fiber.join))
                 ).pipe(Effect.forkIn(runtimeScope));
                 const active = { fiber, completed, queued } satisfies AcpActivePrompt;
                 yield* Ref.set(activePromptRef, Option.some(active));

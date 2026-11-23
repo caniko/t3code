@@ -654,7 +654,7 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly baseline?: Effect.Effect<void>;
   readonly providerTurnOrdinal: number;
   readonly nativeThreadHasTurns?: boolean;
-  readonly verifyFleetixPoolQuotaRoute?: ProviderAdapter.ProviderAdapterV2TurnInput["verifyFleetixPoolQuotaRoute"];
+  readonly withFleetixPoolQuotaRoute?: ProviderAdapter.ProviderAdapterV2TurnInput["withFleetixPoolQuotaRoute"];
   readonly resume?: boolean;
   readonly loadInheritedBackgroundTurnItems?: () => Effect.Effect<
     ReadonlyArray<InheritedBackgroundTurnItemRoute>,
@@ -2289,9 +2289,9 @@ export const layer: Layer.Layer<
           ...(input.nativeThreadHasTurns === undefined
             ? {}
             : { nativeThreadHasTurns: input.nativeThreadHasTurns }),
-          ...(input.verifyFleetixPoolQuotaRoute === undefined
+          ...(input.withFleetixPoolQuotaRoute === undefined
             ? {}
-            : { verifyFleetixPoolQuotaRoute: input.verifyFleetixPoolQuotaRoute }),
+            : { withFleetixPoolQuotaRoute: input.withFleetixPoolQuotaRoute }),
           ...(input.run.restartContinuationOfRunId === undefined
             ? {}
             : {
@@ -2321,7 +2321,7 @@ export const layer: Layer.Layer<
           input.message.text.trim().toLowerCase() === "/compact";
         const { message: _message, ...resumeInput } = turnInput;
         const startTurn =
-          input.verifyFleetixPoolQuotaRoute !== undefined && input.session.driver !== "antigravity"
+          input.withFleetixPoolQuotaRoute !== undefined && input.session.driver !== "antigravity"
             ? Effect.fail(
                 new ProviderAdapter.ProviderAdapterTurnStartError({
                   driver: input.session.driver,

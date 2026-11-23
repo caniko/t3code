@@ -10801,7 +10801,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     sequence: ++context.appContextSequence,
                   }
                 : undefined;
-            const verifyPoolRoute = turnInput.verifyFleetixPoolQuotaRoute;
+            const withPoolRoute = turnInput.withFleetixPoolQuotaRoute;
             yield* followPrompt(
               context,
               (superseded) =>
@@ -10812,28 +10812,33 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                         const sendingRuntime = runtime;
                         return sendingRuntime.prompt(
                           { prompt: promptParts!.prompt },
-                          verifyPoolRoute === undefined
+                          withPoolRoute === undefined
                             ? promptOptions
                             : {
                                 ...promptOptions,
-                                beforeDispatch: Effect.gen(function* () {
-                                  const verified = yield* verifyPoolRoute(
-                                    flavor.fleetixPoolQuotaRoute?.(sendingRuntime),
-                                  );
-                                  if (
-                                    !verified ||
-                                    runtime !== sendingRuntime ||
-                                    context.interrupted ||
-                                    context.finalized ||
-                                    superseded()
-                                  ) {
-                                    return yield* new EffectAcpErrors.AcpTransportError({
-                                      detail:
-                                        "The Fleetix pool route changed before automatic continuation.",
-                                      cause: "Fleetix pool route verification failed",
-                                    });
-                                  }
-                                }),
+                                withDispatch: Effect.fn("AcpAdapterV2.withFleetixPoolQuotaRoute")(
+                                  function* <A>(enqueue: Effect.Effect<A>) {
+                                    const dispatched = yield* withPoolRoute(
+                                      flavor.fleetixPoolQuotaRoute?.(sendingRuntime),
+                                      Effect.suspend(() =>
+                                        runtime !== sendingRuntime ||
+                                        context.interrupted ||
+                                        context.finalized ||
+                                        superseded()
+                                          ? Effect.undefined
+                                          : enqueue,
+                                      ),
+                                    );
+                                    if (dispatched === undefined) {
+                                      return yield* new EffectAcpErrors.AcpTransportError({
+                                        detail:
+                                          "The Fleetix pool route changed before automatic continuation.",
+                                        cause: "Fleetix pool route verification failed",
+                                      });
+                                    }
+                                    return dispatched;
+                                  },
+                                ),
                               },
                         );
                       },

@@ -440,8 +440,8 @@ it.layer(layerTest)("AntigravityDriver", (it) => {
             now: yield* DateTime.now,
             messageText: "Continue where you left off.",
           }),
-          verifyFleetixPoolQuotaRoute: (route: string | undefined) =>
-            Effect.succeed(route === expected),
+          withFleetixPoolQuotaRoute: (route, enqueue) =>
+            route === expected ? enqueue : Effect.undefined,
         });
         const terminal = yield* session.events.pipe(
           Stream.filter((event) => event.type === "turn.terminal"),

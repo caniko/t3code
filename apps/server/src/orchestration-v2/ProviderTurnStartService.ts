@@ -655,16 +655,17 @@ export const layer: Layer.Layer<
       const { providerInstanceId: continuationInstanceId } = run;
       const { projectId } = projection.thread;
       const expectedPoolRoute = limitFailure?.fleetixPoolQuotaRoute;
-      const verifyFleetixPoolQuotaRoute: ProviderAdapter.ProviderAdapterV2TurnInput["verifyFleetixPoolQuotaRoute"] =
+      const withFleetixPoolQuotaRoute: ProviderAdapter.ProviderAdapterV2TurnInput["withFleetixPoolQuotaRoute"] =
         limitedRunId != null && (limitFailure == null || limitFailure.code === "FLEETIX_POOL_QUOTA")
-          ? Effect.fn("ProviderTurnStartService.verifyFleetixPoolQuotaRoute")(function* (route) {
-              if (route === undefined || route !== expectedPoolRoute) return false;
-              const current = yield* (
-                providerSessions.getFleetixPoolQuotaRoute?.(continuationInstanceId, projectId) ??
-                  Effect.undefined
-              );
-              return route === current;
-            })
+          ? (route, enqueue) =>
+              route !== undefined && route === expectedPoolRoute
+                ? (providerSessions.withFleetixPoolQuotaRoute?.(
+                    continuationInstanceId,
+                    projectId,
+                    route,
+                    enqueue,
+                  ) ?? Effect.undefined)
+                : Effect.undefined
           : undefined;
       const rootNode = projection.nodes.find((candidate) => candidate.id === run.rootNodeId);
       const attempt = projection.attempts.find((candidate) => candidate.id === run.activeAttemptId);
@@ -2304,7 +2305,7 @@ export const layer: Layer.Layer<
         expectedStatus: "starting",
         events,
         // A continuation can be reissued after a crash only until it reaches running.
-        ...(verifyFleetixPoolQuotaRoute === undefined || limitedRunId == null
+        ...(withFleetixPoolQuotaRoute === undefined || limitedRunId == null
           ? {}
           : {
               disarmLimitRecovery: {
@@ -2520,7 +2521,7 @@ export const layer: Layer.Layer<
           (legacyInputRunIds.size > 0 &&
             sameNativeThread &&
             !acceptedAttempts.some((source) => source.nativeThreadId !== undefined)),
-        ...(verifyFleetixPoolQuotaRoute === undefined ? {} : { verifyFleetixPoolQuotaRoute }),
+        ...(withFleetixPoolQuotaRoute === undefined ? {} : { withFleetixPoolQuotaRoute }),
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
         shouldFinalizeRun: runControls.shouldFinalizeRun,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,

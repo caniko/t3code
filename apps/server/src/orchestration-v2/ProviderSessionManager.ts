@@ -244,10 +244,12 @@ export type ProviderSessionManagerV2Error = typeof ProviderSessionManagerV2Error
 
 export interface ProviderSessionManagerV2Shape {
   readonly shutdown: Effect.Effect<void>;
-  readonly getFleetixPoolQuotaRoute?: (
+  readonly withFleetixPoolQuotaRoute?: <A>(
     instanceId: ProviderInstanceId,
     projectId: OrchestrationV2AppThread["projectId"],
-  ) => Effect.Effect<string | undefined>;
+    expectedRoute: string,
+    enqueue: Effect.Effect<A>,
+  ) => Effect.Effect<A | undefined>;
   readonly open: (input: {
     readonly threadId: ThreadId;
     readonly providerSessionId: ProviderSessionId;
@@ -3241,14 +3243,22 @@ export const layerWithOptions = (
 
       return ProviderSessionManagerV2.of({
         shutdown,
-        getFleetixPoolQuotaRoute: Effect.fn("ProviderSessionManagerV2.getFleetixPoolQuotaRoute")(
-          function* (instanceId, projectId) {
+        withFleetixPoolQuotaRoute: Effect.fn("ProviderSessionManagerV2.withFleetixPoolQuotaRoute")(
+          function* <A>(
+            instanceId: ProviderInstanceId,
+            projectId: OrchestrationV2AppThread["projectId"],
+            expectedRoute: string,
+            enqueue: Effect.Effect<A>,
+          ) {
             if (Option.isNone(serverSettings)) return;
             return yield* serverSettings.value
-              .withSettingsSnapshot(
-                (settings) =>
+              .withSettingsSnapshot((settings) =>
+                (
                   registry.getFleetixPoolQuotaRoute?.(instanceId, settings, projectId) ??
-                  Effect.undefined,
+                  Effect.undefined
+                ).pipe(
+                  Effect.flatMap((route) => (route === expectedRoute ? enqueue : Effect.undefined)),
+                ),
               )
               .pipe(Effect.orElseSucceed(() => undefined));
           },
