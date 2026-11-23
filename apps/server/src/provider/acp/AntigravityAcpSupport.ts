@@ -44,7 +44,6 @@ export interface AntigravityAcpRuntimeInput extends Omit<
   | "clientCapabilities"
   | "clientInfo"
   | "onStderr"
-  | "resumeMethod"
   | "sessionMeta"
   | "transformSessionUpdate"
   | "transformStdout"
@@ -122,7 +121,7 @@ export const makeAntigravityAcpRuntime = Effect.fn("makeAntigravityAcpRuntime")(
       ...input,
       authMethodId: input.authMethod ?? "oauth-personal",
       authenticateEagerly: true,
-      resumeMethod: "resume",
+      resumeMethod: input.resumeMethod ?? "resume",
       cancelBehavior: "wait-for-prompt",
       clientInfo: { name: "t3-code", title: "T3 Code", version: packageJson.version },
       sessionMeta: (initializeResult) =>

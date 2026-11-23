@@ -144,6 +144,23 @@ it("preserves actionable T3 errors wrapped by turn startup", () => {
   );
 });
 
+it("reports a closed provider runtime as retryable without exposing transport output", () => {
+  const cause = {
+    _tag: "AcpTransportError",
+    detail: "private transport output",
+    cause: { _tag: "ProviderSessionRuntimeClosedError", message: "private upstream message" },
+  };
+  const failure = makeProviderFailure({ cause: Cause.fail(cause) });
+  assert.equal(failure.class, "transport_error");
+  assert.equal(failure.retryable, true);
+  assert.include(failure.message, "Retry the turn");
+  assert.notInclude(failure.message, "private");
+  assert.equal(
+    makeProviderFailure({ cause: { ...cause, cause: undefined } }).message,
+    "Provider turn failed.",
+  );
+});
+
 it("names how the provider process exited and the stage it failed in, without its output", () => {
   for (const [exit, status] of [
     [{ signal: "SIGILL" }, " after signal SIGILL"],

@@ -3529,6 +3529,32 @@ describe("AcpRegistryAdapterV2", () => {
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
+  it.effect("fails an unlinked Claude child before the root turn fails on process exit", () =>
+    Effect.gen(function* () {
+      const session = yield* openClaudeReplaySession([
+        ...claudeFrames.open,
+        ...claudeFrames.prompt(1),
+        claudeChild[0]!,
+        claudeMarker("unlinked child ready"),
+      ]);
+      yield* session.runtime.startTurn(session.turnInput(1));
+      const beforeExit = yield* session.throughMarker("unlinked child ready");
+      assert.isTrue(
+        beforeExit.some(
+          (event) => event.type === "subagent.updated" && event.subagent.status === "running",
+        ),
+      );
+      yield* session.terminate();
+      const afterExit = yield* session.until((event) => event.type === "turn.terminal");
+      assert.isTrue(
+        afterExit.some(
+          (event) => event.type === "subagent.updated" && event.subagent.status === "failed",
+        ),
+      );
+      assert.isFalse(yield* session.runtime.hasPendingBackgroundWork!);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("fails active Claude work and releases its children when the process exits", () =>
     Effect.gen(function* () {
       const session = yield* openClaudeReplaySession([
@@ -3844,16 +3870,16 @@ describe("AcpRegistryAdapterV2", () => {
         type: "emit_inbound",
         frame: { kind: "response", method, ...response },
       });
-      const start = (sessionId: string) => [
+      const initialize = [
         request("initialize"),
         respond("initialize", {
           result: { protocolVersion: 1, agentCapabilities: { loadSession: true } },
         }),
-        request("session/new"),
-        respond("session/new", { result: { sessionId } }),
       ];
       const failedPrompt = [
-        ...start("copilot-session"),
+        ...initialize,
+        request("session/new"),
+        respond("session/new", { result: { sessionId: "copilot-session" } }),
         request("session/prompt"),
         respond("session/prompt", { error }),
       ];
@@ -3865,7 +3891,7 @@ describe("AcpRegistryAdapterV2", () => {
         ? [
             failedPrompt,
             [
-              ...start("replacement-session"),
+              ...initialize,
               request("session/load", {
                 sessionId: "copilot-session",
                 cwd: "<workspace>",

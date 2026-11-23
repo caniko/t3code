@@ -33,6 +33,7 @@ import { AgentScope, AgentScopeThreadId, RAISE_OOM_SCORE_LINE } from "@t3tools/s
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { windowsSystem32Path } from "@t3tools/shared/windowsSystem";
 
+import { ProviderSessionRuntimeClosedError } from "@t3tools/provider-core/server/failure";
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
 import { appendAcpStderrTail, sanitizeAcpStderrExcerpt } from "./stderr.ts";
 import {
@@ -74,6 +75,7 @@ export interface AcpSessionEventStreamBarrier {
 export type AcpSessionRuntimeEvent =
   | AcpParsedSessionEvent
   | AcpSessionEventStreamBarrier
+  | { readonly _tag: "RuntimeClosed" }
   | {
       readonly _tag: "ConnectionTerminated";
       readonly error: EffectAcpErrors.AcpError;
@@ -1149,6 +1151,7 @@ export class AcpSessionRuntime extends Context.Service<
     >;
     readonly authenticate?: (methodId: string) => Effect.Effect<void, EffectAcpErrors.AcpError>;
     readonly start: () => Effect.Effect<AcpSessionRuntimeStartResult, EffectAcpErrors.AcpError>;
+    readonly isClosed: Effect.Effect<boolean>;
     readonly getEvents: () => Stream.Stream<AcpSessionRuntimeEvent, never>;
     readonly drainEvents: Effect.Effect<void>;
     readonly getModeState: Effect.Effect<AcpSessionModeState | undefined>;
@@ -1290,7 +1293,8 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
   const random = yield* SecureRandom.SecureRandom;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const hostPlatform = yield* HostProcess.Platform;
-  const runtimeScope = yield* Scope.fork(yield* Scope.Scope);
+  const ownerScope = yield* Scope.Scope;
+  const runtimeScope = yield* Scope.fork(ownerScope);
   const eventQueue = yield* Queue.unbounded<AcpSessionRuntimeEvent>();
   const modeStateRef = yield* Ref.make<AcpSessionModeState | undefined>(undefined);
   const toolCallsRef = yield* Ref.make(new Map<string, AcpToolCallTrackedState>());
@@ -1315,7 +1319,6 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
   const terminationErrorRef = yield* Ref.make<Option.Option<EffectAcpErrors.AcpError>>(
     Option.none(),
   );
-  const stoppingRef = yield* Ref.make(false);
   const terminationRecorded = yield* Deferred.make<void>();
   const stderrFailure = yield* Deferred.make<never, EffectAcpErrors.AcpError>();
   const stderrTailRef = yield* Ref.make("");
@@ -1346,15 +1349,26 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
   // mode state unchanged.
   const sessionChangeCountRef = yield* Ref.make(0);
 
+  const isStopping = Effect.gen(function* () {
+    // Scope.close marks the scope closed before interrupting its prompt fibers.
+    return (
+      ownerScope.state._tag === "Closed" ||
+      runtimeScope.state._tag === "Closed" ||
+      (yield* Deferred.isDone(runtimeClosed))
+    );
+  });
+  const isClosed = Effect.gen(function* () {
+    return (yield* isStopping) || Option.isSome(yield* Ref.get(terminationErrorRef));
+  });
   const ensureConnected = Effect.gen(function* () {
     const error = yield* Ref.get(terminationErrorRef);
     if (Option.isSome(error)) {
       return yield* error.value;
     }
-    if (yield* Ref.get(stoppingRef)) {
+    if (yield* isStopping) {
       return yield* new EffectAcpErrors.AcpTransportError({
         detail: "The ACP session runtime is closed.",
-        cause: undefined,
+        cause: new ProviderSessionRuntimeClosedError(),
       });
     }
   });
@@ -1385,7 +1399,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
   const recordTermination = Effect.fn("AcpSessionRuntime.recordTermination")(function* (
     error: EffectAcpErrors.AcpError,
   ) {
-    if (yield* Ref.get(stoppingRef)) {
+    if (yield* isStopping) {
       return;
     }
     const enriched = yield* enrichProcessExitWithStderr(error);
@@ -1889,7 +1903,15 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
   );
   yield* Scope.addFinalizer(
     runtimeScope,
-    Ref.set(stoppingRef, true).pipe(Effect.andThen(Deferred.succeed(runtimeClosed, undefined))),
+    Deferred.succeed(runtimeClosed, undefined).pipe(
+      Effect.andThen(
+        Effect.gen(function* () {
+          if (Option.isNone(yield* Ref.get(terminationErrorRef))) {
+            yield* Queue.offer(eventQueue, { _tag: "RuntimeClosed" });
+          }
+        }),
+      ),
+    ),
   );
   const initializeClientCapabilities = {
     fs: {
@@ -2088,7 +2110,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
         current.value.response !== lateFiber ||
         startState._tag !== "Started" ||
         startState.result !== started ||
-        (yield* Ref.get(stoppingRef)) ||
+        (yield* isStopping) ||
         (yield* SubscriptionRef.get(configOptionsRef)) !== provisionalConfigOptions ||
         (yield* Ref.get(modeStateRef)) !== provisionalModeState ||
         (yield* Ref.get(sessionChangeCountRef)) !== baselineChangeCount
@@ -2480,7 +2502,10 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
             mcpServers: sessionMcpServers(initializeResult),
           } satisfies EffectAcpSchema.LoadSessionRequest;
           sessionSetupResult = yield* runLoadSessionWithReplayIdle(loadPayload, initializeResult);
-        } else if (initializeResult.agentCapabilities?.sessionCapabilities?.resume != null) {
+        } else if (
+          options.resumeMethod !== "load" &&
+          initializeResult.agentCapabilities?.sessionCapabilities?.resume != null
+        ) {
           const resumePayload = {
             sessionId,
             cwd: options.cwd,
@@ -2595,7 +2620,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
   });
 
   const drainEvents = Effect.gen(function* () {
-    if (yield* Ref.get(stoppingRef)) {
+    if (yield* isStopping) {
       return;
     }
     const acknowledge = yield* Deferred.make<void>();
@@ -2625,7 +2650,9 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
       Effect.catchCauseIf(
         (cause) => options.cancelBehavior !== "wait-for-prompt" && Cause.hasInterruptsOnly(cause),
         (_cause) =>
-          Effect.succeed({ stopReason: "cancelled" } satisfies EffectAcpSchema.PromptResponse),
+          ensureConnected.pipe(
+            Effect.as({ stopReason: "cancelled" } satisfies EffectAcpSchema.PromptResponse),
+          ),
       ),
     );
 
@@ -2717,6 +2744,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
         Effect.asVoid,
       ),
     start: () => start,
+    isClosed,
     getEvents: () => Stream.fromQueue(eventQueue),
     drainEvents,
     getModeState: Ref.get(modeStateRef),
@@ -2960,6 +2988,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
                   options.cancelBehavior === "wait-for-prompt" &&
                   Exit.isFailure(result) &&
                   Cause.hasInterrupts(result.cause) &&
+                  !(yield* isStopping) &&
                   (yield* Deferred.isDone(activePrompt.queued))
                 ) {
                   yield* retireRuntime(

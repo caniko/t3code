@@ -343,7 +343,8 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
         available,
         Array.from({ length: Math.min(64, Math.max(0, Math.floor(count))) }, () => undefined),
       ).pipe(Effect.asVoid);
-    // Retry backoff must block later effects so turns cannot race a pending rollback.
+    const urgentControlTypes = sql`('provider-turn.interrupt', 'runtime-request.respond')`;
+    // A running steer can need a control before it releases the thread's queue.
     const claimableCandidatePredicate = (
       availableBefore?: string,
       excludeRestartContinuations = false,
@@ -360,6 +361,25 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
           SELECT 1
           FROM orchestration_v2_effect_outbox AS active
           WHERE active.thread_id = candidate.thread_id
+            AND NOT (
+              candidate.effect_type IN ${urgentControlTypes}
+              AND (
+                (active.status = 'running' AND active.effect_type = 'provider-turn.steer')
+                OR (
+                  active.status = 'pending'
+                  AND active.effect_type NOT IN ${urgentControlTypes}
+                  AND active.effect_type != 'provider-turn.steer'
+                  AND EXISTS (
+                    SELECT 1
+                    FROM orchestration_v2_effect_outbox AS steer
+                    WHERE steer.thread_id = active.thread_id
+                      AND steer.rowid < active.rowid
+                      AND steer.effect_type = 'provider-turn.steer'
+                      AND steer.status = 'running'
+                  )
+                )
+              )
+            )
             AND (
               active.status = 'running'
               OR (

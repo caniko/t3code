@@ -60,6 +60,7 @@ const omitInitializeModelState = process.env.T3_ACP_OMIT_INITIALIZE_MODEL_STATE 
 const completeFirstPromptOnCancel = process.env.T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL === "1";
 const floodStderr = process.env.T3_ACP_FLOOD_STDERR === "1";
 const hangPromptForever = process.env.T3_ACP_HANG_PROMPT_FOREVER === "1";
+const busySecondPrompt = process.env.T3_ACP_BUSY_SECOND_PROMPT === "1";
 const agentVersion = process.env.T3_ACP_AGENT_VERSION ?? "0.0.0";
 const geminiApiKey = process.env.GEMINI_API_KEY;
 const idleError = process.env.T3_ACP_IDLE_ERROR;
@@ -962,7 +963,7 @@ const program = Effect.gen(function* () {
     Effect.gen(function* () {
       const cancelledSessionId = String(sessionId ?? "mock-session-1");
       cancelledSessions.add(cancelledSessionId);
-      if (completeFirstPromptOnCancel) {
+      if (completeFirstPromptOnCancel || busySecondPrompt) {
         yield* Deferred.succeed(nativeCancelRequested, undefined);
         yield* agent.client.sessionUpdate({
           sessionId: cancelledSessionId,
@@ -986,6 +987,34 @@ const program = Effect.gen(function* () {
       }
       beginAcpMockPrompt(cancelledSessions, requestedSessionId);
       promptCount += 1;
+      if (busySecondPrompt) {
+        if (promptCount === 2) {
+          return yield* AcpError.AcpRequestError.internalError("Agent is already processing");
+        }
+        if (promptCount === 3) {
+          yield* Deferred.await(nativeCancelRequested);
+          return yield* finishPrompt(requestedSessionId, "cancelled");
+        }
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "busy-steer-command",
+            title: "Long command",
+            kind: "execute",
+            status: "in_progress",
+            rawInput: { CommandLine: "long-command" },
+          },
+        });
+        yield* agent.client.sessionUpdate({
+          sessionId: requestedSessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "Waiting for the long command." },
+          },
+        });
+        return yield* finishPrompt(requestedSessionId, "end_turn");
+      }
       if (idleError === "grok-background" && promptCount === 1) {
         // The structured completion lands before the prompt settles, so it is buffered.
         const taskId = "call-idle-error-background";

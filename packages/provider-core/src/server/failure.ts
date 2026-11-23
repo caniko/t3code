@@ -38,6 +38,15 @@ export class ContextHandoffBackgroundWorkError extends Schema.TaggedError<Contex
   }
 }
 
+export class ProviderSessionRuntimeClosedError extends Schema.TaggedError<
+  ProviderSessionRuntimeClosedError,
+  { readonly brand: unique symbol }
+>()("ProviderSessionRuntimeClosedError", { cause: Schema.optionalKey(Schema.Defect()) }) {
+  override get message() {
+    return "The provider session closed. If you were signing in or out, finish that first. Retry the turn to reconnect.";
+  }
+}
+
 export const MAX_PROVIDER_FAILURE_MESSAGE_LENGTH = 4_096;
 const MAX_PROVIDER_FAILURE_CODE_LENGTH = 128;
 
@@ -108,6 +117,7 @@ const PROVIDER_FAILURE_REASONS: Record<ProviderAdapterFailureReason, string> = {
 function curatedCauseMessages(cause: unknown): {
   readonly known: string | undefined;
   readonly category: string | undefined;
+  readonly runtimeClosed?: true;
 } {
   const seen = new Set<unknown>();
   let category: (typeof PROVIDER_FAILURE_CATEGORIES)[string];
@@ -130,6 +140,12 @@ function curatedCauseMessages(cause: unknown): {
       switch (tag) {
         case "ContextHandoffBudgetError":
           return { known: new ContextHandoffBudgetError().message, category: categoryMessage() };
+        case "ProviderSessionRuntimeClosedError":
+          return {
+            known: new ProviderSessionRuntimeClosedError().message,
+            category: categoryMessage(),
+            runtimeClosed: true,
+          };
         case "ContextHandoffBackgroundWorkError":
           return {
             known: new ContextHandoffBackgroundWorkError().message,
@@ -349,10 +365,10 @@ export function makeProviderFailure(input: {
   const verificationUrl = Option.getOrUndefined(decodeVerificationUrl(input.verificationUrl));
 
   return {
-    class: input.class ?? "unknown",
+    class: input.class ?? (curated.runtimeClosed ? "transport_error" : "unknown"),
     message: message || DEFAULT_PROVIDER_FAILURE_MESSAGE,
     code,
-    retryable: requestTooLarge ? false : (input.retryable ?? null),
+    retryable: requestTooLarge ? false : (input.retryable ?? (curated.runtimeClosed ? true : null)),
     ...(input.class === "usage_limit" &&
     input.resetAt != null &&
     Number.isFinite(Date.parse(input.resetAt))

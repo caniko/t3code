@@ -1561,6 +1561,7 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
   const steered = yield* Deferred.make<void>();
   const releaseSteer = yield* Deferred.make<void>();
   let terminate: AntigravityAdapterV2RuntimeInput["onTermination"];
+  let stop: Effect.Effect<void>;
   const usage = { sessionUpdate: "usage_update", used: 9000, size: 1048576 } as const;
   const offers: Array<ProviderContinuationRequests.ProviderContinuationRequest> = [];
   const scheduledFinalizes = yield* Queue.unbounded<Duration.Input>();
@@ -1641,7 +1642,10 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
         })),
       );
     },
-    withProcess: (_stop, task) => task,
+    withProcess: (close, task) =>
+      Effect.sync(() => {
+        stop = close;
+      }).pipe(Effect.andThen(task)),
     defaultModel: Effect.undefined,
     ...(profileDirectory === undefined ? {} : { profileDirectory }),
   };
@@ -1765,6 +1769,7 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
         : requestPermission(...args),
     cancels: () => cancels,
     prompts,
+    steerStarted: Deferred.await(steered),
     releaseSteer: Deferred.succeed(releaseSteer, undefined),
     runtimeDies: Effect.suspend(
       () =>
@@ -1772,6 +1777,7 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
           new EffectAcpErrors.AcpTransportError({ detail: "agent exited", cause: "exit" }),
         ) ?? Effect.die("the adapter must watch its runtime"),
     ),
+    closeRuntime: Effect.suspend(() => stop),
   };
 });
 
@@ -1993,6 +1999,20 @@ describe("AntigravityAdapterV2 work after the prompt ends", () => {
       yield* TestClock.adjust("3 seconds");
       const run = yield* until((event) => event.type === "turn.terminal");
       assert.include(JSON.stringify(run), "Here is the chart.", "the question kept the run open");
+    }).pipe(Effect.provide(layerSession)),
+  );
+
+  it.effect("fails a turn held by background work when its runtime is closed", () =>
+    Effect.gen(function* () {
+      const { startTurn, throughPromptSettled, closeRuntime, throughTerminal } =
+        yield* openSessionWithRunningCommand({ WaitMsBeforeAsync: 10000 });
+      yield* startTurn(1, false);
+      yield* throughPromptSettled;
+      yield* closeRuntime;
+      const terminal = (yield* throughTerminal).at(-1);
+      assert(terminal?.type === "turn.terminal" && terminal.status === "failed");
+      assert.equal(terminal.failure.class, "transport_error");
+      assert.equal(terminal.failure.retryable, true);
     }).pipe(Effect.provide(layerSession)),
   );
 
@@ -2347,19 +2367,22 @@ describe("AntigravityAdapterV2 work after the prompt ends", () => {
         rawInput: { Role: "Artist", Prompt: "Paint the scooter" },
       });
 
-      yield* session.steerTurn({
-        threadId: ThreadId.make("thread-antigravity-wake"),
-        runId: RunId.make("run-antigravity-wake-1"),
-        providerThread,
-        providerTurnId,
-        message: {
-          messageId: MessageId.make("message-antigravity-steer"),
-          text: "Use opus subagents from now on",
-          attachments: [],
-          createdBy: "user",
-          creationSource: "web",
-        },
-      });
+      const steer = yield* session
+        .steerTurn({
+          threadId: ThreadId.make("thread-antigravity-wake"),
+          runId: RunId.make("run-antigravity-wake-1"),
+          providerThread,
+          providerTurnId,
+          message: {
+            messageId: MessageId.make("message-antigravity-steer"),
+            text: "Use opus subagents from now on",
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+          },
+        })
+        .pipe(Effect.forkScoped);
+      yield* opened.steerStarted;
       assert.equal(opened.cancels(), 0, "a steer must not cancel the agent's work");
       assert.lengthOf(opened.prompts, 2);
       assert.deepEqual(opened.prompts[1]!.prompt, [
@@ -2384,6 +2407,7 @@ describe("AntigravityAdapterV2 work after the prompt ends", () => {
       });
       yield* send(usage);
       yield* opened.releaseSteer;
+      yield* Fiber.join(steer);
       const run = [...started, ...(yield* until((event) => event.type === "turn.terminal"))];
       const terminal = run.at(-1);
       assert.equal(terminal?.type === "turn.terminal" && terminal.status, "completed");
@@ -2448,11 +2472,8 @@ describe("AntigravityAdapterV2 work after the prompt ends", () => {
             creationSource: "web",
           },
         })
-        .pipe(Effect.exit);
-      assert.isTrue(
-        Exit.isSuccess(steer),
-        `a working wake run must accept a steer: ${String(Exit.isFailure(steer) && steer.cause)}`,
-      );
+        .pipe(Effect.exit, Effect.forkScoped);
+      yield* opened.steerStarted;
       assert.equal(opened.cancels(), 0, "a steer must not cancel the agent's work");
       assert.lengthOf(opened.prompts, 2);
       assert.deepEqual(opened.prompts[1]!.prompt, [{ type: "text", text: "Skip the build" }]);
@@ -2466,6 +2487,7 @@ describe("AntigravityAdapterV2 work after the prompt ends", () => {
         "failed",
         "a silent steer prompt must still hit the inactivity timeout",
       );
+      assert(Exit.isFailure(yield* Fiber.join(steer)));
     }).pipe(Effect.provide(layerSession)),
   );
 
@@ -2502,19 +2524,22 @@ describe("AntigravityAdapterV2 work after the prompt ends", () => {
       )[0]!;
       yield* TestClock.adjust("10 minutes");
 
-      yield* session.steerTurn({
-        threadId: ThreadId.make("thread-antigravity-wake"),
-        runId: RunId.make("run-antigravity-wake-1"),
-        providerThread,
-        providerTurnId,
-        message: {
-          messageId: MessageId.make("message-antigravity-steer"),
-          text: "Also check the footnotes",
-          attachments: [],
-          createdBy: "user",
-          creationSource: "web",
-        },
-      });
+      const steer = yield* session
+        .steerTurn({
+          threadId: ThreadId.make("thread-antigravity-wake"),
+          runId: RunId.make("run-antigravity-wake-1"),
+          providerThread,
+          providerTurnId,
+          message: {
+            messageId: MessageId.make("message-antigravity-steer"),
+            text: "Also check the footnotes",
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+          },
+        })
+        .pipe(Effect.forkScoped);
+      yield* opened.steerStarted;
       assert.equal(opened.cancels(), 0, "a steer must not cancel the agent's subagents");
       assert.lengthOf(opened.prompts, 2);
       yield* write(records("mock-session-1", "messages"), "report.json", { sender: "child-1" });
@@ -2524,6 +2549,7 @@ describe("AntigravityAdapterV2 work after the prompt ends", () => {
       });
       yield* send(usage);
       yield* opened.releaseSteer;
+      yield* Fiber.join(steer);
       const run = [...prompt, ...(yield* until((event) => event.type === "turn.terminal"))];
       const terminal = run.at(-1);
       assert.equal(terminal?.type === "turn.terminal" && terminal.status, "completed");
@@ -3373,10 +3399,17 @@ describe("AntigravityAdapterV2 runtime mode ceiling", () => {
     }).pipe(Effect.provide(layerSession), Effect.scoped),
   );
 
-  it.effect.each([
-    { expected: "resume", loadOnly: false },
-    { expected: "load", loadOnly: true },
-  ])("reactivates the session after a runtime restart with $expected", ({ expected, loadOnly }) =>
+  it.live.each([
+    { closure: "reported exit", expected: "resume" },
+    { closure: "reported exit", expected: "load" },
+    { closure: "idle", expected: "resume" },
+    { closure: "before snapshot", expected: "load" },
+    { closure: "before prompt", expected: "resume" },
+    { closure: "during prompt", expected: "resume" },
+    { closure: "concurrent resume", expected: "resume" },
+    { closure: "before steer is queued", expected: "resume" },
+    { closure: "stop during a busy steer retry", expected: "resume" },
+  ])("recovers with $expected ($closure)", ({ closure, expected }) =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
       const path = yield* Path.Path;
@@ -3385,31 +3418,115 @@ describe("AntigravityAdapterV2 runtime mode ceiling", () => {
         new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
       );
       type RuntimeService = AcpSessionRuntime.AcpSessionRuntime["Service"];
-      const activations: Array<string> = [];
+      const replacementStartup: Array<string> = [];
       let terminate: AntigravityAdapterV2RuntimeInput["onTermination"];
+      let stop: Effect.Effect<void>;
+      let runtimes = 0;
+      const promptStarted = yield* Deferred.make<void>();
+      const releasePromptCallback = yield* Deferred.make<void>();
+      const steerBeforeQueue = yield* Deferred.make<void>();
+      const releaseRetry = yield* Deferred.make<void>();
+      const firstPromptSettled = yield* Deferred.make<void>();
+      const cancelEntered = yield* Deferred.make<void>();
+      const cancelSent = yield* Deferred.make<void>();
+      const outgoing: string[] = [];
+      const busySteer = closure === "stop during a busy steer retry";
+      const concurrentResume = closure === "concurrent resume";
+      const interruptedSteer = closure === "before steer is queued" || busySteer;
+      let firstRuntimeService: RuntimeService | undefined;
       const instanceId = ProviderInstanceId.make("antigravity-restart-resume-test");
-      const adapter = yield* makeAntigravityAdapterV2({
+      const options: AntigravityAdapterV2Options = {
         instanceId,
         selfInvocation: yield* resolveSelfInvocation(),
         makeRuntime: (input) => {
-          terminate = input.onTermination;
+          const firstRuntime = ++runtimes === 1;
+          let prompts = 0;
+          if (firstRuntime) terminate = input.onTermination;
           return makeAntigravityAcpRuntime({
             ...input,
+            ...(firstRuntime && concurrentResume ? { onTermination: () => Effect.void } : {}),
+            requestLogger: (event) => {
+              if (event.status !== "started") return Effect.void;
+              if (!firstRuntime) {
+                if (
+                  ["initialize", "session/new", "session/load", "session/resume"].includes(
+                    event.method,
+                  )
+                ) {
+                  replacementStartup.push(event.method);
+                }
+                return Effect.void;
+              }
+              if (event.method !== "session/prompt") return Effect.void;
+              if (++prompts === (busySteer ? 3 : 2) && interruptedSteer) {
+                return Deferred.succeed(steerBeforeQueue, undefined).pipe(
+                  Effect.andThen(busySteer ? Deferred.await(releaseRetry) : Effect.never),
+                );
+              }
+              return Deferred.succeed(promptStarted, undefined).pipe(Effect.asVoid);
+            },
+            ...(busySteer
+              ? {
+                  protocolLogging: {
+                    logOutgoing: true,
+                    logger: (event) =>
+                      Effect.gen(function* () {
+                        if (
+                          event.direction !== "outgoing" ||
+                          event.stage !== "raw" ||
+                          typeof event.payload !== "string"
+                        )
+                          return;
+                        for (const method of ["session/prompt", "session/cancel"]) {
+                          if (event.payload.includes(`"method":"${method}"`)) {
+                            outgoing.push(method);
+                            if (method === "session/cancel")
+                              yield* Deferred.succeed(cancelSent, undefined);
+                          }
+                        }
+                      }),
+                  },
+                }
+              : {}),
             childProcessSpawner,
             spawn: {
               command: process.execPath,
               args: [mockAgentPath],
               cwd: input.cwd,
-              env: { T3_ACP_ANTIGRAVITY: "1" },
+              env: {
+                T3_ACP_ANTIGRAVITY: "1",
+                ...(firstRuntime &&
+                (closure === "during prompt" ||
+                  concurrentResume ||
+                  (interruptedSteer && !busySteer))
+                  ? { T3_ACP_HANG_PROMPT_FOREVER: "1" }
+                  : {}),
+                ...(interruptedSteer ? { T3_ACP_AGENT_VERSION: "1.5.11" } : {}),
+                ...(busySteer ? { T3_ACP_BUSY_SECOND_PROMPT: "1" } : {}),
+              },
             },
           }).pipe(
             Effect.provideService(SecureRandom.SecureRandom, crypto),
+            Effect.tap((runtime) =>
+              Effect.sync(() => {
+                if (firstRuntime) firstRuntimeService = runtime;
+              }),
+            ),
             Effect.map((runtime): RuntimeService => ({
               ...runtime,
+              getEvents: () =>
+                firstRuntime && concurrentResume
+                  ? runtime
+                      .getEvents()
+                      .pipe(Stream.filter((event) => event._tag !== "RuntimeClosed"))
+                  : runtime.getEvents(),
+              cancel: busySteer
+                ? Deferred.succeed(cancelEntered, undefined).pipe(Effect.andThen(runtime.cancel))
+                : runtime.cancel,
               start: () =>
                 runtime.start().pipe(
                   Effect.map((started) =>
-                    loadOnly
+                    expected === "load" && closure !== "before snapshot"
                       ? {
                           ...started,
                           initializeResult: {
@@ -3420,23 +3537,79 @@ describe("AntigravityAdapterV2 runtime mode ceiling", () => {
                             },
                           },
                         }
-                      : started,
+                      : concurrentResume && !firstRuntime
+                        ? {
+                            ...started,
+                            initializeResult: { ...started.initializeResult, protocolVersion: 1 },
+                          }
+                        : started,
                   ),
                 ),
-              loadSession: (sessionId, options) =>
-                Effect.sync(() => void activations.push("load")).pipe(
-                  Effect.andThen(runtime.loadSession(sessionId, options)),
-                ),
-              resumeSession: (sessionId, options) =>
-                Effect.sync(() => void activations.push("resume")).pipe(
-                  Effect.andThen(runtime.resumeSession(sessionId, options)),
-                ),
+              prompt: (payload, options) => {
+                const prompt = runtime.prompt(payload, options);
+                if (!firstRuntime) return prompt;
+                if (busySteer) {
+                  return prompt.pipe(
+                    Effect.tap(() => Deferred.succeed(firstPromptSettled, undefined)),
+                  );
+                }
+                if (closure === "before prompt") return stop.pipe(Effect.andThen(prompt));
+                return concurrentResume
+                  ? prompt.pipe(
+                      Effect.onExit(() =>
+                        Effect.interruptible(Deferred.await(releasePromptCallback)),
+                      ),
+                    )
+                  : prompt;
+              },
             })),
           );
         },
-        withProcess: (_stop, task) => task,
+        withProcess: (close, task) =>
+          Effect.sync(() => {
+            stop = close;
+          }).pipe(Effect.andThen(task)),
         defaultModel: Effect.undefined,
-      });
+      };
+      const adapter = concurrentResume
+        ? yield* makeAcpAdapterV2({
+            instanceId,
+            selfInvocation: options.selfInvocation,
+            continuationRequests: { offer: () => Effect.void },
+            flavor: {
+              ...makeAntigravityAcpAdapterFlavor({
+                ...options,
+                random: crypto,
+                fileSystem: yield* FileSystem.FileSystem,
+                path,
+                host: yield* ProviderHost.ProviderHost,
+              }),
+              followAgentWorkState: true,
+              extractSubagentUpdate: (tool) =>
+                tool.toolCallId === "call_research"
+                  ? {
+                      nativeTaskId: tool.toolCallId,
+                      prompt: "Read it",
+                      title: "Researcher",
+                      model: null,
+                      status: "running",
+                      childSessionId: null,
+                      result: null,
+                    }
+                  : undefined,
+              extractSubagentSessionEvent: ({ sessionId, update }) =>
+                sessionId === "mock-session-1" && update.sessionUpdate === "agent_message_chunk"
+                  ? {
+                      type: "delegation",
+                      childSessionId: "child-1",
+                      parentSessionId: sessionId,
+                      delegationId: "call_research",
+                      prompt: "Read it",
+                    }
+                  : undefined,
+            },
+          })
+        : yield* makeAntigravityAdapterV2(options);
       const threadId = ThreadId.make("thread-antigravity-restart-resume");
       const modelSelection = { instanceId, model: "gemini-test-low" } as const;
       const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
@@ -3460,7 +3633,7 @@ describe("AntigravityAdapterV2 runtime mode ceiling", () => {
         modelSelection,
         runtimePolicy,
       });
-      const runTurn = (ordinal: number) =>
+      const startTurn = (ordinal: number) =>
         Effect.gen(function* () {
           yield* session.startTurn(
             makeTurnInput({
@@ -3473,18 +3646,153 @@ describe("AntigravityAdapterV2 runtime mode ceiling", () => {
               ordinal,
             }),
           );
-          const terminal = yield* Stream.fromQueue(events).pipe(
-            Stream.filter((event) => event.type === "turn.terminal"),
+        });
+      const isRootTerminal = (
+        event: ProviderAdapter.ProviderAdapterV2Event,
+      ): event is Extract<ProviderAdapter.ProviderAdapterV2Event, { type: "turn.terminal" }> =>
+        event.type === "turn.terminal" && event.providerThreadId === providerThread.id;
+      const awaitTerminal = Effect.repeat(Queue.take(events), { until: isRootTerminal }).pipe(
+        Effect.map((event) => {
+          assert(isRootTerminal(event));
+          return event;
+        }),
+      );
+      yield* startTurn(1);
+      if (closure === "during prompt" || concurrentResume || interruptedSteer) {
+        yield* Deferred.await(promptStarted);
+        if (interruptedSteer) {
+          const started = yield* Stream.fromQueue(events).pipe(
+            Stream.filter((event) => event.type === "provider_turn.updated"),
             Stream.runHead,
           );
-          assert.equal(terminal._tag === "Some" && terminal.value.status, "completed");
-        });
-      yield* runTurn(1);
-      yield* terminate!(
-        new EffectAcpErrors.AcpTransportError({ detail: "agent exited", cause: "exit" }),
-      );
-      yield* runTurn(2);
-      assert.deepEqual(activations, [expected]);
+          assert(started._tag === "Some");
+          if (busySteer) {
+            yield* Deferred.await(firstPromptSettled);
+          }
+          const steer = yield* session
+            .steerTurn({
+              threadId,
+              runId: RunId.make("run-antigravity-restart-steer"),
+              providerThread,
+              providerTurnId: started.value.providerTurn.id,
+              message: {
+                messageId: MessageId.make("message-antigravity-restart-steer"),
+                text: "Do this instead.",
+                attachments: [],
+                createdBy: "user",
+                creationSource: "web",
+              },
+            })
+            .pipe(Effect.exit, Effect.forkScoped);
+          if (busySteer) {
+            yield* Effect.raceFirst(
+              Deferred.await(steerBeforeQueue),
+              Fiber.join(steer).pipe(
+                Effect.tap((result) =>
+                  Effect.die(new Error(`Steer returned before the retry was queued: ${result}`)),
+                ),
+              ),
+            );
+          } else {
+            yield* Deferred.await(steerBeforeQueue);
+          }
+          if (busySteer) {
+            const stopping = yield* session
+              .interruptTurn({ providerThread, providerTurnId: started.value.providerTurn.id })
+              .pipe(Effect.forkScoped);
+            yield* Deferred.await(cancelEntered);
+            assert.deepEqual(outgoing, ["session/prompt", "session/prompt"]);
+            yield* Deferred.succeed(releaseRetry, undefined);
+            yield* Deferred.await(cancelSent);
+            assert.deepEqual(outgoing.slice(0, 4), [
+              "session/prompt",
+              "session/prompt",
+              "session/prompt",
+              "session/cancel",
+            ]);
+            yield* Fiber.join(stopping);
+            assert(Exit.isFailure(yield* Fiber.join(steer)));
+            return;
+          }
+          yield* stop!;
+          assert(Exit.isFailure(yield* Fiber.join(steer)));
+        } else {
+          if (concurrentResume) {
+            const emit = (update: EffectAcpSchema.SessionUpdate) =>
+              firstRuntimeService!.request("_test/emit-update", {
+                sessionId: "mock-session-1",
+                update,
+              });
+            yield* emit({
+              sessionUpdate: "tool_call_update",
+              toolCallId: "call_research",
+              kind: "other",
+              title: "Run invoke_subagent",
+              status: "in_progress",
+              rawInput: { TypeName: "research", Role: "Researcher", Prompt: "Read it" },
+            });
+            yield* emit({
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "Delegating" },
+            });
+            yield* Stream.fromQueue(events).pipe(
+              Stream.filter(
+                (event) =>
+                  event.type === "provider_thread.updated" &&
+                  event.providerThread.nativeThreadRef?.nativeId === "child-1",
+              ),
+              Stream.runHead,
+            );
+          }
+          yield* stop!;
+          if (concurrentResume) {
+            yield* session
+              .resumeThread({ providerThread, modelSelection, runtimePolicy })
+              .pipe(Effect.ensuring(Deferred.succeed(releasePromptCallback, undefined)));
+            yield* terminate!(
+              new EffectAcpErrors.AcpTransportError({ detail: "agent exited", cause: "exit" }),
+            );
+            const firstRelevant = yield* Effect.repeat(Queue.take(events), {
+              until: (event) =>
+                isRootTerminal(event) ||
+                (event.type === "subagent.updated" && event.subagent.status === "failed"),
+            });
+            assert.equal(firstRelevant.type, "subagent.updated");
+          }
+        }
+      }
+      // Starting before consuming the terminal event proves resume released the active turn.
+      if (concurrentResume) yield* startTurn(2);
+      const first = yield* awaitTerminal;
+      if (
+        closure === "before prompt" ||
+        closure === "during prompt" ||
+        concurrentResume ||
+        interruptedSteer
+      ) {
+        assert(first.status === "failed");
+        assert.include(first.failure?.message, "Retry the turn");
+        assert.equal(first.failure?.class, "transport_error");
+        assert.equal(first.failure?.retryable, true);
+        if (concurrentResume) assert.notEqual(first.childTurnsContinue, true);
+      } else {
+        assert.equal(first.status, "completed");
+        if (closure === "idle" || closure === "before snapshot") {
+          yield* stop!;
+        } else {
+          yield* terminate!(
+            new EffectAcpErrors.AcpTransportError({ detail: "agent exited", cause: "exit" }),
+          );
+        }
+      }
+      if (closure === "before snapshot") {
+        yield* session.readThreadSnapshot({ providerThread });
+      }
+      if (!concurrentResume) yield* startTurn(2);
+      const second = yield* awaitTerminal;
+      assert.equal(second.status, "completed");
+      assert.equal(runtimes, 2);
+      assert.deepEqual(replacementStartup, ["initialize", `session/${expected}`]);
     }).pipe(Effect.provide(layerSession), Effect.scoped),
   );
 });

@@ -725,6 +725,67 @@ it.layer(layerTest)("AntigravityDriver", (it) => {
   }
 
   it.effect.skipIf(windowsHost)(
+    "validates the replacement ACP handshake before resuming a thread",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness({
+          environment: [{ name: "T3_ACP_HANG_PROMPT_FOREVER", value: "1" }],
+        });
+        const old = yield* h.makeExecutable("runtime old", { agentVersion: "1.4.5" });
+        const instanceId = h.instance.instanceId;
+        const threadId = ThreadId.make("thread-antigravity-replacement-handshake");
+        const modelSelection = { instanceId, model: "gemini-test-low" };
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          cwd: yield* h.fs.makeTempDirectoryScoped(),
+        });
+        const session = yield* h.instance.orchestrationAdapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-antigravity-replacement"),
+          modelSelection,
+          runtimePolicy,
+        });
+        const providerThread = yield* session.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* session.startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            modelSelection,
+            runtimePolicy,
+            now: yield* DateTime.now,
+          }),
+        );
+        const launch = h.launches.find((launch) => launch.command === h.first.executablePath);
+        if (launch === undefined)
+          return yield* Effect.die("The initial ACP process did not launch.");
+        yield* launch.handle.kill();
+        const terminal = yield* session.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.runHead,
+        );
+        expect(terminal).toMatchObject({ value: { status: "failed" } });
+        const requestsBeforeResume = (yield* h.readRequests).length;
+
+        h.controls.selected = { ...old, source: "path", version: null };
+        const failure = yield* session
+          .resumeThread({ providerThread, modelSelection, runtimePolicy })
+          .pipe(Effect.flip);
+        expect(knownProviderFailureMessage(failure)).toContain(
+          "Antigravity 1.4.5 does not work with this T3 Code release.",
+        );
+        expect(
+          (yield* h.readRequests).slice(requestsBeforeResume).map((request) => request.method),
+        ).toEqual(["initialize"]);
+      }),
+  );
+
+  it.effect.skipIf(windowsHost)(
     "closes refresh processes and clears account metadata when Google sign-in is required",
     () =>
       Effect.gen(function* () {

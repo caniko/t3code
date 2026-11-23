@@ -21,8 +21,10 @@ import {
   ProviderInstanceId,
   ProviderSessionId,
   ProviderThreadId,
+  ProviderTurnId,
   RunAttemptId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -2865,6 +2867,104 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
         });
       }
     }),
+  );
+
+  it.effect.each(["provider-turn.interrupt", "runtime-request.respond"] as const)(
+    "allows %s to pass a running steer and its blocked rename",
+    (type) =>
+      Effect.gen(function* () {
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const commandId = CommandId.make(`command:steer-control:${type}`);
+        const threadId = ThreadId.make(`thread:steer-control:${type}`);
+        const steerId = `steer-control:steer:${type}`;
+        const controlId = `steer-control:control:${type}`;
+        const renameId = `steer-control:rename:${type}`;
+        const providerSessionId = ProviderSessionId.make("session:steer-control");
+        const target = {
+          providerSessionId,
+          providerThreadId: ProviderThreadId.make("provider-thread:steer-control"),
+          providerTurnId: ProviderTurnId.make("provider-turn:steer-control"),
+        };
+        yield* outbox.enqueue([
+          {
+            id: steerId,
+            commandId,
+            threadId,
+            request: { type: "provider-turn.steer", ...target, messageId: MessageId.make("steer") },
+          },
+        ]);
+        const steer = yield* outbox.claimNext({ workerId: "steer-worker" });
+        assert.equal(Option.getOrThrow(steer).id, steerId);
+        yield* outbox.enqueue([
+          {
+            id: renameId,
+            commandId,
+            threadId,
+            request: { type: "provider-session.apply-thread-title", title: "Renamed" },
+          },
+          {
+            id: controlId,
+            commandId,
+            threadId,
+            request:
+              type === "provider-turn.interrupt"
+                ? { type, ...target }
+                : { type, providerSessionId, requestId: RuntimeRequestId.make("steer-approval") },
+          },
+        ]);
+        assert.equal(
+          Option.getOrThrow(yield* outbox.claimNext({ workerId: "control-worker" })).id,
+          controlId,
+        );
+        yield* outbox.succeed({ effectId: controlId, workerId: "control-worker" });
+        assert(Option.isNone(yield* outbox.claimNext({ workerId: "control-worker" })));
+        yield* outbox.succeed({ effectId: steerId, workerId: "steer-worker" });
+        const rename = Option.getOrThrow(yield* outbox.claimNext({ workerId: "control-worker" }));
+        assert.equal(rename.id, renameId);
+        yield* outbox.succeed({ effectId: rename.id, workerId: "control-worker" });
+      }),
+  );
+
+  it.effect.each([false, true])(
+    "keeps Stop behind an earlier pending steer (backoff: %s)",
+    (backoff) =>
+      Effect.gen(function* () {
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const workerId = "pending-steer-worker";
+        const commandId = CommandId.make("command:pending-steer");
+        const threadId = ThreadId.make(`thread:pending-steer:${backoff}`);
+        const steerId = `pending-steer:${backoff}:z-steer`;
+        const target = {
+          providerSessionId: ProviderSessionId.make("session:pending-steer"),
+          providerThreadId: ProviderThreadId.make("provider-thread:pending-steer"),
+          providerTurnId: ProviderTurnId.make("provider-turn:pending-steer"),
+        };
+        yield* outbox.enqueue([
+          {
+            id: steerId,
+            commandId,
+            threadId,
+            request: { type: "provider-turn.steer", ...target, messageId: MessageId.make("steer") },
+          },
+        ]);
+        if (backoff) {
+          const steer = Option.getOrThrow(yield* outbox.claimNext({ workerId }));
+          yield* outbox.retry({ effectId: steer.id, workerId, error: "busy", delayMs: 60_000 });
+        }
+        yield* outbox.enqueue([
+          {
+            id: `pending-steer:${backoff}:a-stop`,
+            commandId,
+            threadId,
+            request: { type: "provider-turn.interrupt", ...target },
+          },
+        ]);
+        if (backoff) {
+          assert.isTrue(Option.isNone(yield* outbox.claimNext({ workerId })));
+        } else {
+          assert.equal(Option.getOrThrow(yield* outbox.claimNext({ workerId })).id, steerId);
+        }
+      }).pipe(Effect.provide(Layer.fresh(layerEffectOutboxProvided))),
   );
 
   it.effect("ignores deadlines blocked by a running effect on the same thread", () =>
