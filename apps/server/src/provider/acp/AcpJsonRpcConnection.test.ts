@@ -16,6 +16,7 @@ import * as Fiber from "effect/Fiber";
 import * as Scope from "effect/Scope";
 import * as Result from "effect/Result";
 import * as Scheduler from "effect/Scheduler";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcessSpawner } from "effect/process";
@@ -397,9 +398,8 @@ describe("AcpSessionRuntime", () => {
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
-  it.effect("retires a native runtime when its prompt caller is interrupted", () =>
+  it.effect("retires a native runtime when its prompt caller is interrupted after enqueue", () =>
     Effect.gen(function* () {
-      const dispatched = yield* Deferred.make<void>();
       const runtime = yield* AcpSessionRuntime.make({
         ...mockRuntimeOptions,
         spawn: {
@@ -410,14 +410,13 @@ describe("AcpSessionRuntime", () => {
       });
       yield* runtime.start();
       const prompt = yield* runtime
-        .prompt(
-          {
-            prompt: [{ type: "text", text: "first" }],
-          },
-          { dispatched },
-        )
+        .prompt({ prompt: [{ type: "text", text: "first" }] })
         .pipe(Effect.forkChild);
-      yield* Deferred.await(dispatched);
+      yield* runtime.getEvents().pipe(
+        Stream.filter((event) => event._tag === "ToolCallUpdated"),
+        Stream.take(1),
+        Stream.runDrain,
+      );
       yield* Fiber.interrupt(prompt);
       const events = yield* runtime.getEvents().pipe(
         Stream.filter((event) => event._tag === "ConnectionTerminated"),
@@ -1668,59 +1667,47 @@ describe("AcpSessionRuntime", () => {
     }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 
-  it.effect(
-    "sends a cancel before the next prompt when the prompt it waited for never went out",
-    () =>
+  it.effect.each(["interrupt", "wait-for-prompt"] as const)(
+    "skips wire cancellation and keeps the session usable after a pre-enqueue timeout (%s)",
+    (cancelBehavior) =>
       Effect.gen(function* () {
         const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "acp-runtime-"));
         yield* Effect.addFinalizer(() =>
           Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true })),
         );
         const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+        const promptHeld = yield* Deferred.make<void>();
+        const route = yield* Semaphore.make(1);
+        const withDispatch = route.withPermit;
         let promptsStarted = 0;
         const runtime = yield* AcpSessionRuntime.make({
           ...mockRuntimeOptions,
           spawn: { ...mockRuntimeOptions.spawn, env: { T3_ACP_REQUEST_LOG_PATH: requestLogPath } },
+          cancelBehavior,
           interruptPromptOnCancel: false,
-          // The cancel spends a test-clock second in its outgoing record, the window in which the
-          // next prompt could overtake it.
-          protocolLogging: {
-            logOutgoing: true,
-            logger: (event) =>
-              isOutgoing("session/cancel")(event) ? Effect.sleep("1 second") : Effect.void,
-          },
+          cancelTimeout: "5 seconds",
           requestLogger: (event) =>
-            isPromptStarted(event) && promptsStarted++ === 0 ? Effect.never : Effect.void,
-        });
-        yield* runtime.getEvents().pipe(
-          Stream.runForEach((event) =>
-            event._tag === "EventStreamBarrier"
-              ? Deferred.succeed(event.acknowledge, undefined)
+            isPromptStarted(event) && promptsStarted++ === 0
+              ? Deferred.succeed(promptHeld, undefined).pipe(Effect.andThen(Effect.never))
               : Effect.void,
-          ),
-          Effect.forkChild,
-        );
+        });
         yield* runtime.start();
         const dispatched = yield* Deferred.make<void>();
         const first = yield* runtime
-          .prompt({ prompt: [{ type: "text", text: "first" }] }, { dispatched })
+          .prompt({ prompt: [{ type: "text", text: "first" }] }, { dispatched, withDispatch })
           .pipe(Effect.forkChild);
         yield* Deferred.await(dispatched);
+        yield* Deferred.await(promptHeld);
         const cancel = yield* runtime.cancel.pipe(Effect.forkChild({ startImmediately: true }));
-        const next = yield* runtime
-          .prompt({ prompt: [{ type: "text", text: "next" }] })
-          .pipe(Effect.forkChild);
-        // The first prompt ends before it is queued, which releases the cancel's wait.
-        yield* Effect.sleep("1 second").pipe(
-          Effect.andThen(Fiber.interrupt(first)),
-          Effect.forkChild,
-        );
-        yield* TestClock.adjust("1 second");
-        yield* TestClock.adjust("1 second");
+        yield* TestClock.adjust("5 seconds");
         yield* Fiber.join(cancel);
-        yield* Fiber.join(next);
+        yield* Fiber.await(first);
+        const next = yield* runtime.prompt(
+          { prompt: [{ type: "text", text: "next" }] },
+          { withDispatch },
+        );
+        expect(next.stopReason).toBe("end_turn");
         expect(readReceived(requestLogPath, ["session/prompt", "session/cancel"])).toEqual([
-          "session/cancel",
           "session/prompt",
         ]);
       }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),

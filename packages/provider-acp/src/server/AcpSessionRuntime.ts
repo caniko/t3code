@@ -2954,10 +2954,13 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
                   yield* Deferred.succeed(activePrompt.completed, undefined);
                   return;
                 }
+                // Stop the sender before deciding whether the agent could have seen the prompt.
+                yield* Fiber.interrupt(activePrompt.fiber);
                 if (
                   options.cancelBehavior === "wait-for-prompt" &&
                   Exit.isFailure(result) &&
-                  Cause.hasInterrupts(result.cause)
+                  Cause.hasInterrupts(result.cause) &&
+                  (yield* Deferred.isDone(activePrompt.queued))
                 ) {
                   yield* retireRuntime(
                     new EffectAcpErrors.AcpTransportError({
@@ -2967,7 +2970,6 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
                     }),
                   );
                 }
-                yield* Fiber.interrupt(activePrompt.fiber).pipe(Effect.ignore);
                 yield* Ref.set(activePromptRef, Option.none());
                 yield* Deferred.succeed(activePrompt.completed, undefined);
               }),
