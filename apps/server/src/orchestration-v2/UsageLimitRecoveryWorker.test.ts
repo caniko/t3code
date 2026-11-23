@@ -116,7 +116,7 @@ describe("limitRecoveryCommand arming", () => {
     assert.isNull(limitRecoveryCommand(thread, true, nowMs));
   });
 
-  it("never auto-resumes a pool-quota continuation, even if it was already armed", () => {
+  it("only resumes a repeated pool quota failure after an explicit schedule", () => {
     const thread = { ...failedThread(6 * HOUR_MS, -HOUR_MS), poolQuotaContinuation: true };
     assert.isNull(limitRecoveryCommand(thread, true, nowMs));
     const arm = limitRecoveryCommand(thread, true, nowMs, true);
@@ -127,7 +127,7 @@ describe("limitRecoveryCommand arming", () => {
       autoResume: false,
       snooze: true,
     });
-    assert.isNull(
+    assert.equal(
       limitRecoveryCommand(
         {
           ...thread,
@@ -137,9 +137,10 @@ describe("limitRecoveryCommand arming", () => {
             autoResume: true,
           },
         },
-        true,
+        false,
         nowMs + HOUR_MS,
-      ),
+      )?.type,
+      "message.dispatch",
     );
   });
 });

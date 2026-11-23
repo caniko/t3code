@@ -121,6 +121,7 @@ const STATUS_RATE_LIMIT_ERROR = Buffer.concat([
 ]);
 const POOL_DENIAL = "request failed (code 429): all eligible accounts are rate limited";
 const GOOGLE_POOL_DENIAL = "RESOURCE_EXHAUSTED (code 429): all eligible accounts are rate limited";
+const verifiedRoute = "a".repeat(64);
 const poolQuotaPayload = (
   message: string,
   body = JSON.stringify({ type: "error", error: { type: "usage_limit_reached", message } }),
@@ -179,7 +180,7 @@ describe("watchAntigravityPromptOutcome", () => {
       const turn = (
         steps: ReadonlyArray<readonly [number, Uint8Array]>,
         result: EffectAcpSchema.PromptResponse = { stopReason: "end_turn" },
-        options?: { readonly retired?: boolean; readonly trustFleetixPoolQuotaHeader?: boolean },
+        options?: { readonly retired?: boolean; readonly fleetixPoolQuotaRoute?: string },
       ) =>
         Effect.gen(function* () {
           const check = yield* watchAntigravityPromptOutcome(profileDirectory, sessionId, options);
@@ -268,6 +269,24 @@ describe("watchAntigravityPromptOutcome", () => {
       const headers = (values: unknown) => JSON.stringify({ "X-Fleetix-Pool-Quota": values });
       const diagnostic = (json: string, status = "HTTP 429 Too Many Requests", newline = "\n") =>
         [status, `Headers: ${json}`, "", "{}"].join(newline);
+      for (const [legacyTiming, padding] of [
+        [`"quotaResetTimeStamp":"${timestamp}"`, " ".repeat(16_384)],
+        ['"retryDelay":"42s"', " ".repeat(16_384)],
+        ['"retryDelay":"42s"', ""],
+      ] as const) {
+        const payload = poolQuotaPayload(
+          GOOGLE_POOL_DENIAL,
+          `{${legacyTiming}}${padding}`,
+          GOOGLE_POOL_DENIAL,
+          diagnostic(headers([value])),
+        );
+        const outcome = yield* turn(
+          [[ERROR_MESSAGE, padding === "" ? payload.subarray(0, -1) : payload]],
+          { stopReason: "refusal" },
+        );
+        assert.equal(outcome?.failure.class, "usage_limit");
+        assert.isUndefined(outcome?.failure.resetAt);
+      }
       const poolOutcome = (
         message: string,
         http: string,
@@ -288,7 +307,7 @@ describe("watchAntigravityPromptOutcome", () => {
           ],
           { stopReason: "end_turn" },
           {
-            ...(trustFleetixPoolQuotaHeader === undefined ? {} : { trustFleetixPoolQuotaHeader }),
+            ...(trustFleetixPoolQuotaHeader ? { fleetixPoolQuotaRoute: verifiedRoute } : {}),
             retired,
           },
         );
@@ -308,6 +327,7 @@ describe("watchAntigravityPromptOutcome", () => {
             code: "FLEETIX_POOL_QUOTA",
             retryable: true,
             resetAt: "1970-01-01T01:00:00.000Z",
+            fleetixPoolQuotaRoute: verifiedRoute,
           }),
         );
         assert.isUndefined((yield* poolOutcome(message, http))?.failure.resetAt);

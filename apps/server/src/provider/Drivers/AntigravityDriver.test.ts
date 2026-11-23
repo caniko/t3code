@@ -74,6 +74,7 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
     readonly enabled?: boolean;
     /** Extra instance variables, such as ones a parent T3 turn already exported. */
     readonly environment?: ReadonlyArray<{ readonly name: string; readonly value: string }>;
+    readonly trustedPoolOrigin?: string;
     readonly beforeAcquire?: Effect.Effect<void>;
     /** Leaves a Google sign-in agy saved in the profile before the driver starts. */
     readonly savedSignIn?: "acp_token.json" | "antigravity-oauth-token";
@@ -269,6 +270,21 @@ const makeHarness = Effect.fn("makeAntigravityDriverHarness")(function* (
   }).pipe(
     Effect.provide(layerInstallation),
     Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, observedSpawner),
+    Effect.provideService(HostProcess.Environment, {
+      ...baseEnv,
+      ...(options.trustedPoolOrigin === undefined
+        ? {}
+        : {
+            T3_ANTIGRAVITY_TRUSTED_POOL_PROXY_URL: options.trustedPoolOrigin,
+            CLOUD_CODE_URL: options.trustedPoolOrigin,
+            HTTP_PROXY: "",
+            HTTPS_PROXY: "",
+            ALL_PROXY: "",
+            http_proxy: "",
+            https_proxy: "",
+            all_proxy: "",
+          }),
+    }),
   );
   const refresh = instance.refreshModels;
   if (!refresh) return yield* Effect.die("Antigravity does not expose model refresh.");
@@ -340,6 +356,40 @@ const layerTest = ProviderHostLive.layer.pipe(
 );
 
 it.layer(layerTest)("AntigravityDriver", (it) => {
+  it.effect("rechecks the trusted loopback and resolved executable without launching", () =>
+    Effect.gen(function* () {
+      const origin = "http://127.0.0.1:8317";
+      const h = yield* makeHarness({ trustedPoolOrigin: origin });
+      const currentRoute = h.instance.orchestrationAdapter.getFleetixPoolQuotaRoute!;
+      const route = yield* currentRoute();
+      expect(route).toMatch(/^[a-f0-9]{64}$/);
+      expect(yield* currentRoute()).toBe(route);
+      yield* h.fs.writeFileString(h.first.executablePath, "#!/bin/sh\nexit 0\n");
+      expect(yield* currentRoute()).not.toBe(route);
+      h.controls.selected = h.second;
+      const otherBinary = yield* currentRoute();
+      expect(otherBinary).toMatch(/^[a-f0-9]{64}$/);
+      expect(otherBinary).not.toBe(route);
+      const rotated = yield* makeHarness({ trustedPoolOrigin: "http://127.0.0.1:8318" });
+      rotated.controls.selected = h.second;
+      const otherOrigin = yield* rotated.instance.orchestrationAdapter.getFleetixPoolQuotaRoute!();
+      expect(otherOrigin).toMatch(/^[a-f0-9]{64}$/);
+      expect(otherOrigin).not.toBe(otherBinary);
+      h.controls.failResolution = true;
+      expect(yield* currentRoute()).toBeUndefined();
+      expect(h.launches).toHaveLength(0);
+      for (const environment of [
+        [{ name: "CLOUD_CODE_URL", value: "http://127.0.0.1:8318" }],
+        [{ name: "https_proxy", value: "http://127.0.0.1:8318" }],
+      ]) {
+        const changed = yield* makeHarness({ trustedPoolOrigin: origin, environment });
+        expect(
+          yield* changed.instance.orchestrationAdapter.getFleetixPoolQuotaRoute!(),
+        ).toBeUndefined();
+        expect(changed.launches).toHaveLength(0);
+      }
+    }),
+  );
   it.effect.skipIf(windowsHost)(
     "refreshes the selected executable and limits form capabilities to chat",
     () =>

@@ -200,6 +200,7 @@ const claudeProviderInstance = {
 
 const antigravityInstanceId = ProviderInstanceId.make("antigravity_test");
 const antigravityDriver = ProviderDriverKind.make("antigravity");
+const trustedPoolRoute = "a".repeat(64);
 const antigravityProviderInstance = {
   ...providerInstance,
   instanceId: antigravityInstanceId,
@@ -210,6 +211,7 @@ const antigravityProviderInstance = {
     ...orchestrationAdapter,
     instanceId: antigravityInstanceId,
     driver: antigravityDriver,
+    getFleetixPoolQuotaRoute: () => Effect.succeed<string | undefined>(trustedPoolRoute),
     getCapabilities: () =>
       Effect.succeed({
         ...CodexProviderCapabilitiesV2,
@@ -13992,9 +13994,15 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
     "resume-started",
     "resume-untagged",
     "pool-chain",
+    "pool-restart-chain",
     "settings-off",
     "model-switch",
     "options-switch",
+    "provider-switch",
+    "legacy-model-switch",
+    "pool-route-change",
+    "pool-route-unverified",
+    "pool-provider-disabled",
     "queued-model-switch",
     "default-model",
     "queued-resume",
@@ -14020,11 +14028,16 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       const outbox = yield* EffectOutbox.EffectOutboxV2;
       const threadId = ThreadId.make(`recovery:${scenario}`);
       const projectId = ProjectId.make(`recovery:project:${scenario}`);
+      const poolChain = scenario === "pool-chain" || scenario === "pool-restart-chain";
+      const routeChanged = scenario === "pool-route-change" || scenario === "pool-route-unverified";
+      const providerDisabled = scenario === "pool-provider-disabled";
       const initialSelection =
         scenario === "resume" ||
-        scenario === "pool-chain" ||
+        poolChain ||
+        routeChanged ||
+        providerDisabled ||
         scenario === "default-model" ||
-        scenario.endsWith("-switch")
+        (scenario.endsWith("-switch") && scenario !== "legacy-model-switch")
           ? {
               instanceId: antigravityInstanceId,
               model: scenario === "default-model" ? "antigravity-default" : "gemini-4-neon",
@@ -14033,7 +14046,12 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       const switchedSelection =
         scenario === "options-switch"
           ? { ...initialSelection, options: [{ id: "reasoningEffort", value: "high" }] }
-          : { ...initialSelection, model: "gemini-4-argon" };
+          : scenario === "provider-switch"
+            ? modelSelection
+            : {
+                ...initialSelection,
+                model: scenario === "legacy-model-switch" ? "gpt-5.5" : "gemini-4-argon",
+              };
       const hasQueued = scenario === "queued-resume" || scenario === "queued-model-switch";
       yield* seedProject({
         projectId,
@@ -14136,6 +14154,9 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
                   initialSelection.instanceId === antigravityInstanceId
                     ? "FLEETIX_POOL_QUOTA"
                     : "usageLimitExceeded",
+                ...(initialSelection.instanceId === antigravityInstanceId
+                  ? { fleetixPoolQuotaRoute: trustedPoolRoute }
+                  : {}),
                 retryable: null,
                 resetAt,
               },
@@ -14224,6 +14245,9 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       yield* settings.updateSettings({
         autoResumeLimitedThreads: autoResume,
         snoozeLimitedThreads: snooze,
+        providerInstances: {
+          [antigravityInstanceId]: { driver: antigravityDriver, enabled: true },
+        },
       });
       const arm = limitRecoveryCommand(shell, autoResume, DateTime.toEpochMillis(now), snooze);
       assert(arm?.type === "thread.metadata.update" && arm.limitRecovery != null);
@@ -14447,7 +14471,12 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           })).find((row) => row.id === threadId),
         );
       }
-      if (scenario === "model-switch" || scenario === "options-switch") {
+      if (
+        scenario === "model-switch" ||
+        scenario === "options-switch" ||
+        scenario === "legacy-model-switch" ||
+        scenario === "provider-switch"
+      ) {
         const current = yield* orchestrator.getThreadProjection(threadId);
         yield* events.write({
           events: [
@@ -14456,9 +14485,27 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
               type: "thread.metadata-updated",
               threadId,
               occurredAt: now,
-              payload: { ...current.thread, modelSelection: switchedSelection },
+              payload: {
+                ...current.thread,
+                modelSelection: switchedSelection,
+                providerInstanceId: switchedSelection.instanceId,
+              },
             },
           ],
+        });
+      }
+      using _route = routeChanged
+        ? vi
+            .spyOn(antigravityProviderInstance.orchestrationAdapter, "getFleetixPoolQuotaRoute")
+            .mockImplementation(() =>
+              Effect.succeed(scenario === "pool-route-change" ? "b".repeat(64) : undefined),
+            )
+        : undefined;
+      if (providerDisabled) {
+        yield* settings.updateSettings({
+          projectSettingsOverrides: {
+            [projectId]: { providerInstances: { [antigravityInstanceId]: { enabled: false } } },
+          },
         });
       }
       yield* TestClock.adjust("1 minute");
@@ -14584,15 +14631,33 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       }
       const before = yield* orchestrator.getThreadProjection(threadId);
       if (resume !== null) {
-        yield* orchestrator.dispatch(resume);
-        yield* orchestrator.dispatch(resume);
+        const threads = yield* ThreadManagementService.ThreadManagementService;
+        yield* threads.dispatch(resume);
+        yield* threads.dispatch(resume);
       }
       const after = yield* orchestrator.getThreadProjection(threadId);
-      if (scenario.endsWith("-switch") || scenario === "default-model") {
+      if (scenario === "legacy-model-switch") {
+        assert.deepEqual(after.runs.at(-1)?.modelSelection, switchedSelection);
+      }
+      if (
+        (scenario.endsWith("-switch") && scenario !== "legacy-model-switch") ||
+        routeChanged ||
+        providerDisabled ||
+        scenario === "default-model"
+      ) {
         assert.lengthOf(yield* outbox.listByCommandId(resume!.commandId), 0);
         assert.isFalse(after.thread.limitRecovery?.autoResume);
+        for (const seconds of [0, 5, 10]) {
+          const tick = DateTime.add(yield* DateTime.now, { seconds });
+          const candidates = yield* projections.getLimitRecoveryCandidates({
+            now: tick,
+            autoResume: true,
+            snooze: false,
+          });
+          assert.isFalse(candidates.some((row) => row.id === threadId));
+        }
       }
-      if (scenario === "pool-chain") {
+      if (poolChain) {
         assert(resume?.type === "message.dispatch");
         const continuation = after.runs.at(-1)!;
         assert.equal(continuation.usageLimitContinuationOfRunId, run.id);
@@ -14613,26 +14678,62 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           (item) => item.runId === run.id && item.type === "error",
         );
         assert(error?.type === "error");
+        let blockedRun = continuation;
+        if (scenario === "pool-restart-chain") {
+          // Restart recovery emits this command after cancelling the started source.
+          for (const hop of [1, 2]) {
+            yield* events.write({
+              events: [
+                {
+                  id: EventId.make(`recovery:pool-restart:cancelled:${hop}`),
+                  type: "run.updated",
+                  threadId,
+                  runId: blockedRun.id,
+                  occurredAt: completedAt,
+                  payload: {
+                    ...blockedRun,
+                    status: "cancelled",
+                    startedAt: completedAt,
+                    completedAt,
+                  },
+                },
+              ],
+            });
+            yield* orchestrator.dispatch({
+              ...resume,
+              commandId: CommandId.make(`recovery:pool-restart:resume:${hop}`),
+              messageId: MessageId.make(`recovery:pool-restart:resume:${hop}`),
+              usageLimitContinuationOfRunId: undefined,
+              usageLimitRecoveryRequestId: undefined,
+              restartContinuationOfRunId: blockedRun.id,
+              modelSelection: initialSelection,
+            });
+            const restarted = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+            assert.equal(restarted.restartContinuationOfRunId, blockedRun.id);
+            assert.isUndefined(restarted.usageLimitContinuationOfRunId);
+            blockedRun = restarted;
+          }
+        }
         yield* events.write({
           events: [
             {
-              id: EventId.make("recovery:pool-chain:failed"),
+              id: EventId.make(`recovery:${scenario}:continuation-failed`),
               type: "run.updated",
               threadId,
-              runId: continuation.id,
+              runId: blockedRun.id,
               occurredAt: completedAt,
-              payload: { ...continuation, status: "failed", startedAt: completedAt, completedAt },
+              payload: { ...blockedRun, status: "failed", startedAt: completedAt, completedAt },
             },
             {
-              id: EventId.make("recovery:pool-chain:error"),
+              id: EventId.make(`recovery:${scenario}:continuation-error`),
               type: "turn-item.updated",
               threadId,
               occurredAt: completedAt,
               payload: {
                 ...error,
-                id: TurnItemId.make("recovery:pool-chain:second-error"),
-                runId: continuation.id,
-                nodeId: continuation.rootNodeId,
+                id: TurnItemId.make(`recovery:${scenario}:second-error`),
+                runId: blockedRun.id,
+                nodeId: blockedRun.rootNodeId,
                 updatedAt: completedAt,
                 failure: { ...error.failure, resetAt: nextReset },
               },
@@ -14642,20 +14743,20 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         assert.isUndefined(
           (yield* projections.getLimitRecoveryCandidates(sweep)).find((row) => row.id === threadId),
         );
-        const limitRecovery = { runId: continuation.id, resetAt: nextReset, autoResume: true };
+        const limitRecovery = { runId: blockedRun.id, resetAt: nextReset, autoResume: true };
         yield* (yield* ServerSettings.ServerSettingsService).updateSettings({
           autoResumeLimitedThreads: true,
         });
         yield* orchestrator.autoArmLimitRecovery({
-          commandId: CommandId.make("recovery:pool-chain:auto-arm"),
+          commandId: CommandId.make(`recovery:${scenario}:auto-arm`),
           threadId,
           limitRecovery,
         });
         assert.notEqual(
           (yield* orchestrator.getThreadProjection(threadId)).thread.limitRecovery?.runId,
-          continuation.id,
+          blockedRun.id,
         );
-        const requestId = CommandId.make("recovery:pool-chain:existing-arm");
+        const requestId = CommandId.make(`recovery:${scenario}:existing-arm`);
         yield* orchestrator.dispatch({
           type: "thread.metadata.update",
           commandId: requestId,
@@ -14663,16 +14764,20 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           limitRecovery,
         });
         yield* TestClock.adjust("1 minute");
-        const second = {
-          ...resume,
-          commandId: CommandId.make("recovery:pool-chain:second-resume"),
-          messageId: MessageId.make("recovery:pool-chain:second-resume"),
-          usageLimitContinuationOfRunId: continuation.id,
-          usageLimitRecoveryRequestId: requestId,
-        };
+        const due = yield* DateTime.now;
+        const candidate = (yield* projections.getLimitRecoveryCandidates({
+          now: due,
+          autoResume: false,
+          snooze: false,
+        })).find((row) => row.id === threadId);
+        assert.isDefined(candidate);
+        const second = limitRecoveryCommand(candidate!, false, DateTime.toEpochMillis(due));
+        assert(second?.type === "message.dispatch");
+        assert.equal(second.usageLimitRecoveryRequestId, requestId);
         yield* orchestrator.dispatch(second);
-        assert.lengthOf(yield* outbox.listByCommandId(second.commandId), 0);
-        assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, 2);
+        const resumed = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+        assert.equal(resumed.usageLimitContinuationOfRunId, blockedRun.id);
+        assert.lengthOf(yield* outbox.listByCommandId(second.commandId), 1);
       }
       if (
         scenario === "resume" ||
@@ -14789,7 +14894,8 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           (scenario === "resume" ||
           scenario === "resume-started" ||
           scenario === "resume-untagged" ||
-          scenario === "pool-chain" ||
+          poolChain ||
+          scenario === "legacy-model-switch" ||
           stopBeforeArm ||
           scenario === "queued-resume" ||
           scenario === "independent-patches" ||
@@ -14803,7 +14909,8 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           (scenario === "resume" ||
           scenario === "resume-started" ||
           scenario === "resume-untagged" ||
-          scenario === "pool-chain" ||
+          poolChain ||
+          scenario === "legacy-model-switch" ||
           stopBeforeArm ||
           scenario === "queued-resume" ||
           scenario === "independent-patches" ||

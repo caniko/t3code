@@ -1754,6 +1754,9 @@ export const OrchestrationV2ProviderFailure = Schema.Struct({
   rejectedAttachmentId: Schema.optionalKey(ChatAttachmentId),
   resetAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   verificationUrl: Schema.optionalKey(GoogleAccountVerificationUrl),
+  fleetixPoolQuotaRoute: Schema.optionalKey(
+    Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+  ),
 });
 export type OrchestrationV2ProviderFailure = typeof OrchestrationV2ProviderFailure.Type;
 

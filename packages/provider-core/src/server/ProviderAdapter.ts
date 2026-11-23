@@ -904,6 +904,7 @@ export class ProviderAdapterV2 extends Context.Service<
      * skips its own check, which only knows the version from the last status probe.
      */
     readonly checksVersionAtHandshake?: boolean;
+    readonly getFleetixPoolQuotaRoute?: () => Effect.Effect<string | undefined>;
     readonly getCapabilities: () => Effect.Effect<
       OrchestrationV2ProviderCapabilities,
       ProviderAdapterV2Error

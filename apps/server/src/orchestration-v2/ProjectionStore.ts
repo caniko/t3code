@@ -5028,12 +5028,27 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         }>`
           SELECT t.payload_json, r.run_id, r.completed_at,
             item.payload_json AS failure_payload_json,
-            (
-              json_extract(r.payload_json, '$.usageLimitContinuationOfRunId') IS NOT NULL
-              AND CASE WHEN json_valid(item.payload_json)
-                THEN json_extract(item.payload_json, '$.failure.code') IS 'FLEETIX_POOL_QUOTA'
-                ELSE 0 END
-            ) AS pool_quota_continuation,
+            CASE WHEN (CASE WHEN json_valid(item.payload_json)
+                THEN json_extract(item.payload_json, '$.failure.code') END) IS 'FLEETIX_POOL_QUOTA'
+              THEN EXISTS (
+                WITH RECURSIVE ancestry(run_id) AS (
+                  VALUES (r.run_id)
+                  -- UNION deduplicates run IDs, including malformed cycles.
+                  UNION
+                  SELECT json_extract(ancestor.payload_json, '$.restartContinuationOfRunId')
+                  FROM ancestry
+                  JOIN orchestration_v2_projection_runs ancestor USING (run_id)
+                  WHERE ancestor.thread_id = t.thread_id
+                    AND json_extract(ancestor.payload_json, '$.restartContinuationOfRunId') IS NOT NULL
+                )
+                SELECT 1 FROM ancestry
+                JOIN orchestration_v2_projection_runs ancestor USING (run_id)
+                WHERE ancestor.thread_id = t.thread_id
+                  AND json_extract(ancestor.payload_json, '$.usageLimitContinuationOfRunId') IS NOT NULL
+                  AND (ancestor.run_id = r.run_id OR json_extract(ancestor.payload_json, '$.startedAt') IS NOT NULL)
+              )
+              ELSE 0
+            END AS pool_quota_continuation,
             (
               SELECT json_extract(session.payload_json, '$.lastError')
               -- Keep bindings outermost: one provider instance can hold every session.
@@ -5090,7 +5105,6 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 json_extract(t.payload_json, '$.limitRecovery.runId') IS r.run_id
                 AND json_extract(t.payload_json, '$.limitRecovery.resetAt') IS json_extract(item.payload_json, '$.failure.resetAt')
                 AND json_extract(t.payload_json, '$.limitRecovery.autoResume') = 1
-                AND NOT pool_quota_continuation
                 AND julianday(json_extract(item.payload_json, '$.failure.resetAt')) <= julianday(${DateTime.formatIso(options.now)})
                 AND (
                   json_extract(t.payload_json, '$.snoozedUntil') IS NULL

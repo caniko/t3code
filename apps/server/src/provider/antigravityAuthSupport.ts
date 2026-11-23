@@ -555,6 +555,11 @@ export const prepareAntigravityProfile = Effect.fn("prepareAntigravityProfile")(
   return profile;
 });
 
+export function antigravityAcpArgs(geminiHome: string): ReadonlyArray<string> {
+  // The CLI joins the app data directory beneath gemini-dir, even if given an absolute path.
+  return ["acp", "--gemini-dir", geminiHome, "--app-data-dir", "antigravity-acp"];
+}
+
 export function buildAntigravityAcpSpawnInput(input: {
   readonly installation: { readonly executablePath: string };
   readonly profile: AntigravityProfile;
@@ -565,14 +570,7 @@ export function buildAntigravityAcpSpawnInput(input: {
 }): AcpSessionRuntime.AcpSpawnInput {
   return {
     command: input.installation.executablePath,
-    args: [
-      "acp",
-      "--gemini-dir",
-      input.profile.geminiHome,
-      "--app-data-dir",
-      // The CLI joins this beneath gemini-dir, including when the value is absolute.
-      "antigravity-acp",
-    ],
+    args: antigravityAcpArgs(input.profile.geminiHome),
     cwd: input.cwd,
     env: antigravityEnvironment(
       input.profile,
@@ -594,16 +592,16 @@ function loopbackHttpOrigin(value: string | undefined): string | undefined {
   return URL.parse(value)?.origin;
 }
 
-export function trustsFleetixPoolQuotaHeader(
+export function fleetixPoolQuotaOrigin(
   spawn: Pick<AcpSessionRuntime.AcpSpawnInput, "env" | "args">,
   trustedProxyUrl: string | undefined,
-): boolean {
+): string | undefined {
   const trustedOrigin = loopbackHttpOrigin(trustedProxyUrl);
   if (
     trustedOrigin === undefined ||
     loopbackHttpOrigin(spawn.env?.CLOUD_CODE_URL) !== trustedOrigin
   ) {
-    return false;
+    return undefined;
   }
   if (
     Object.entries(spawn.env ?? {}).some(
@@ -613,20 +611,10 @@ export function trustsFleetixPoolQuotaHeader(
           (/^(?:http|https|all)_proxy$/i.test(key) && value !== "")),
     )
   )
-    return false;
-  let endpointSeen = false;
-  for (const [index, arg] of spawn.args.entries()) {
-    const endpoint = /^--?cloud_code_endpoint(?:=(.*))?$/.exec(arg);
-    if (endpoint === null) continue;
-    if (
-      endpointSeen ||
-      loopbackHttpOrigin(endpoint[1] ?? spawn.args[index + 1]) !== trustedOrigin
-    ) {
-      return false;
-    }
-    endpointSeen = true;
-  }
-  return true;
+    return undefined;
+  return spawn.args.some((arg) => /^--?cloud_code_endpoint(?:=|$)/.test(arg))
+    ? undefined
+    : trustedOrigin;
 }
 
 /** Where `agy acp --login` sends Google; the page shows a code the user pastes back. */

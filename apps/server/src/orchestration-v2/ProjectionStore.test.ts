@@ -9235,6 +9235,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         payload: {
           ...original,
           status: "failed",
+          startedAt: now,
           completedAt: now,
           usageLimitContinuationOfRunId: RunId.make("original-pool-run"),
         },
@@ -9266,18 +9267,11 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       );
       assert.strictEqual(yield* store.getLimitRecoveryWakeAt(now), DateTime.toEpochMillis(reset));
       assert.isNull(yield* store.getLimitRecoveryWakeAt(reset));
-      assert.isUndefined(
-        (yield* store.getLimitRecoveryCandidates({ ...recoveryOptions, now: reset })).find(
-          (row) => row.id === threadId,
-        ),
-      );
-      yield* sql`UPDATE orchestration_v2_projection_runs
-        SET payload_json = json_remove(payload_json, '$.usageLimitContinuationOfRunId')
-        WHERE run_id = ${original.id}`;
       const due = (yield* store.getLimitRecoveryCandidates({
         ...recoveryOptions,
         now: reset,
       })).find((row) => row.id === threadId)!;
+      assert.isTrue(due?.poolQuotaContinuation);
       assert.deepEqual(due.limitRecovery, recovery);
       yield* sql`INSERT INTO orchestration_v2_projection_runtime_requests
         (runtime_request_id, thread_id, node_id, kind, status, created_at, payload_json)
@@ -9312,6 +9306,9 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         })).find((row) => row.id === threadId),
       );
       yield* sql`UPDATE orchestration_v2_projection_threads SET payload_json = ${originalRow!.payload_json} WHERE thread_id = ${threadId}`;
+      yield* sql`UPDATE orchestration_v2_projection_runs
+        SET payload_json = json_remove(payload_json, '$.usageLimitContinuationOfRunId')
+        WHERE run_id = ${original.id}`;
       const session = {
         id: ProviderSessionId.make("session:limit-shell:shared"),
         driver,

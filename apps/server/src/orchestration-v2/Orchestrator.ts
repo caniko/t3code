@@ -1100,14 +1100,25 @@ function queueTailModelSelection(
 }
 
 function isRepeatedPoolQuota(
-  run: OrchestrationV2Run | null,
+  run: OrchestrationV2Run,
   failure: ReturnType<typeof latestRootProviderFailure>,
+  runs: ReadonlyArray<OrchestrationV2Run>,
 ): boolean {
-  return (
-    run?.usageLimitContinuationOfRunId != null &&
-    failure?.class === "usage_limit" &&
-    failure.code === "FLEETIX_POOL_QUOTA"
-  );
+  if (failure?.class !== "usage_limit" || failure.code !== "FLEETIX_POOL_QUOTA") return false;
+  if (run.usageLimitContinuationOfRunId != null) return true;
+  if (run.restartContinuationOfRunId === undefined) return false;
+  const byId = new Map(runs.map((candidate) => [candidate.id, candidate]));
+  const visited = new Set([run.id]);
+  for (
+    let id: RunId | undefined = run.restartContinuationOfRunId;
+    id !== undefined && !visited.has(id);
+  ) {
+    visited.add(id);
+    const ancestor = byId.get(id);
+    if (ancestor?.startedAt != null && ancestor.usageLimitContinuationOfRunId != null) return true;
+    id = ancestor?.restartContinuationOfRunId;
+  }
+  return false;
 }
 
 /**
@@ -7399,25 +7410,32 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       }
     }
     let limitedRun: OrchestrationV2Run | undefined;
+    let poolQuotaFailure = false;
+    let poolQuotaRoute: string | undefined;
     if (command.usageLimitContinuationOfRunId !== undefined) {
       const run = usageLimitBlockedRun(projection.runs, projection.turnItems, null);
       const failure = latestRootProviderFailure(run, projection.turnItems);
       const recovery = projection.thread.limitRecovery;
       const now = yield* DateTime.now;
+      const matchesRecovery =
+        recovery?.autoResume &&
+        recovery.requestId === command.usageLimitRecoveryRequestId &&
+        recovery.runId === command.usageLimitContinuationOfRunId;
+      const providerChanged =
+        run?.id === command.usageLimitContinuationOfRunId &&
+        recovery?.resetAt === failure?.resetAt &&
+        projection.thread.providerInstanceId !== run.providerInstanceId;
       if (
         run?.id !== command.usageLimitContinuationOfRunId ||
         failure?.class !== "usage_limit" ||
-        isRepeatedPoolQuota(run, failure) ||
         threadShellFromProjection(projection).lastErrorClass !== "usage_limit" ||
-        !recovery?.autoResume ||
-        recovery.requestId !== command.usageLimitRecoveryRequestId ||
-        recovery.runId !== run.id ||
+        !matchesRecovery ||
         recovery.resetAt !== failure.resetAt ||
         Date.parse(recovery.resetAt) > DateTime.toEpochMillis(now) ||
         projection.thread.archivedAt !== null ||
         projection.thread.deletedAt !== null ||
         projection.thread.settledOverride === "settled" ||
-        projection.thread.providerInstanceId !== run.providerInstanceId ||
+        providerChanged ||
         projection.runtimeRequests.some((request) => request.status === "pending") ||
         (projection.thread.snoozedUntil != null &&
           DateTime.toEpochMillis(projection.thread.snoozedUntil) > DateTime.toEpochMillis(now))
@@ -7431,18 +7449,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           occurredAt: now,
           payload: {
             ...projection.thread,
-            ...(recovery?.autoResume &&
-            recovery.requestId === command.usageLimitRecoveryRequestId &&
-            recovery.runId === command.usageLimitContinuationOfRunId &&
-            projection.thread.snoozedUntil != null &&
-            DateTime.toEpochMillis(projection.thread.snoozedUntil) > DateTime.toEpochMillis(now)
-              ? { limitRecovery: { ...recovery, requestId: command.commandId } }
-              : {}),
+            ...(matchesRecovery && providerChanged
+              ? { limitRecovery: { ...recovery, autoResume: false } }
+              : matchesRecovery &&
+                  projection.thread.snoozedUntil != null &&
+                  DateTime.toEpochMillis(projection.thread.snoozedUntil) >
+                    DateTime.toEpochMillis(now)
+                ? { limitRecovery: { ...recovery, requestId: command.commandId } }
+                : {}),
           },
         });
         return;
       }
       limitedRun = run;
+      poolQuotaFailure = failure.code === "FLEETIX_POOL_QUOTA";
+      poolQuotaRoute = failure.fleetixPoolQuotaRoute;
     }
 
     if (command.restartContinuationOfRunId !== undefined) {
@@ -8118,7 +8139,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     // A message that names no model runs on the thread's pick when it starts, not a copy from now.
     const followsThreadSelection =
       command.modelSelection === undefined &&
-      limitedRun === undefined &&
+      !poolQuotaFailure &&
       (command.scheduledTaskId !== undefined ||
         (shouldQueue &&
           !followsCurrentConversation(incomingMessage) &&
@@ -8135,12 +8156,29 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     ) {
       modelSelection = queueTailModelSelection(projection);
     }
+    const recoveryProviderEnabled =
+      limitedRun === undefined ||
+      resolveProjectProviderInstanceEnabled(
+        yield* serverSettings.getSettings.pipe(Effect.orDie),
+        projection.thread.projectId,
+        modelSelection.instanceId,
+      );
     if (
       limitedRun !== undefined &&
       (limitedRun.providerInstanceId !== modelSelection.instanceId ||
-        limitedRun.modelSelection == null ||
-        modelSelection.model === ANTIGRAVITY_DEFAULT_MODEL ||
-        !modelSelectionsEqual(limitedRun.modelSelection, modelSelection))
+        (poolQuotaFailure &&
+          (!recoveryProviderEnabled ||
+            limitedRun.modelSelection == null ||
+            modelSelection.model === ANTIGRAVITY_DEFAULT_MODEL ||
+            !modelSelectionsEqual(limitedRun.modelSelection, modelSelection) ||
+            poolQuotaRoute === undefined ||
+            poolQuotaRoute !==
+              (yield* providerAdapters.get(modelSelection.instanceId).pipe(
+                Effect.flatMap(
+                  (adapter) => adapter.getFleetixPoolQuotaRoute?.() ?? Effect.undefined,
+                ),
+                Effect.orElseSucceed(() => undefined),
+              )))))
     ) {
       const recovery = projection.thread.limitRecovery;
       yield* emit(
@@ -8156,6 +8194,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       });
       return;
+    }
+    if (!recoveryProviderEnabled) {
+      return yield* new OrchestratorDispatchError({
+        commandId: command.commandId,
+        commandType: command.type,
+        cause: "The provider for this project is disabled.",
+      });
     }
     yield* ensureGoalCommandSupported(command, command, modelSelection.instanceId);
     // Client messages resume held queues; server continuations and scheduled tasks do not.
@@ -17537,7 +17582,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             });
             const run = usageLimitBlockedRun(projection.runs, projection.turnItems, null);
             if (run?.id !== limitRecovery.runId) return;
-            if (isRepeatedPoolQuota(run, latestRootProviderFailure(run, projection.turnItems))) {
+            if (
+              isRepeatedPoolQuota(
+                run,
+                latestRootProviderFailure(run, projection.turnItems),
+                projection.runs,
+              )
+            ) {
               if (limitRecovery.snooze !== true) return;
               limitRecovery = { ...limitRecovery, autoResume: false };
             }

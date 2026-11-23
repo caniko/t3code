@@ -806,6 +806,8 @@ const make = Effect.gen(function* () {
               ),
             );
       case "message.dispatch":
+        // Recovery validates enablement with the failing run and disarms under the thread lock.
+        if (command.usageLimitContinuationOfRunId !== undefined) return Effect.void;
         return orchestrator.getThreadRecords(command.threadId, []).pipe(
           Effect.flatMap((projection) =>
             assertProviderInstanceEnabled({

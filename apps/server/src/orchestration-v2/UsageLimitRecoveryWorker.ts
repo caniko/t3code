@@ -40,10 +40,10 @@ export function limitRecoveryCommand(
     return null;
   const identity = `${thread.id}:${thread.latestRunId}:${resetMs}`;
   const recovery = thread.limitRecovery;
-  const canAutoResume = thread.poolQuotaContinuation !== true;
   if (recovery?.runId !== thread.latestRunId || recovery.resetAt !== thread.usageLimitResetAt) {
+    const canAutoResume = autoResume && thread.poolQuotaContinuation !== true;
     if (nowMs - resetMs > MAX_OVERDUE_ARM_MS) return null;
-    if (!(autoResume && canAutoResume) && (!snooze || resetMs <= nowMs)) return null;
+    if (!canAutoResume && (!snooze || resetMs <= nowMs)) return null;
     return {
       type: "thread.metadata.update",
       commandId: CommandId.make(`limit-arm:${identity}`),
@@ -51,13 +51,12 @@ export function limitRecoveryCommand(
       limitRecovery: {
         runId: thread.latestRunId,
         resetAt: thread.usageLimitResetAt,
-        autoResume: autoResume && canAutoResume,
+        autoResume: canAutoResume,
         snooze: snooze && resetMs > nowMs,
       },
     };
   }
   if (
-    !canAutoResume ||
     !recovery.autoResume ||
     resetMs > nowMs ||
     (thread.snoozedUntil != null && DateTime.toEpochMillis(thread.snoozedUntil) > nowMs)

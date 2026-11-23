@@ -392,11 +392,14 @@ export function makeAntigravityAcpAdapterFlavor(
       ? {}
       : {
           watchPromptOutcome: (sessionId, runtime) =>
-            watchAntigravityPromptOutcome(profileDirectory, sessionId, {
-              trustFleetixPoolQuotaHeader:
-                "trustFleetixPoolQuotaHeader" in runtime &&
-                runtime.trustFleetixPoolQuotaHeader === true,
-            }),
+            watchAntigravityPromptOutcome(
+              profileDirectory,
+              sessionId,
+              "fleetixPoolQuotaRoute" in runtime &&
+                typeof runtime.fleetixPoolQuotaRoute === "string"
+                ? { fleetixPoolQuotaRoute: runtime.fleetixPoolQuotaRoute }
+                : undefined,
+            ),
           subagentsOutlivingPrompt: ({ sessionId, nativeTaskIds }) =>
             readAntigravityChildrenAtWork({
               profileDirectory,

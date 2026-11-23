@@ -17,10 +17,12 @@ import * as Digest from "effect/crypto/Digest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Hex from "effect/encoding/Hex";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -39,11 +41,12 @@ import * as AntigravityInstallation from "../AntigravityInstallation.ts";
 import { brokenRuntimeError } from "../providerCompatibility.ts";
 import * as AntigravityUsage from "./AntigravityUsage.ts";
 import {
+  antigravityAcpArgs,
   antigravityAuthConfigIssue,
   antigravityAuthLabel,
   antigravityAuthUsesBrowser,
   buildAntigravityAcpSpawnInput,
-  trustsFleetixPoolQuotaHeader,
+  fleetixPoolQuotaOrigin,
   isAntigravitySignInRequiredError,
   prepareAntigravityProfile,
   resolveAntigravityInstanceDirectories,
@@ -202,6 +205,39 @@ export const AntigravityDriver: ProviderDriver<
       ),
       Effect.orElseSucceed(() => undefined),
     );
+    const provePoolRoute = Effect.fn("AntigravityDriver.provePoolRoute")(
+      function* (spawn: Pick<AcpSessionRuntime.AcpSpawnInput, "command" | "args" | "env">) {
+        const origin = fleetixPoolQuotaOrigin(spawn, trustedPoolProxyUrl);
+        if (origin === undefined) return undefined;
+        const resolved = yield* fileSystem.realPath(spawn.command);
+        const info = yield* fileSystem.stat(resolved);
+        if (info.type !== "File") return undefined;
+        const identity = [
+          origin,
+          spawn.command,
+          resolved,
+          info.dev,
+          Option.getOrNull(info.ino),
+          info.size,
+          Option.getOrNull(info.mtime)?.getTime(),
+        ].join("\0");
+        return Hex.encode(yield* digest.digest(Digest.sha256, new TextEncoder().encode(identity)));
+      },
+      Effect.orElseSucceed(() => undefined),
+    );
+    const getFleetixPoolQuotaRoute = Effect.fn("AntigravityDriver.getFleetixPoolQuotaRoute")(
+      function* () {
+        if (!enabled || authConfigIssue !== null || trustedPoolProxyUrl === undefined) return;
+        const executable = yield* installation.resolve(settings.binaryPath, processEnvironment);
+        // Session-injected variables are MCP-only; the route comes from the instance environment.
+        return yield* provePoolRoute({
+          command: executable.executablePath,
+          args: antigravityAcpArgs(path.resolve(profileDirectory)),
+          env: processEnvironment,
+        });
+      },
+      Effect.orElseSucceed(() => undefined),
+    );
     for (const directory of [
       directories.runtimeTempStore,
       path.join(profileDirectory, "antigravity-acp", "tmp"),
@@ -334,7 +370,7 @@ export const AntigravityDriver: ProviderDriver<
       input: AntigravityAdapterV2RuntimeInput,
     ): Effect.fn.Return<
       AcpSessionRuntime.AcpSessionRuntime["Service"] & {
-        readonly trustFleetixPoolQuotaHeader: boolean;
+        readonly fleetixPoolQuotaRoute: string | undefined;
       },
       AcpErrors.AcpError | ProviderSetupError,
       Scope.Scope
@@ -348,6 +384,7 @@ export const AntigravityDriver: ProviderDriver<
           ? processEnvironment
           : { ...processEnvironment, ...threadEnvironment },
       );
+      const fleetixPoolQuotaRoute = yield* provePoolRoute(spawn);
       const runtime = yield* makeAntigravityAcpRuntime({
         ...runtimeInput,
         authMethod: auth.authMethod,
@@ -379,7 +416,7 @@ export const AntigravityDriver: ProviderDriver<
       });
       return {
         ...runtime,
-        trustFleetixPoolQuotaHeader: trustsFleetixPoolQuotaHeader(spawn, trustedPoolProxyUrl),
+        fleetixPoolQuotaRoute,
         setMode: (modeId: string) =>
           runtime.getModeState.pipe(
             Effect.flatMap((modeState) =>
@@ -769,7 +806,7 @@ export const AntigravityDriver: ProviderDriver<
                   }),
               ),
             ),
-      orchestrationAdapter,
+      orchestrationAdapter: { ...orchestrationAdapter, getFleetixPoolQuotaRoute },
       textGeneration,
       auth: authFlow.controller,
       refreshModels,

@@ -27,7 +27,7 @@ import {
   type AntigravityAuthConfig,
   type AntigravityProfile,
   buildAntigravityAcpSpawnInput,
-  trustsFleetixPoolQuotaHeader,
+  fleetixPoolQuotaOrigin,
   isAntigravitySignInRequiredError,
   makeAntigravityStderrHandler,
   makeAntigravityStdoutTransform,
@@ -52,17 +52,15 @@ describe("Antigravity process environment", () => {
     const origin = "http://127.0.0.1:8317";
     const env = { CLOUD_CODE_URL: origin };
     const trusted = (childEnv: NodeJS.ProcessEnv, args: ReadonlyArray<string> = ["acp"]) =>
-      trustsFleetixPoolQuotaHeader({ env: childEnv, args }, origin);
-    expect(trusted(env)).toBe(true);
-    expect(trusted(env, ["acp", "--cloud_code_endpoint", `${origin}/`])).toBe(true);
-    expect(trusted(env, ["acp", `--cloud_code_endpoint=${origin}`])).toBe(true);
-    expect(trustsFleetixPoolQuotaHeader({ env, args: ["acp"] }, undefined)).toBe(false);
+      fleetixPoolQuotaOrigin({ env: childEnv, args }, origin);
+    expect(trusted(env)).toBe(origin);
+    expect(fleetixPoolQuotaOrigin({ env, args: ["acp"] }, undefined)).toBeUndefined();
     for (const host of ["localhost", "[::1]"]) {
       const url = `http://${host}:8317`;
-      expect(
-        trustsFleetixPoolQuotaHeader({ env: { CLOUD_CODE_URL: url }, args: ["acp"] }, url),
-      ).toBe(true);
-      expect(trusted({ CLOUD_CODE_URL: url })).toBe(false);
+      expect(fleetixPoolQuotaOrigin({ env: { CLOUD_CODE_URL: url }, args: ["acp"] }, url)).toBe(
+        url,
+      );
+      expect(trusted({ CLOUD_CODE_URL: url })).toBeUndefined();
     }
     for (const childEnv of [
       {},
@@ -74,15 +72,17 @@ describe("Antigravity process environment", () => {
       { ...env, all_proxy: "http://example.test:8888" },
       { ...env, cloud_code_url: "http://example.test:8317" },
     ]) {
-      expect(trusted(childEnv)).toBe(false);
+      expect(trusted(childEnv)).toBeUndefined();
     }
     for (const args of [
       ["acp", "--cloud_code_endpoint", "https://example.test"],
       ["acp", "--cloud_code_endpoint=http://127.0.0.1:8318"],
       ["acp", "--cloud_code_endpoint"],
+      ["acp", "--cloud_code_endpoint", `${origin}/`],
+      ["acp", `--cloud_code_endpoint=${origin}`],
       ["acp", `--cloud_code_endpoint=${origin}`, `--cloud_code_endpoint=${origin}`],
     ]) {
-      expect(trusted(env, args)).toBe(false);
+      expect(trusted(env, args)).toBeUndefined();
     }
   });
 

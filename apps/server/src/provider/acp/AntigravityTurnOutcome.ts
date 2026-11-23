@@ -22,11 +22,9 @@ const PLANNER_RESPONSE_STEP_TYPE = 15;
 const MAX_ERROR_PAYLOAD_BYTES = 16_384;
 const POOL_DENIAL = "request failed (code 429): all eligible accounts are rate limited";
 const GOOGLE_POOL_DENIAL = "RESOURCE_EXHAUSTED (code 429): all eligible accounts are rate limited";
-const POOL_DENIALS = [POOL_DENIAL, GOOGLE_POOL_DENIAL].map((message) => ({
-  message,
-  bytes: new TextEncoder().encode(message),
-}));
 const POOL_QUOTA_HEADER = /^x-fleetix-pool-quota$/i;
+const POOL_QUOTA_TEXT =
+  /all eligible accounts are rate limited|fleetix_pool_quota|x-fleetix-pool-quota/i;
 const MAX_POOL_RESET_MS = 7 * 24 * 60 * 60 * 1000;
 // The Go harness's rendering of a Google API error, as the agent's api_errors.py reads it.
 // Status is a gRPC code, or an HTTP status line such as "502 Bad Gateway". A message
@@ -93,6 +91,7 @@ const NATIVE_SESSION_ID = /^[\w-]+$/;
 interface LastStep {
   readonly type: number;
   readonly payload: Uint8Array | null;
+  readonly truncated: boolean;
   readonly reachedModel: boolean;
 }
 
@@ -135,7 +134,8 @@ const lastStepAfter =
   (database: NodeSqlite.DatabaseSync): LastStep | undefined => {
     const row = database
       .prepare(
-        `SELECT step_type AS type, substr(step_payload, 1, ?) AS payload
+        `SELECT step_type AS type, substr(step_payload, 1, ?) AS payload,
+                length(step_payload) AS payload_length
          FROM steps WHERE idx > ? ORDER BY idx DESC LIMIT 1`,
       )
       .get(MAX_ERROR_PAYLOAD_BYTES, index);
@@ -147,6 +147,8 @@ const lastStepAfter =
     return {
       type: row.type,
       payload: row.payload instanceof Uint8Array ? row.payload : null,
+      truncated:
+        typeof row.payload_length === "number" && row.payload_length > MAX_ERROR_PAYLOAD_BYTES,
       reachedModel,
     };
   };
@@ -256,13 +258,15 @@ function poolDenial(payload: Uint8Array, trustHeader: boolean, now: DateTime.Utc
     // Antigravity 1.5.12 stores the normalized message at 24.3.2 and 24.3.9, not in HTTP diagnostics.
     const errorStep = delimitedField(payload, 24);
     const error = errorStep && delimitedField(errorStep, 3);
-    if (error === undefined) return undefined;
+    if (error === undefined) return null;
+    const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+    let decoded = false;
     for (const field of [2, 9]) {
       const normalized = delimitedField(error, field);
-      const match =
-        normalized && POOL_DENIALS.find(({ bytes }) => Buffer.compare(normalized, bytes) === 0);
-      if (match === undefined) continue;
-      const { message } = match;
+      if (!normalized?.length) continue;
+      const message = decoder.decode(normalized);
+      decoded = true;
+      if (message !== POOL_DENIAL && message !== GOOGLE_POOL_DENIAL) continue;
       if (!trustHeader || now === undefined) return { message };
       const diagnostic = delimitedField(error, 3);
       return {
@@ -273,8 +277,10 @@ function poolDenial(payload: Uint8Array, trustHeader: boolean, now: DateTime.Utc
             : poolQuotaResetAt(diagnostic, DateTime.toEpochMillis(now)),
       };
     }
+    return decoded ? undefined : null;
   } catch (error) {
-    if (error instanceof ProtobufReader.ProtobufReaderError) return undefined;
+    if (error instanceof ProtobufReader.ProtobufReaderError || error instanceof TypeError)
+      return null;
     throw error;
   }
 }
@@ -338,7 +344,7 @@ function turnFailure(
   stopReason: EffectAcpSchema.StopReason,
   step: LastStep | undefined,
   now: DateTime.Utc | undefined,
-  trustFleetixPoolQuotaHeader = false,
+  fleetixPoolQuotaRoute?: string,
   retired = false,
 ):
   | {
@@ -351,19 +357,30 @@ function turnFailure(
   if (payload === undefined && stopReason !== "refusal") return undefined;
   const reusable = (failure: OrchestrationV2ProviderFailure) =>
     ({ failure, threadDisposition: "reusable" }) as const;
-  const pool = payload == null ? undefined : poolDenial(payload, trustFleetixPoolQuotaHeader, now);
-  if (pool !== undefined) {
-    return reusable(
-      makeProviderFailure({
+  const pool =
+    payload == null || step?.truncated
+      ? null
+      : poolDenial(payload, fleetixPoolQuotaRoute !== undefined, now);
+  if (pool != null) {
+    return reusable({
+      ...makeProviderFailure({
         class: "usage_limit",
         message: pool.message,
         code: "FLEETIX_POOL_QUOTA",
         retryable: true,
         resetAt: pool.resetAt ?? null,
       }),
-    );
+      ...(pool.resetAt === undefined || fleetixPoolQuotaRoute === undefined
+        ? {}
+        : { fleetixPoolQuotaRoute }),
+    });
   }
   const text = payload == null ? "" : new TextDecoder().decode(payload);
+  // A discarded tail can contain the pool marker even when the retained prefix decodes.
+  const legacyResetAt =
+    step?.truncated || (pool === null && POOL_QUOTA_TEXT.test(text))
+      ? null
+      : (resetAtFrom(text, retired ? undefined : now) ?? null);
   const apiError = API_ERROR.exec(text) ?? statusError(text);
   // The agent maps only the SDK's QUOTA_EXHAUSTED stop reason to `refusal`.
   if (stopReason === "refusal" || QUOTA_EXHAUSTED.test(text)) {
@@ -373,7 +390,7 @@ function turnFailure(
         message: "You have reached your Antigravity quota for this period.",
         code: apiError?.[3] ?? "QUOTA_EXHAUSTED",
         retryable: true,
-        resetAt: resetAtFrom(text, retired ? undefined : now) ?? null,
+        resetAt: legacyResetAt,
       }),
     );
   }
@@ -418,7 +435,7 @@ function turnFailure(
     message: message!.trim(),
     code: status ?? null,
     retryable: rateLimited || transientNotFound || Number(httpStatus) >= 500,
-    resetAt: resetAtFrom(text, retired ? undefined : now) ?? null,
+    resetAt: legacyResetAt,
   });
   return transientNotFound
     ? { failure, threadDisposition: "reusable", resumeWith: "continue" }
@@ -436,7 +453,7 @@ const conversationSegments = ["antigravity-acp", "conversations"];
 export const watchAntigravityPromptOutcome = Effect.fn("AntigravityTurnOutcome.watch")(function* (
   profileDirectory: string,
   sessionId: string,
-  route?: { readonly trustFleetixPoolQuotaHeader?: boolean },
+  route?: { readonly fleetixPoolQuotaRoute?: string },
 ) {
   const typedOnly = (result: EffectAcpSchema.PromptResponse) =>
     DateTime.now.pipe(Effect.map((now) => turnFailure(result.stopReason, undefined, now)));
@@ -503,7 +520,7 @@ export const watchAntigravityPromptOutcome = Effect.fn("AntigravityTurnOutcome.w
       result.stopReason,
       step,
       now,
-      route?.trustFleetixPoolQuotaHeader === true,
+      route?.fleetixPoolQuotaRoute,
       options?.retired === true,
     );
   });
