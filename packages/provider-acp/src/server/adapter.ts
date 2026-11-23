@@ -448,6 +448,9 @@ export interface AcpAdapterV2Flavor {
   readonly promptFailure?: (cause: unknown) => OrchestrationV2ProviderFailure;
   /** The flavor's runtime refuses a version the policy rates broken when it starts. */
   readonly checksVersionAtHandshake?: boolean;
+  readonly fleetixPoolQuotaRoute?: (
+    runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
+  ) => string | undefined;
   /**
    * Runs before `session/prompt`. The check reports a failure hidden by a clean stop, or
    * by silence when the inactivity watchdog retires the prompt (`retired`). A failure
@@ -10798,13 +10801,42 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     sequence: ++context.appContextSequence,
                   }
                 : undefined;
+            const verifyPoolRoute = turnInput.verifyFleetixPoolQuotaRoute;
             yield* followPrompt(
               context,
               (superseded) =>
                 compactSession === undefined
                   ? sendPromptWhenIdle(
                       context,
-                      () => runtime.prompt({ prompt: promptParts!.prompt }, promptOptions),
+                      () => {
+                        const sendingRuntime = runtime;
+                        return sendingRuntime.prompt(
+                          { prompt: promptParts!.prompt },
+                          verifyPoolRoute === undefined
+                            ? promptOptions
+                            : {
+                                ...promptOptions,
+                                beforeDispatch: Effect.gen(function* () {
+                                  const verified = yield* verifyPoolRoute(
+                                    flavor.fleetixPoolQuotaRoute?.(sendingRuntime),
+                                  );
+                                  if (
+                                    !verified ||
+                                    runtime !== sendingRuntime ||
+                                    context.interrupted ||
+                                    context.finalized ||
+                                    superseded()
+                                  ) {
+                                    return yield* new EffectAcpErrors.AcpTransportError({
+                                      detail:
+                                        "The Fleetix pool route changed before automatic continuation.",
+                                      cause: "Fleetix pool route verification failed",
+                                    });
+                                  }
+                                }),
+                              },
+                        );
+                      },
                       superseded,
                     )
                   : Deferred.succeed(context.promptDispatched, undefined).pipe(

@@ -1,5 +1,6 @@
 import {
   CommandId,
+  type EventId,
   type OrchestrationV2Run,
   OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
@@ -141,6 +142,11 @@ export interface EventSinkV2Shape {
     readonly runId: RunId;
     readonly activeAttemptId: RunAttemptId;
     readonly expectedStatus: OrchestrationV2Run["status"];
+    readonly disarmLimitRecovery?: {
+      readonly runId: RunId;
+      readonly eventId: EventId;
+      readonly occurredAt: DateTime.Utc;
+    };
     /** Also refuse while this run interrupt request is stored without its result. */
     readonly unlessInterruptRequested?: {
       readonly requestId: OrchestrationV2TurnItem["id"];
@@ -596,10 +602,30 @@ const layerBase: Layer.Layer<
               }
             }
 
-            const normalized = yield* normalizeEvents(
+            const events =
               input.guardPendingUserInputCancellations === true
                 ? yield* guardUserInputCancellations(input.events)
-                : input.events,
+                : input.events;
+            const disarm = input.disarmLimitRecovery;
+            const thread =
+              disarm === undefined ? undefined : yield* projectionStore.getThread(input.threadId);
+            const recovery = thread?.limitRecovery;
+            const normalized = yield* normalizeEvents(
+              disarm !== undefined &&
+                thread !== undefined &&
+                recovery?.runId === disarm.runId &&
+                recovery.autoResume
+                ? [
+                    {
+                      id: disarm.eventId,
+                      type: "thread.metadata-updated",
+                      threadId: thread.id,
+                      occurredAt: disarm.occurredAt,
+                      payload: { ...thread, limitRecovery: { ...recovery, autoResume: false } },
+                    },
+                    ...events,
+                  ]
+                : events,
             );
             const storedEvents = yield* eventStore.append({
               ...(input.commandId === undefined ? {} : { commandId: input.commandId }),

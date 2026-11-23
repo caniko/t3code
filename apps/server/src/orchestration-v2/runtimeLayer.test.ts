@@ -42,6 +42,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Equal from "effect/Equal";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
@@ -220,17 +221,23 @@ const antigravityProviderInstance = {
   },
 } satisfies ProviderInstance;
 
+const loadedAntigravityConfig = { driver: antigravityDriver, enabled: true };
+
 const layerTestProviderInstanceRegistry = Layer.merge(
   ModelManifest.layerTest,
   Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
-    getInstance: (instanceId) =>
+    getInstance: (instanceId, expectedConfig) =>
       Effect.succeed(
         [
           providerInstance,
           alternateProviderInstance,
           claudeProviderInstance,
           antigravityProviderInstance,
-        ].find((instance) => instanceId === instance.instanceId),
+        ].find(
+          (instance) =>
+            instanceId === instance.instanceId &&
+            (expectedConfig === undefined || Equal.equals(loadedAntigravityConfig, expectedConfig)),
+        ),
       ),
     listInstances: Effect.succeed([
       providerInstance,
@@ -14002,6 +14009,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
     "legacy-model-switch",
     "pool-route-change",
     "pool-route-unverified",
+    "pool-saved-config-change",
     "pool-provider-disabled",
     "queued-model-switch",
     "default-model",
@@ -14030,11 +14038,13 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       const projectId = ProjectId.make(`recovery:project:${scenario}`);
       const poolChain = scenario === "pool-chain" || scenario === "pool-restart-chain";
       const routeChanged = scenario === "pool-route-change" || scenario === "pool-route-unverified";
+      const savedConfigChanged = scenario === "pool-saved-config-change";
       const providerDisabled = scenario === "pool-provider-disabled";
       const initialSelection =
         scenario === "resume" ||
         poolChain ||
         routeChanged ||
+        savedConfigChanged ||
         providerDisabled ||
         scenario === "default-model" ||
         (scenario.endsWith("-switch") && scenario !== "legacy-model-switch")
@@ -14246,7 +14256,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         autoResumeLimitedThreads: autoResume,
         snoozeLimitedThreads: snooze,
         providerInstances: {
-          [antigravityInstanceId]: { driver: antigravityDriver, enabled: true },
+          [antigravityInstanceId]: loadedAntigravityConfig,
         },
       });
       const arm = limitRecoveryCommand(shell, autoResume, DateTime.toEpochMillis(now), snooze);
@@ -14508,6 +14518,22 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           },
         });
       }
+      if (savedConfigChanged) {
+        // The test registry still serves the originally loaded instance after the settings save.
+        yield* settings.updateSettings({
+          providerInstances: {
+            [antigravityInstanceId]: {
+              driver: antigravityDriver,
+              enabled: true,
+              config: { authMethod: "agent-platform", gcpProject: "test", gcpLocation: "global" },
+            },
+          },
+        });
+        assert.equal(
+          yield* antigravityProviderInstance.orchestrationAdapter.getFleetixPoolQuotaRoute(),
+          trustedPoolRoute,
+        );
+      }
       yield* TestClock.adjust("1 minute");
       const resume = limitRecoveryCommand(
         armedShell,
@@ -14642,6 +14668,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
       if (
         (scenario.endsWith("-switch") && scenario !== "legacy-model-switch") ||
         routeChanged ||
+        savedConfigChanged ||
         providerDisabled ||
         scenario === "default-model"
       ) {
@@ -14669,6 +14696,33 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           1,
         );
         const completedAt = yield* DateTime.now;
+        if (scenario === "pool-chain") {
+          const claimed = yield* events.writeIfRunCurrent({
+            threadId,
+            runId: continuation.id,
+            activeAttemptId: continuation.activeAttemptId!,
+            expectedStatus: "starting",
+            disarmLimitRecovery: {
+              runId: run.id,
+              eventId: EventId.make("recovery:pool-chain:disarm"),
+              occurredAt: completedAt,
+            },
+            events: [
+              {
+                id: EventId.make("recovery:pool-chain:claimed"),
+                type: "run.updated",
+                threadId,
+                runId: continuation.id,
+                occurredAt: completedAt,
+                payload: { ...continuation, status: "running", startedAt: completedAt },
+              },
+            ],
+          });
+          assert.isTrue(claimed.committed);
+          assert.isFalse(
+            (yield* orchestrator.getThreadProjection(threadId)).thread.limitRecovery?.autoResume,
+          );
+        }
         const sweep = { now: completedAt, autoResume: true, snooze: false };
         assert.isUndefined(
           (yield* projections.getLimitRecoveryCandidates(sweep)).find((row) => row.id === threadId),

@@ -654,6 +654,7 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly baseline?: Effect.Effect<void>;
   readonly providerTurnOrdinal: number;
   readonly nativeThreadHasTurns?: boolean;
+  readonly verifyFleetixPoolQuotaRoute?: ProviderAdapter.ProviderAdapterV2TurnInput["verifyFleetixPoolQuotaRoute"];
   readonly resume?: boolean;
   readonly loadInheritedBackgroundTurnItems?: () => Effect.Effect<
     ReadonlyArray<InheritedBackgroundTurnItemRoute>,
@@ -2288,6 +2289,9 @@ export const layer: Layer.Layer<
           ...(input.nativeThreadHasTurns === undefined
             ? {}
             : { nativeThreadHasTurns: input.nativeThreadHasTurns }),
+          ...(input.verifyFleetixPoolQuotaRoute === undefined
+            ? {}
+            : { verifyFleetixPoolQuotaRoute: input.verifyFleetixPoolQuotaRoute }),
           ...(input.run.restartContinuationOfRunId === undefined
             ? {}
             : {
@@ -2317,35 +2321,48 @@ export const layer: Layer.Layer<
           input.message.text.trim().toLowerCase() === "/compact";
         const { message: _message, ...resumeInput } = turnInput;
         const startTurn =
-          input.resume === true
-            ? (input.session.resumeTurn?.({ ...resumeInput, messageId: input.message.messageId }) ??
-              Effect.fail(
+          input.verifyFleetixPoolQuotaRoute !== undefined && input.session.driver !== "antigravity"
+            ? Effect.fail(
                 new ProviderAdapter.ProviderAdapterTurnStartError({
                   driver: input.session.driver,
                   threadId: input.run.threadId,
                   providerThreadId: input.providerThread.id,
                   runId: input.run.id,
-                  cause: new ProviderAdapter.ProviderResumeUnsupportedError({
-                    driver: input.session.driver,
-                    providerThreadId: input.providerThread.id,
-                  }),
+                  cause: "The Fleetix pool route changed before automatic continuation.",
                 }),
-              ))
-            : compact
-              ? (input.session.compactThread?.(turnInput) ??
+              )
+            : input.resume === true
+              ? (input.session.resumeTurn?.({
+                  ...resumeInput,
+                  messageId: input.message.messageId,
+                }) ??
                 Effect.fail(
                   new ProviderAdapter.ProviderAdapterTurnStartError({
                     driver: input.session.driver,
                     threadId: input.run.threadId,
                     providerThreadId: input.providerThread.id,
                     runId: input.run.id,
-                    cause: new ProviderAdapter.ProviderCompactionUnsupportedError({
+                    cause: new ProviderAdapter.ProviderResumeUnsupportedError({
                       driver: input.session.driver,
                       providerThreadId: input.providerThread.id,
                     }),
                   }),
                 ))
-              : input.session.startTurn(turnInput);
+              : compact
+                ? (input.session.compactThread?.(turnInput) ??
+                  Effect.fail(
+                    new ProviderAdapter.ProviderAdapterTurnStartError({
+                      driver: input.session.driver,
+                      threadId: input.run.threadId,
+                      providerThreadId: input.providerThread.id,
+                      runId: input.run.id,
+                      cause: new ProviderAdapter.ProviderCompactionUnsupportedError({
+                        driver: input.session.driver,
+                        providerThreadId: input.providerThread.id,
+                      }),
+                    }),
+                  ))
+                : input.session.startTurn(turnInput);
         yield* Effect.andThen(shouldStart, startTurn).pipe(
           // Wait for acceptance so abandoned startup cannot leave a refresher
           // on the already-detached ingestion fiber.

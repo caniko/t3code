@@ -46,6 +46,7 @@ import { resolveProviderCompatibility } from "../providerCompatibility.ts";
 import { AntigravityDriver } from "./AntigravityDriver.ts";
 import * as ProviderHostLive from "../ProviderHostLive.ts";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
+import { makeTurnInput } from "../../orchestration-v2/Adapters/AcpAdapterV2.testkit.ts";
 
 const hostPlatform = HostProcess.Platform.defaultValue();
 const windowsHost = hostPlatform === "win32";
@@ -390,6 +391,69 @@ it.layer(layerTest)("AntigravityDriver", (it) => {
       }
     }),
   );
+  it.effect.each([
+    { authMethod: "gemini-api-key", apiKey: "fixture-key" },
+    { authMethod: "oauth-business", gcpProject: "fixture-project", gcpLocation: "global" },
+    { authMethod: "agent-platform", gcpProject: "fixture-project", gcpLocation: "global" },
+  ] as const)("does not prove a Fleetix pool route for $authMethod", (config) =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ trustedPoolOrigin: "http://127.0.0.1:8317", config });
+      expect(yield* h.instance.orchestrationAdapter.getFleetixPoolQuotaRoute!()).toBeUndefined();
+      expect(h.launches).toHaveLength(0);
+    }),
+  );
+
+  it.effect.skipIf(windowsHost)(
+    "refuses a pool continuation before any native prompt when the runtime route changed",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness({ trustedPoolOrigin: "http://127.0.0.1:8317" });
+        const expected = yield* h.instance.orchestrationAdapter.getFleetixPoolQuotaRoute!();
+        expect(expected).toMatch(/^[a-f0-9]{64}$/);
+        h.controls.selected = h.second;
+        const threadId = ThreadId.make("thread-antigravity-pool-continuation");
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          cwd: yield* h.fs.makeTempDirectoryScoped(),
+        });
+        const instanceId = h.instance.instanceId;
+        const modelSelection = { instanceId, model: "gemini-test-low" };
+        const session = yield* h.instance.orchestrationAdapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-antigravity-pool"),
+          modelSelection,
+          runtimePolicy,
+        });
+        const providerThread = yield* session.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* session.startTurn({
+          ...makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            modelSelection,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            messageText: "Continue where you left off.",
+          }),
+          verifyFleetixPoolQuotaRoute: (route: string | undefined) =>
+            Effect.succeed(route === expected),
+        });
+        const terminal = yield* session.events.pipe(
+          Stream.filter((event) => event.type === "turn.terminal"),
+          Stream.runHead,
+        );
+        expect(terminal).toMatchObject({ value: { status: "failed" } });
+        expect((yield* h.readRequests).map((request) => request.method)).not.toContain(
+          "session/prompt",
+        );
+      }),
+  );
+
   it.effect.skipIf(windowsHost)(
     "refreshes the selected executable and limits form capabilities to chat",
     () =>

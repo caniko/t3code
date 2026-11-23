@@ -75,6 +75,7 @@ import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter"
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { unsentManualContinuationSource } from "@t3tools/shared/orchestrationV2ManualContinuation";
+import { latestRootProviderFailure } from "@t3tools/shared/orchestrationV2ThreadError";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import {
   ContextHandoffBackgroundWorkError,
@@ -623,6 +624,48 @@ export const layer: Layer.Layer<
         return;
       }
       captureStartingRun(run);
+      let continuation = run;
+      while (
+        continuation.usageLimitContinuationOfRunId == null &&
+        continuation.restartContinuationOfRunId !== undefined
+      ) {
+        const source = projection.runs.find(
+          (candidate) =>
+            candidate.id === continuation.restartContinuationOfRunId &&
+            candidate.ordinal < continuation.ordinal,
+        );
+        if (source === undefined) break;
+        continuation = source;
+      }
+      const limitedRunId = continuation.usageLimitContinuationOfRunId;
+      const limitedRun =
+        limitedRunId == null
+          ? undefined
+          : projection.runs.find((candidate) => candidate.id === limitedRunId);
+      const limitFailure =
+        limitedRun === undefined
+          ? undefined
+          : latestRootProviderFailure(
+              limitedRun,
+              (yield* projectionStore.getThreadRecords(input.threadId, ["turnItems"], {
+                turnItemTypes: ["error"],
+                turnItemRunIds: [limitedRun.id],
+              })).turnItems,
+            );
+      const { providerInstanceId: continuationInstanceId } = run;
+      const { projectId } = projection.thread;
+      const expectedPoolRoute = limitFailure?.fleetixPoolQuotaRoute;
+      const verifyFleetixPoolQuotaRoute: ProviderAdapter.ProviderAdapterV2TurnInput["verifyFleetixPoolQuotaRoute"] =
+        limitedRunId != null && (limitFailure == null || limitFailure.code === "FLEETIX_POOL_QUOTA")
+          ? Effect.fn("ProviderTurnStartService.verifyFleetixPoolQuotaRoute")(function* (route) {
+              if (route === undefined || route !== expectedPoolRoute) return false;
+              const current = yield* (
+                providerSessions.getFleetixPoolQuotaRoute?.(continuationInstanceId, projectId) ??
+                  Effect.undefined
+              );
+              return route === current;
+            })
+          : undefined;
       const rootNode = projection.nodes.find((candidate) => candidate.id === run.rootNodeId);
       const attempt = projection.attempts.find((candidate) => candidate.id === run.activeAttemptId);
       const providerThread = projection.providerThreads.find(
@@ -2260,6 +2303,16 @@ export const layer: Layer.Layer<
         activeAttemptId: attempt.id,
         expectedStatus: "starting",
         events,
+        // A continuation can be reissued after a crash only until it reaches running.
+        ...(verifyFleetixPoolQuotaRoute === undefined || limitedRunId == null
+          ? {}
+          : {
+              disarmLimitRecovery: {
+                runId: limitedRunId,
+                eventId: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
+                occurredAt: now,
+              },
+            }),
       });
       if (!runningWrite.committed) {
         return;
@@ -2467,6 +2520,7 @@ export const layer: Layer.Layer<
           (legacyInputRunIds.size > 0 &&
             sameNativeThread &&
             !acceptedAttempts.some((source) => source.nativeThreadId !== undefined)),
+        ...(verifyFleetixPoolQuotaRoute === undefined ? {} : { verifyFleetixPoolQuotaRoute }),
         shouldStartProviderTurn: runControls.shouldStartProviderTurn,
         shouldFinalizeRun: runControls.shouldFinalizeRun,
         hasUnpairedRunInterruptRequest: runControls.hasUnpairedRunInterruptRequest,

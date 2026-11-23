@@ -244,6 +244,10 @@ export type ProviderSessionManagerV2Error = typeof ProviderSessionManagerV2Error
 
 export interface ProviderSessionManagerV2Shape {
   readonly shutdown: Effect.Effect<void>;
+  readonly getFleetixPoolQuotaRoute?: (
+    instanceId: ProviderInstanceId,
+    projectId: OrchestrationV2AppThread["projectId"],
+  ) => Effect.Effect<string | undefined>;
   readonly open: (input: {
     readonly threadId: ThreadId;
     readonly providerSessionId: ProviderSessionId;
@@ -3237,6 +3241,18 @@ export const layerWithOptions = (
 
       return ProviderSessionManagerV2.of({
         shutdown,
+        getFleetixPoolQuotaRoute: Effect.fn("ProviderSessionManagerV2.getFleetixPoolQuotaRoute")(
+          function* (instanceId, projectId) {
+            if (Option.isNone(serverSettings)) return;
+            return yield* serverSettings.value
+              .withSettingsSnapshot(
+                (settings) =>
+                  registry.getFleetixPoolQuotaRoute?.(instanceId, settings, projectId) ??
+                  Effect.undefined,
+              )
+              .pipe(Effect.orElseSucceed(() => undefined));
+          },
+        ),
         open: (input) =>
           sessionOpen.withLock(
             input.providerSessionId,

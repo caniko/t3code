@@ -8158,12 +8158,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     const recoveryProviderEnabled =
       limitedRun === undefined ||
-      resolveProjectProviderInstanceEnabled(
-        yield* serverSettings.getSettings.pipe(Effect.orDie),
-        projection.thread.projectId,
-        modelSelection.instanceId,
-      );
-    if (
+      (yield* serverSettings.getSettings.pipe(
+        Effect.map((settings) =>
+          resolveProjectProviderInstanceEnabled(
+            settings,
+            projection.thread.projectId,
+            modelSelection.instanceId,
+          ),
+        ),
+        Effect.orElseSucceed(() => false),
+      ));
+    const recoveryRouteRefused =
       limitedRun !== undefined &&
       (limitedRun.providerInstanceId !== modelSelection.instanceId ||
         (poolQuotaFailure &&
@@ -8173,13 +8178,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             !modelSelectionsEqual(limitedRun.modelSelection, modelSelection) ||
             poolQuotaRoute === undefined ||
             poolQuotaRoute !==
-              (yield* providerAdapters.get(modelSelection.instanceId).pipe(
-                Effect.flatMap(
-                  (adapter) => adapter.getFleetixPoolQuotaRoute?.() ?? Effect.undefined,
-                ),
-                Effect.orElseSucceed(() => undefined),
-              )))))
-    ) {
+              (yield* serverSettings
+                .withSettingsSnapshot(
+                  (settings) =>
+                    providerAdapters.getFleetixPoolQuotaRoute?.(
+                      modelSelection.instanceId,
+                      settings,
+                      projection.thread.projectId,
+                    ) ?? Effect.undefined,
+                )
+                .pipe(Effect.orElseSucceed(() => undefined))))));
+    if (recoveryRouteRefused) {
       const recovery = projection.thread.limitRecovery;
       yield* emit(
         events,

@@ -158,6 +158,13 @@ interface AntigravityFlavorServices {
   readonly host: ProviderHost.ProviderHost["Service"];
 }
 
+const fleetixPoolQuotaRoute: NonNullable<AcpAdapterV2Flavor["fleetixPoolQuotaRoute"]> = (
+  runtime,
+) =>
+  "fleetixPoolQuotaRoute" in runtime && typeof runtime.fleetixPoolQuotaRoute === "string"
+    ? runtime.fleetixPoolQuotaRoute
+    : undefined;
+
 export function makeAntigravityAcpAdapterFlavor(
   options: AntigravityAdapterV2Options & AntigravityFlavorServices,
 ): AcpAdapterV2Flavor {
@@ -384,6 +391,7 @@ export function makeAntigravityAcpAdapterFlavor(
     compactViaAdvertisedCommand: true,
     requiresSignIn: isAntigravitySignInRequiredError,
     checksVersionAtHandshake: true,
+    fleetixPoolQuotaRoute,
     // Antigravity can leave a prompt open without updates; long tools and approvals pause this.
     promptInactivityTimeout: "15 minutes",
     reportsPerTurnPromptUsage: true,
@@ -391,15 +399,14 @@ export function makeAntigravityAcpAdapterFlavor(
     ...(profileDirectory === undefined
       ? {}
       : {
-          watchPromptOutcome: (sessionId, runtime) =>
-            watchAntigravityPromptOutcome(
+          watchPromptOutcome: (sessionId, runtime) => {
+            const route = fleetixPoolQuotaRoute(runtime);
+            return watchAntigravityPromptOutcome(
               profileDirectory,
               sessionId,
-              "fleetixPoolQuotaRoute" in runtime &&
-                typeof runtime.fleetixPoolQuotaRoute === "string"
-                ? { fleetixPoolQuotaRoute: runtime.fleetixPoolQuotaRoute }
-                : undefined,
-            ),
+              route === undefined ? undefined : { fleetixPoolQuotaRoute: route },
+            );
+          },
           subagentsOutlivingPrompt: ({ sessionId, nativeTaskIds }) =>
             readAntigravityChildrenAtWork({
               profileDirectory,

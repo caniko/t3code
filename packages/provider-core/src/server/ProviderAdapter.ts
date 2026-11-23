@@ -595,6 +595,9 @@ export interface ProviderAdapterV2TurnInput {
   readonly runId: RunId;
   readonly runOrdinal: number;
   readonly nativeThreadHasTurns?: boolean;
+  readonly verifyFleetixPoolQuotaRoute?: (
+    runtimeRoute: string | undefined,
+  ) => Effect.Effect<boolean>;
   readonly providerTurnOrdinal: number;
   readonly restartContinuationOfRunId?: RunId;
   readonly resume?: true;

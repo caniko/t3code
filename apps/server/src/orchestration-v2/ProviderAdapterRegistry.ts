@@ -1,8 +1,11 @@
 import {
   ProviderInstanceId,
   ProviderSetupError,
+  resolveProjectProviderInstanceEnabled,
   type OrchestrationV2ProviderCapabilities,
+  type ProjectId,
   type ServerProvider,
+  type ServerSettings,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -13,6 +16,7 @@ import * as Scope from "effect/Scope";
 import * as ModelManifest from "../provider/ModelManifest.ts";
 import { brokenRuntimeError } from "../provider/providerCompatibility.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
+import { deriveProviderInstanceConfigMap } from "../provider/ProviderInstanceRegistryHydration.ts";
 import { ProviderAdapterDriverCreateError } from "@t3tools/provider-core/server/adapterDriver";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
@@ -46,6 +50,11 @@ export interface ProviderAdapterRegistryV2Shape {
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<ProviderAdapter.ProviderAdapterV2["Service"], ProviderAdapterRegistryV2Error>;
   readonly list: () => Effect.Effect<ReadonlyArray<ProviderInstanceId>>;
+  readonly getFleetixPoolQuotaRoute?: (
+    instanceId: ProviderInstanceId,
+    settings: ServerSettings,
+    projectId: ProjectId,
+  ) => Effect.Effect<string | undefined>;
   readonly getMetadata?: (instanceId: ProviderInstanceId) => Effect.Effect<
     {
       readonly driver: ProviderAdapter.ProviderAdapterV2["Service"]["driver"];
@@ -72,6 +81,17 @@ export const layerFromProviderInstanceRegistry: Layer.Layer<
     const instances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
     const manifest = yield* ModelManifest.ModelManifest;
     return ProviderAdapterRegistryV2.of({
+      getFleetixPoolQuotaRoute: Effect.fn("ProviderAdapterRegistryV2.getFleetixPoolQuotaRoute")(
+        function* (instanceId, settings, projectId) {
+          if (!resolveProjectProviderInstanceEnabled(settings, projectId, instanceId)) return;
+          const saved = deriveProviderInstanceConfigMap(settings)[instanceId];
+          if (saved?.driver !== "antigravity") return;
+          const instance = yield* instances.getInstance(instanceId, saved);
+          return yield* (
+            instance?.orchestrationAdapter.getFleetixPoolQuotaRoute?.() ?? Effect.undefined
+          );
+        },
+      ),
       get: Effect.fn("ProviderAdapterRegistryV2.get")(function (instanceId) {
         return instances.getInstance(instanceId).pipe(
           Effect.flatMap((instance) => {

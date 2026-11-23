@@ -1197,6 +1197,7 @@ export class AcpSessionRuntime extends Context.Service<
       options?: {
         readonly dispatched?: Deferred.Deferred<void>;
         readonly released?: Deferred.Deferred<void>;
+        readonly beforeDispatch?: Effect.Effect<void, EffectAcpErrors.AcpError>;
       },
     ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
     readonly cancel: Effect.Effect<void, EffectAcpErrors.AcpError>;
@@ -2884,6 +2885,8 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
             promptDispatchSemaphore.withPermit(
               Effect.gen(function* () {
                 const started = yield* getStartedState;
+                if (promptOptions?.beforeDispatch !== undefined)
+                  yield* promptOptions.beforeDispatch;
                 yield* closeActiveAssistantSegment({ queue: eventQueue, assistantSegmentRef });
                 yield* Ref.set(assistantUpdatesOpenRef, true);
                 const requestPayload = {

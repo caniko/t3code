@@ -207,12 +207,14 @@ export const AntigravityDriver: ProviderDriver<
     );
     const provePoolRoute = Effect.fn("AntigravityDriver.provePoolRoute")(
       function* (spawn: Pick<AcpSessionRuntime.AcpSpawnInput, "command" | "args" | "env">) {
+        if (auth.authMethod !== "oauth-personal") return undefined;
         const origin = fleetixPoolQuotaOrigin(spawn, trustedPoolProxyUrl);
         if (origin === undefined) return undefined;
         const resolved = yield* fileSystem.realPath(spawn.command);
         const info = yield* fileSystem.stat(resolved);
         if (info.type !== "File") return undefined;
         const identity = [
+          auth.authMethod,
           origin,
           spawn.command,
           resolved,

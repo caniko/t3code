@@ -36,6 +36,7 @@ export class ProviderInstanceRegistry extends Context.Service<
   {
     readonly getInstance: (
       instanceId: ProviderInstanceId,
+      expectedConfig?: ProviderInstanceConfig,
     ) => Effect.Effect<ProviderInstance | undefined>;
     readonly listInstances: Effect.Effect<ReadonlyArray<ProviderInstance>>;
     readonly listUnavailable: Effect.Effect<ReadonlyArray<ServerProvider>>;
@@ -747,7 +748,16 @@ export const makeProviderInstanceRegistry = Effect.fn(
   }
 
   const registry: ProviderInstanceRegistry["Service"] = {
-    getInstance: (id) => Ref.get(entries).pipe(Effect.map((map) => map.get(id)?.instance)),
+    getInstance: (id, expectedConfig) =>
+      Ref.get(entries).pipe(
+        Effect.map((map) => {
+          const live = map.get(id);
+          return live !== undefined &&
+            (expectedConfig === undefined || entryEqual(live.entry, expectedConfig))
+            ? live.instance
+            : undefined;
+        }),
+      ),
     listInstances: Ref.get(entries).pipe(
       Effect.map(
         (map) =>

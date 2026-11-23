@@ -325,15 +325,18 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
           drivers: [driver],
           configMap: { [retiredId]: entry, [siblingId]: entry },
         });
+        const nextEntry = {
+          ...entry,
+          displayName: "Second",
+          config: makeCodexConfig({ customModels: ["replacement-model"] }),
+        };
+        expect(yield* registry.getInstance(retiredId, entry)).toBeDefined();
+        expect(yield* registry.getInstance(retiredId, nextEntry)).toBeUndefined();
         const sibling = yield* registry.getInstance(siblingId);
         const reconcile = yield* mutator
           .reconcile({
             [siblingId]: entry,
-            [nextId]: {
-              ...entry,
-              displayName: "Second",
-              config: makeCodexConfig({ customModels: ["replacement-model"] }),
-            },
+            [nextId]: nextEntry,
           })
           .pipe(Effect.forkChild({ startImmediately: true }));
         yield* Deferred.await(replacementStarted);
@@ -342,7 +345,8 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
         expect(yield* registry.listInstances).toEqual([sibling]);
         yield* Deferred.succeed(releaseReplacement, undefined);
         yield* Fiber.join(reconcile);
-        expect((yield* registry.getInstance(nextId))?.displayName).toBe("Second");
+        expect((yield* registry.getInstance(nextId, nextEntry))?.displayName).toBe("Second");
+        expect(yield* registry.getInstance(nextId, entry)).toBeUndefined();
         expect(yield* registry.getInstance(siblingId)).toBe(sibling);
         expect(closed).toBe(1);
       }).pipe(Effect.provide(layerTest)),
