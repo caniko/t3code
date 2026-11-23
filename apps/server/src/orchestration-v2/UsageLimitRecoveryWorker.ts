@@ -20,7 +20,7 @@ export function limitRecoveryCommand(
   autoResume: boolean,
   nowMs: number,
   snooze = false,
-): OrchestrationV2Command | null {
+): Extract<OrchestrationV2Command, { type: "thread.metadata.update" | "message.dispatch" }> | null {
   if (
     thread.status !== "failed" ||
     thread.lastErrorClass !== "usage_limit" ||
@@ -40,9 +40,10 @@ export function limitRecoveryCommand(
     return null;
   const identity = `${thread.id}:${thread.latestRunId}:${resetMs}`;
   const recovery = thread.limitRecovery;
+  const canAutoResume = thread.poolQuotaContinuation !== true;
   if (recovery?.runId !== thread.latestRunId || recovery.resetAt !== thread.usageLimitResetAt) {
     if (nowMs - resetMs > MAX_OVERDUE_ARM_MS) return null;
-    if (!autoResume && (!snooze || resetMs <= nowMs)) return null;
+    if (!(autoResume && canAutoResume) && (!snooze || resetMs <= nowMs)) return null;
     return {
       type: "thread.metadata.update",
       commandId: CommandId.make(`limit-arm:${identity}`),
@@ -50,12 +51,13 @@ export function limitRecoveryCommand(
       limitRecovery: {
         runId: thread.latestRunId,
         resetAt: thread.usageLimitResetAt,
-        autoResume,
+        autoResume: autoResume && canAutoResume,
         snooze: snooze && resetMs > nowMs,
       },
     };
   }
   if (
+    !canAutoResume ||
     !recovery.autoResume ||
     resetMs > nowMs ||
     (thread.snoozedUntil != null && DateTime.toEpochMillis(thread.snoozedUntil) > nowMs)

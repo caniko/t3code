@@ -588,13 +588,17 @@ export const make = Effect.gen(function* () {
           },
         });
       }
-      const unsentResumeRunIds = runs.flatMap((run) =>
-        run.startedAt === null && run.usageLimitContinuationOfRunId !== undefined ? [run.id] : [],
+      const unsentResumes = runs.filter(
+        (run) => run.startedAt === null && run.usageLimitContinuationOfRunId != null,
       );
+      const unsentResumeRunIds = unsentResumes.map((run) => run.id);
       const limitRecovery = projection.thread.limitRecovery;
       // The unsent resume spent the worker's request id, so a fresh one lets it send again. An
       // untagged resume from an older server stays cancelled: its copy couldn't be hidden.
-      if (limitRecovery?.autoResume === true && unsentResumeRunIds.length > 0) {
+      if (
+        limitRecovery?.autoResume === true &&
+        unsentResumes.some((run) => run.usageLimitContinuationOfRunId === limitRecovery.runId)
+      ) {
         events.push({
           id: yield* allocateEventId(),
           type: "thread.metadata-updated",

@@ -9227,6 +9227,35 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         autoResume: true,
         requestId: CommandId.make("recovery:choice"),
       };
+      yield* store.apply({
+        id: EventId.make("event:limit-shell:pool-continuation"),
+        type: "run.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          ...original,
+          status: "failed",
+          completedAt: now,
+          usageLimitContinuationOfRunId: RunId.make("original-pool-run"),
+        },
+      });
+      yield* store.apply({
+        id: EventId.make("event:limit-shell:pool-quota"),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload: { ...limitItem, failure: { ...limitItem.failure, code: "FLEETIX_POOL_QUOTA" } },
+      });
+      assert.isUndefined(
+        (yield* store.getLimitRecoveryCandidates({ ...recoveryOptions, autoResume: true })).find(
+          (row) => row.id === threadId,
+        ),
+      );
+      assert.isTrue(
+        (yield* store.getLimitRecoveryCandidates({ ...recoveryOptions, snooze: true })).find(
+          (row) => row.id === threadId,
+        )?.poolQuotaContinuation,
+      );
       yield* sql`UPDATE orchestration_v2_projection_threads
         SET payload_json = json_set(payload_json, '$.limitRecovery', json(${encodeUnknownJsonString(recovery)}))
         WHERE thread_id = ${threadId}`;
@@ -9237,6 +9266,14 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       );
       assert.strictEqual(yield* store.getLimitRecoveryWakeAt(now), DateTime.toEpochMillis(reset));
       assert.isNull(yield* store.getLimitRecoveryWakeAt(reset));
+      assert.isUndefined(
+        (yield* store.getLimitRecoveryCandidates({ ...recoveryOptions, now: reset })).find(
+          (row) => row.id === threadId,
+        ),
+      );
+      yield* sql`UPDATE orchestration_v2_projection_runs
+        SET payload_json = json_remove(payload_json, '$.usageLimitContinuationOfRunId')
+        WHERE run_id = ${original.id}`;
       const due = (yield* store.getLimitRecoveryCandidates({
         ...recoveryOptions,
         now: reset,

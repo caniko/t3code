@@ -115,4 +115,31 @@ describe("limitRecoveryCommand arming", () => {
     const thread = failedThread(30 * HOUR_MS, 24 * HOUR_MS + 1);
     assert.isNull(limitRecoveryCommand(thread, true, nowMs));
   });
+
+  it("never auto-resumes a pool-quota continuation, even if it was already armed", () => {
+    const thread = { ...failedThread(6 * HOUR_MS, -HOUR_MS), poolQuotaContinuation: true };
+    assert.isNull(limitRecoveryCommand(thread, true, nowMs));
+    const arm = limitRecoveryCommand(thread, true, nowMs, true);
+    assert(arm?.type === "thread.metadata.update");
+    assert.deepEqual(arm.limitRecovery, {
+      runId: thread.latestRunId!,
+      resetAt: thread.usageLimitResetAt!,
+      autoResume: false,
+      snooze: true,
+    });
+    assert.isNull(
+      limitRecoveryCommand(
+        {
+          ...thread,
+          limitRecovery: {
+            runId: thread.latestRunId!,
+            resetAt: thread.usageLimitResetAt!,
+            autoResume: true,
+          },
+        },
+        true,
+        nowMs + HOUR_MS,
+      ),
+    );
+  });
 });

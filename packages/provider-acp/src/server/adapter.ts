@@ -455,6 +455,7 @@ export interface AcpAdapterV2Flavor {
    */
   readonly watchPromptOutcome?: (
     sessionId: string,
+    runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
   ) => Effect.Effect<
     (
       result: EffectAcpSchema.PromptResponse,
@@ -10769,7 +10770,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             const checkPromptOutcome =
               flavor.watchPromptOutcome === undefined
                 ? undefined
-                : yield* flavor.watchPromptOutcome(requestedSessionId);
+                : yield* flavor.watchPromptOutcome(requestedSessionId, runtime);
             const promptGeneration = yield* Ref.get(runtimeCallbackGeneration);
             const promptOptions = {
               dispatched: context.promptDispatched,
@@ -10877,7 +10878,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               const checkPromptOutcome =
                 flavor.watchPromptOutcome === undefined
                   ? undefined
-                  : yield* flavor.watchPromptOutcome(context.nativeThreadId);
+                  : yield* flavor.watchPromptOutcome(context.nativeThreadId, runtime);
               const dispatched = yield* Deferred.make<void, never>();
               const steered = yield* runRuntimeCallbackAtGeneration(
                 generation,

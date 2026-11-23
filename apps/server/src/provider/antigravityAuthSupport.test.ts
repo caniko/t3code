@@ -27,6 +27,7 @@ import {
   type AntigravityAuthConfig,
   type AntigravityProfile,
   buildAntigravityAcpSpawnInput,
+  trustsFleetixPoolQuotaHeader,
   isAntigravitySignInRequiredError,
   makeAntigravityStderrHandler,
   makeAntigravityStdoutTransform,
@@ -47,6 +48,44 @@ const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 describe("Antigravity process environment", () => {
+  it("trusts only the configured loopback origin in the child launch", () => {
+    const origin = "http://127.0.0.1:8317";
+    const env = { CLOUD_CODE_URL: origin };
+    const trusted = (childEnv: NodeJS.ProcessEnv, args: ReadonlyArray<string> = ["acp"]) =>
+      trustsFleetixPoolQuotaHeader({ env: childEnv, args }, origin);
+    expect(trusted(env)).toBe(true);
+    expect(trusted(env, ["acp", "--cloud_code_endpoint", `${origin}/`])).toBe(true);
+    expect(trusted(env, ["acp", `--cloud_code_endpoint=${origin}`])).toBe(true);
+    expect(trustsFleetixPoolQuotaHeader({ env, args: ["acp"] }, undefined)).toBe(false);
+    for (const host of ["localhost", "[::1]"]) {
+      const url = `http://${host}:8317`;
+      expect(
+        trustsFleetixPoolQuotaHeader({ env: { CLOUD_CODE_URL: url }, args: ["acp"] }, url),
+      ).toBe(true);
+      expect(trusted({ CLOUD_CODE_URL: url })).toBe(false);
+    }
+    for (const childEnv of [
+      {},
+      { CLOUD_CODE_URL: "http://example.test:8317" },
+      { CLOUD_CODE_URL: "http://127.0.0.1:8318" },
+      { CLOUD_CODE_URL: "http://127.1:8317" },
+      { CLOUD_CODE_URL: `${origin}/different-path` },
+      { ...env, HTTPS_PROXY: "http://example.test:8888" },
+      { ...env, all_proxy: "http://example.test:8888" },
+      { ...env, cloud_code_url: "http://example.test:8317" },
+    ]) {
+      expect(trusted(childEnv)).toBe(false);
+    }
+    for (const args of [
+      ["acp", "--cloud_code_endpoint", "https://example.test"],
+      ["acp", "--cloud_code_endpoint=http://127.0.0.1:8318"],
+      ["acp", "--cloud_code_endpoint"],
+      ["acp", `--cloud_code_endpoint=${origin}`, `--cloud_code_endpoint=${origin}`],
+    ]) {
+      expect(trusted(env, args)).toBe(false);
+    }
+  });
+
   const profile: AntigravityProfile = {
     platform: "linux",
     geminiHome: "/t3/userdata/providers/antigravity/profile",

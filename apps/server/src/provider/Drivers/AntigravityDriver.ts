@@ -43,6 +43,7 @@ import {
   antigravityAuthLabel,
   antigravityAuthUsesBrowser,
   buildAntigravityAcpSpawnInput,
+  trustsFleetixPoolQuotaHeader,
   isAntigravitySignInRequiredError,
   prepareAntigravityProfile,
   resolveAntigravityInstanceDirectories,
@@ -161,7 +162,12 @@ export const AntigravityDriver: ProviderDriver<
       gcpLocation: settings.gcpLocation,
     };
     const authConfigIssue = antigravityAuthConfigIssue(auth);
-    const processEnvironment = yield* mergeProviderInstanceEnvironment(environment);
+    const hostEnvironment = yield* HostProcess.Environment;
+    const processEnvironment = yield* mergeProviderInstanceEnvironment(
+      environment,
+      hostEnvironment,
+    );
+    const trustedPoolProxyUrl = hostEnvironment.T3_ANTIGRAVITY_TRUSTED_POOL_PROXY_URL;
     const userHome = resolveAntigravityUserHome(
       yield* HostProcess.Platform,
       processEnvironment,
@@ -327,7 +333,9 @@ export const AntigravityDriver: ProviderDriver<
     const makeRuntime = Effect.fn("AntigravityDriver.makeRuntime")(function* (
       input: AntigravityAdapterV2RuntimeInput,
     ): Effect.fn.Return<
-      AcpSessionRuntime.AcpSessionRuntime["Service"],
+      AcpSessionRuntime.AcpSessionRuntime["Service"] & {
+        readonly trustFleetixPoolQuotaHeader: boolean;
+      },
       AcpErrors.AcpError | ProviderSetupError,
       Scope.Scope
     > {
@@ -371,6 +379,7 @@ export const AntigravityDriver: ProviderDriver<
       });
       return {
         ...runtime,
+        trustFleetixPoolQuotaHeader: trustsFleetixPoolQuotaHeader(spawn, trustedPoolProxyUrl),
         setMode: (modeId: string) =>
           runtime.getModeState.pipe(
             Effect.flatMap((modeState) =>

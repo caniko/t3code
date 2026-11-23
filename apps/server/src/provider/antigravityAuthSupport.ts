@@ -584,6 +584,51 @@ export function buildAntigravityAcpSpawnInput(input: {
   };
 }
 
+function loopbackHttpOrigin(value: string | undefined): string | undefined {
+  if (
+    value === undefined ||
+    !/^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):[1-9][0-9]{0,4}\/?$/i.test(value) ||
+    /\s/.test(value)
+  )
+    return undefined;
+  return URL.parse(value)?.origin;
+}
+
+export function trustsFleetixPoolQuotaHeader(
+  spawn: Pick<AcpSessionRuntime.AcpSpawnInput, "env" | "args">,
+  trustedProxyUrl: string | undefined,
+): boolean {
+  const trustedOrigin = loopbackHttpOrigin(trustedProxyUrl);
+  if (
+    trustedOrigin === undefined ||
+    loopbackHttpOrigin(spawn.env?.CLOUD_CODE_URL) !== trustedOrigin
+  ) {
+    return false;
+  }
+  if (
+    Object.entries(spawn.env ?? {}).some(
+      ([key, value]) =>
+        value !== undefined &&
+        ((key !== "CLOUD_CODE_URL" && key.toUpperCase() === "CLOUD_CODE_URL") ||
+          (/^(?:http|https|all)_proxy$/i.test(key) && value !== "")),
+    )
+  )
+    return false;
+  let endpointSeen = false;
+  for (const [index, arg] of spawn.args.entries()) {
+    const endpoint = /^--?cloud_code_endpoint(?:=(.*))?$/.exec(arg);
+    if (endpoint === null) continue;
+    if (
+      endpointSeen ||
+      loopbackHttpOrigin(endpoint[1] ?? spawn.args[index + 1]) !== trustedOrigin
+    ) {
+      return false;
+    }
+    endpointSeen = true;
+  }
+  return true;
+}
+
 /** Where `agy acp --login` sends Google; the page shows a code the user pastes back. */
 const ANTIGRAVITY_CODE_REDIRECT_URI = "https://antigravity.google/oauth-callback";
 

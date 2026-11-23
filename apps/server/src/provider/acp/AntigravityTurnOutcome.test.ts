@@ -120,10 +120,12 @@ const STATUS_RATE_LIMIT_ERROR = Buffer.concat([
   ),
 ]);
 const POOL_DENIAL = "request failed (code 429): all eligible accounts are rate limited";
+const GOOGLE_POOL_DENIAL = "RESOURCE_EXHAUSTED (code 429): all eligible accounts are rate limited";
 const poolQuotaPayload = (
   message: string,
   body = JSON.stringify({ type: "error", error: { type: "usage_limit_reached", message } }),
   summary = message,
+  diagnostic = `HTTP 429 Too Many Requests\n\n${body}`,
 ) => {
   const { Len } = ProtobufWriter.WireType;
   return ProtobufWriter.make()
@@ -136,7 +138,7 @@ const poolQuotaPayload = (
     .tag(2, Len)
     .string(message)
     .tag(3, Len)
-    .string(`HTTP 429 Too Many Requests\n\n${body}`)
+    .string(diagnostic)
     .tag(5, Len)
     .string(body)
     .tag(9, Len)
@@ -177,10 +179,10 @@ describe("watchAntigravityPromptOutcome", () => {
       const turn = (
         steps: ReadonlyArray<readonly [number, Uint8Array]>,
         result: EffectAcpSchema.PromptResponse = { stopReason: "end_turn" },
-        options?: { readonly retired?: boolean },
+        options?: { readonly retired?: boolean; readonly trustFleetixPoolQuotaHeader?: boolean },
       ) =>
         Effect.gen(function* () {
-          const check = yield* watchAntigravityPromptOutcome(profileDirectory, sessionId);
+          const check = yield* watchAntigravityPromptOutcome(profileDirectory, sessionId, options);
           appendSteps(steps);
           return yield* check(result, options);
         });
@@ -260,6 +262,84 @@ describe("watchAntigravityPromptOutcome", () => {
             retryable: true,
           }),
         );
+      }
+      const timestamp = "1970-01-01T01:00:00Z";
+      const value = `v1;retry_at=${timestamp};wire_model=gemini-4-neon`;
+      const headers = (values: unknown) => JSON.stringify({ "X-Fleetix-Pool-Quota": values });
+      const diagnostic = (json: string, status = "HTTP 429 Too Many Requests", newline = "\n") =>
+        [status, `Headers: ${json}`, "", "{}"].join(newline);
+      const poolOutcome = (
+        message: string,
+        http: string,
+        trustFleetixPoolQuotaHeader?: boolean,
+        retired = false,
+      ) =>
+        turn(
+          [
+            [
+              ERROR_MESSAGE,
+              poolQuotaPayload(
+                message,
+                '{"retryDelay":"42s","reason":"QUOTA_EXHAUSTED"}',
+                message,
+                http,
+              ),
+            ],
+          ],
+          { stopReason: "end_turn" },
+          {
+            ...(trustFleetixPoolQuotaHeader === undefined ? {} : { trustFleetixPoolQuotaHeader }),
+            retired,
+          },
+        );
+      for (const [message, http] of [
+        [POOL_DENIAL, diagnostic(headers([value]))],
+        [
+          GOOGLE_POOL_DENIAL,
+          diagnostic(headers([value]), "HTTP/1.1 429 Too Many Requests", "\r\n"),
+        ],
+      ] as const) {
+        const outcome = yield* poolOutcome(message, http, true);
+        assert.deepEqual(
+          outcome,
+          reusable({
+            class: "usage_limit",
+            message,
+            code: "FLEETIX_POOL_QUOTA",
+            retryable: true,
+            resetAt: "1970-01-01T01:00:00.000Z",
+          }),
+        );
+        assert.isUndefined((yield* poolOutcome(message, http))?.failure.resetAt);
+        assert.isUndefined((yield* poolOutcome(message, http, false))?.failure.resetAt);
+        assert.deepEqual(yield* poolOutcome(message, http, true, true), outcome);
+      }
+      for (const http of [
+        `HTTP 429 Too Many Requests\n\nHeaders: ${headers([value])}`,
+        `HTTP 429 Too Many Requests\nHeaders: ${headers([value])}`,
+        diagnostic(headers([value]), "HTTP 200 OK"),
+        diagnostic("{"),
+        diagnostic(headers(value)),
+        diagnostic(headers([value, value])),
+        diagnostic(`{"X-Fleetix-Pool-Quota":["${value}"],"x-fleetix-pool-quota":["${value}"]}`),
+        diagnostic(`{"X-Fleetix-Pool-Quota":["${value}"],"X-Fleetix-Pool-Quota":["${value}"]}`),
+        diagnostic(
+          `{"X-Fleetix-Pool-Quota":["${value}"],"\\u0058-Fleetix-Pool-Quota":["${value}"]}`,
+        ),
+        diagnostic(headers([value.replace("v1;", "v2;")])),
+        diagnostic(headers([`${value};wire_model=duplicate`])),
+        diagnostic(headers([`${value};unknown=1`])),
+        diagnostic(headers([value.replace("gemini-4-neon", "invalid model")])),
+        diagnostic(headers([value.replace("gemini-4-neon", "")])),
+        diagnostic(headers([value.replace(timestamp, "1970-01-01T01:00:00+00:00")])),
+        diagnostic(headers([value.replace(timestamp, "1970-01-01T24:00:00Z")])),
+        diagnostic(headers([value.replace(timestamp, "1969-12-31T23:59:59Z")])),
+        diagnostic(headers([value.replace(timestamp, "1970-01-01T00:00:00Z")])),
+        diagnostic(headers([value.replace(timestamp, "1970-01-08T00:00:00.001Z")])),
+      ]) {
+        const outcome = yield* poolOutcome(GOOGLE_POOL_DENIAL, http, true, true);
+        assert.equal(outcome?.failure.code, "FLEETIX_POOL_QUOTA");
+        assert.isUndefined(outcome?.failure.resetAt, http);
       }
       assert.isUndefined(yield* turn([]));
       assert.isUndefined(yield* turn([[PLANNER_RESPONSE, poolDenial]]));

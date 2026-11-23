@@ -55,3 +55,4 @@ Add a separate Antigravity instance in **Settings → Providers** for each Googl
 - T3 Code does not read your Google account's Antigravity allowances; **Usage** shows tokens and cost from Antigravity's local history.
 - Use **Refresh provider status** (web/desktop) or **Refresh models** (mobile) to reload models and access.
 - For `SUBSCRIPTION_REQUIRED` or account restriction errors, see [Google's account plans](https://antigravity.google/docs/plans).
+- For a Fleetix pool proxy that supplies verified reset times, set `T3_ANTIGRAVITY_TRUSTED_POOL_PROXY_URL` in the T3 server environment to the proxy's loopback HTTP origin, including its port. Set the Antigravity launch environment's `CLOUD_CODE_URL` to that same origin. A wrapper-only default or a conflicting endpoint or proxy override cannot enable timed recovery. Without a verified reset, T3 reports the pool limit without scheduling a continuation.

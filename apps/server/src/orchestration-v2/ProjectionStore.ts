@@ -209,7 +209,7 @@ export type ProjectionLimitRecoveryCandidate = Pick<
   | "updatedAt"
   | "limitRecovery"
   | "snoozedUntil"
->;
+> & { readonly poolQuotaContinuation?: boolean };
 
 export type ProjectionThreadPullRequests = Pick<
   OrchestrationV2AppThread,
@@ -5023,10 +5023,17 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           readonly run_id: string;
           readonly completed_at: string | null;
           readonly failure_payload_json: string;
+          readonly pool_quota_continuation: 0 | 1;
           readonly last_error: string | null;
         }>`
           SELECT t.payload_json, r.run_id, r.completed_at,
             item.payload_json AS failure_payload_json,
+            (
+              json_extract(r.payload_json, '$.usageLimitContinuationOfRunId') IS NOT NULL
+              AND CASE WHEN json_valid(item.payload_json)
+                THEN json_extract(item.payload_json, '$.failure.code') IS 'FLEETIX_POOL_QUOTA'
+                ELSE 0 END
+            ) AS pool_quota_continuation,
             (
               SELECT json_extract(session.payload_json, '$.lastError')
               -- Keep bindings outermost: one provider instance can hold every session.
@@ -5083,6 +5090,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 json_extract(t.payload_json, '$.limitRecovery.runId') IS r.run_id
                 AND json_extract(t.payload_json, '$.limitRecovery.resetAt') IS json_extract(item.payload_json, '$.failure.resetAt')
                 AND json_extract(t.payload_json, '$.limitRecovery.autoResume') = 1
+                AND NOT pool_quota_continuation
                 AND julianday(json_extract(item.payload_json, '$.failure.resetAt')) <= julianday(${DateTime.formatIso(options.now)})
                 AND (
                   json_extract(t.payload_json, '$.snoozedUntil') IS NULL
@@ -5095,7 +5103,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   OR json_extract(t.payload_json, '$.limitRecovery.resetAt') IS NOT json_extract(item.payload_json, '$.failure.resetAt')
                 )
                 AND (
-                  ${booleanInt(options.autoResume)}
+                  (${booleanInt(options.autoResume)} AND NOT pool_quota_continuation)
                   OR (${booleanInt(options.snooze)} AND julianday(json_extract(item.payload_json, '$.failure.resetAt')) > julianday(${DateTime.formatIso(options.now)}))
                 )
                 -- A subagent of a settled, archived or deleted parent is abandoned work.
@@ -5140,6 +5148,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             pendingRuntimeRequest: null,
             limitRecovery: thread.limitRecovery ?? null,
             snoozedUntil: thread.snoozedUntil ?? null,
+            ...(row.pool_quota_continuation === 1 ? { poolQuotaContinuation: true } : {}),
           });
         }
         return candidates;

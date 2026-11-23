@@ -391,8 +391,12 @@ export function makeAntigravityAcpAdapterFlavor(
     ...(profileDirectory === undefined
       ? {}
       : {
-          watchPromptOutcome: (sessionId: string) =>
-            watchAntigravityPromptOutcome(profileDirectory, sessionId),
+          watchPromptOutcome: (sessionId, runtime) =>
+            watchAntigravityPromptOutcome(profileDirectory, sessionId, {
+              trustFleetixPoolQuotaHeader:
+                "trustFleetixPoolQuotaHeader" in runtime &&
+                runtime.trustFleetixPoolQuotaHeader === true,
+            }),
           subagentsOutlivingPrompt: ({ sessionId, nativeTaskIds }) =>
             readAntigravityChildrenAtWork({
               profileDirectory,

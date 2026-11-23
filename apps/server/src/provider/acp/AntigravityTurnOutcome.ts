@@ -21,7 +21,13 @@ const PLANNER_RESPONSE_STEP_TYPE = 15;
 // The harness error text leads the payload; a Go stack trace follows it.
 const MAX_ERROR_PAYLOAD_BYTES = 16_384;
 const POOL_DENIAL = "request failed (code 429): all eligible accounts are rate limited";
-const POOL_DENIAL_BYTES = new TextEncoder().encode(POOL_DENIAL);
+const GOOGLE_POOL_DENIAL = "RESOURCE_EXHAUSTED (code 429): all eligible accounts are rate limited";
+const POOL_DENIALS = [POOL_DENIAL, GOOGLE_POOL_DENIAL].map((message) => ({
+  message,
+  bytes: new TextEncoder().encode(message),
+}));
+const POOL_QUOTA_HEADER = /^x-fleetix-pool-quota$/i;
+const MAX_POOL_RESET_MS = 7 * 24 * 60 * 60 * 1000;
 // The Go harness's rendering of a Google API error, as the agent's api_errors.py reads it.
 // Status is a gRPC code, or an HTTP status line such as "502 Bad Gateway". A message
 // stops at the next error, so each start scans its own span and the match stays linear.
@@ -245,21 +251,86 @@ function delimitedField(bytes: Uint8Array, field: number) {
   return value;
 }
 
-function isPoolDenial(payload: Uint8Array) {
+function poolDenial(payload: Uint8Array, trustHeader: boolean, now: DateTime.Utc | undefined) {
   try {
     // Antigravity 1.5.12 stores the normalized message at 24.3.2 and 24.3.9, not in HTTP diagnostics.
     const errorStep = delimitedField(payload, 24);
     const error = errorStep && delimitedField(errorStep, 3);
-    return (
-      error !== undefined &&
-      [2, 9].some((field) => {
-        const message = delimitedField(error, field);
-        return message !== undefined && Buffer.compare(message, POOL_DENIAL_BYTES) === 0;
-      })
-    );
+    if (error === undefined) return undefined;
+    for (const field of [2, 9]) {
+      const normalized = delimitedField(error, field);
+      const match =
+        normalized && POOL_DENIALS.find(({ bytes }) => Buffer.compare(normalized, bytes) === 0);
+      if (match === undefined) continue;
+      const { message } = match;
+      if (!trustHeader || now === undefined) return { message };
+      const diagnostic = delimitedField(error, 3);
+      return {
+        message,
+        resetAt:
+          diagnostic === undefined
+            ? undefined
+            : poolQuotaResetAt(diagnostic, DateTime.toEpochMillis(now)),
+      };
+    }
   } catch (error) {
-    if (error instanceof ProtobufReader.ProtobufReaderError) return false;
+    if (error instanceof ProtobufReader.ProtobufReaderError) return undefined;
     throw error;
+  }
+}
+
+function poolQuotaResetAt(diagnostic: Uint8Array, nowMs: number): string | undefined {
+  const bytes = Buffer.from(diagnostic);
+  const lf = bytes.indexOf("\n\n");
+  const crlf = bytes.indexOf("\r\n\r\n");
+  const headEnd = lf < 0 ? crlf : crlf < 0 ? lf : Math.min(lf, crlf);
+  if (headEnd < 0) return undefined;
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      bytes.subarray(0, headEnd),
+    );
+    const [status, ...head] = text.split(/\r?\n/);
+    if (!/^HTTP(?:\/1\.[01])? 429 /.test(status ?? "")) return undefined;
+    const headers = head.filter((line) => line.startsWith("Headers: "));
+    if (headers.length !== 1) return undefined;
+    const json = headers[0]!.slice("Headers: ".length);
+    const parsed: unknown = JSON.parse(json);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    // JSON.parse collapses exact duplicate keys, so count decoded key tokens before trusting it.
+    const keys = [...json.matchAll(/("(?:[^"\\]|\\.)*")\s*(:)?/g)].filter(
+      ([, token, colon]) => colon !== undefined && POOL_QUOTA_HEADER.test(JSON.parse(token!)),
+    );
+    if (keys.length !== 1) return undefined;
+    const values: unknown = Object.entries(parsed).find(([key]) =>
+      POOL_QUOTA_HEADER.test(key),
+    )?.[1];
+    if (!Array.isArray(values) || values.length !== 1 || typeof values[0] !== "string")
+      return undefined;
+    const [version, ...fields] = values[0].split(";");
+    if (version !== "v1" || fields.length !== 2) return undefined;
+    const stamp = fields.find((field) => field.startsWith("retry_at="))?.slice("retry_at=".length);
+    const model = fields
+      .find((field) => field.startsWith("wire_model="))
+      ?.slice("wire_model=".length);
+    if (
+      !model ||
+      /[\s\p{Cc}\p{Cf}]/u.test(model) ||
+      stamp === undefined ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(stamp)
+    )
+      return undefined;
+    const parsedStamp = DateTime.make(stamp);
+    if (Option.isNone(parsedStamp)) return undefined;
+    const ms = DateTime.toEpochMillis(parsedStamp.value);
+    if (
+      Number.isFinite(ms) &&
+      ms > nowMs &&
+      ms <= nowMs + MAX_POOL_RESET_MS &&
+      DateTime.formatIso(parsedStamp.value).slice(0, 19) === stamp.slice(0, 19)
+    )
+      return stamp;
+  } catch (error) {
+    if (!(error instanceof SyntaxError || error instanceof TypeError)) throw error;
   }
 }
 
@@ -267,6 +338,8 @@ function turnFailure(
   stopReason: EffectAcpSchema.StopReason,
   step: LastStep | undefined,
   now: DateTime.Utc | undefined,
+  trustFleetixPoolQuotaHeader = false,
+  retired = false,
 ):
   | {
       readonly failure: OrchestrationV2ProviderFailure;
@@ -278,13 +351,15 @@ function turnFailure(
   if (payload === undefined && stopReason !== "refusal") return undefined;
   const reusable = (failure: OrchestrationV2ProviderFailure) =>
     ({ failure, threadDisposition: "reusable" }) as const;
-  if (stopReason === "end_turn" && payload != null && isPoolDenial(payload)) {
+  const pool = payload == null ? undefined : poolDenial(payload, trustFleetixPoolQuotaHeader, now);
+  if (pool !== undefined) {
     return reusable(
       makeProviderFailure({
         class: "usage_limit",
-        message: POOL_DENIAL,
+        message: pool.message,
         code: "FLEETIX_POOL_QUOTA",
         retryable: true,
+        resetAt: pool.resetAt ?? null,
       }),
     );
   }
@@ -298,7 +373,7 @@ function turnFailure(
         message: "You have reached your Antigravity quota for this period.",
         code: apiError?.[3] ?? "QUOTA_EXHAUSTED",
         retryable: true,
-        resetAt: resetAtFrom(text, now) ?? null,
+        resetAt: resetAtFrom(text, retired ? undefined : now) ?? null,
       }),
     );
   }
@@ -343,7 +418,7 @@ function turnFailure(
     message: message!.trim(),
     code: status ?? null,
     retryable: rateLimited || transientNotFound || Number(httpStatus) >= 500,
-    resetAt: resetAtFrom(text, now) ?? null,
+    resetAt: resetAtFrom(text, retired ? undefined : now) ?? null,
   });
   return transientNotFound
     ? { failure, threadDisposition: "reusable", resumeWith: "continue" }
@@ -361,6 +436,7 @@ const conversationSegments = ["antigravity-acp", "conversations"];
 export const watchAntigravityPromptOutcome = Effect.fn("AntigravityTurnOutcome.watch")(function* (
   profileDirectory: string,
   sessionId: string,
+  route?: { readonly trustFleetixPoolQuotaHeader?: boolean },
 ) {
   const typedOnly = (result: EffectAcpSchema.PromptResponse) =>
     DateTime.now.pipe(Effect.map((now) => turnFailure(result.stopReason, undefined, now)));
@@ -422,7 +498,13 @@ export const watchAntigravityPromptOutcome = Effect.fn("AntigravityTurnOutcome.w
         )
       : undefined;
     // A retired prompt's check runs long after the error, so a relative delay has no anchor.
-    const now = options?.retired === true ? undefined : yield* DateTime.now;
-    return turnFailure(result.stopReason, step, now);
+    const now = yield* DateTime.now;
+    return turnFailure(
+      result.stopReason,
+      step,
+      now,
+      route?.trustFleetixPoolQuotaHeader === true,
+      options?.retired === true,
+    );
   });
 });

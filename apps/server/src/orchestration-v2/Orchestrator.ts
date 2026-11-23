@@ -23,6 +23,7 @@ import {
   legacyThreadPullRequestKey,
 } from "../sourceControl/threadPullRequests.ts";
 import {
+  ANTIGRAVITY_DEFAULT_MODEL,
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type ChatAttachment,
   CommandId,
@@ -1095,6 +1096,17 @@ function queueTailModelSelection(
           projection.messages.find((message) => message.id === run.userMessageId),
         ),
     )?.modelSelection ?? projection.thread.modelSelection
+  );
+}
+
+function isRepeatedPoolQuota(
+  run: OrchestrationV2Run | null,
+  failure: ReturnType<typeof latestRootProviderFailure>,
+): boolean {
+  return (
+    run?.usageLimitContinuationOfRunId != null &&
+    failure?.class === "usage_limit" &&
+    failure.code === "FLEETIX_POOL_QUOTA"
   );
 }
 
@@ -7386,6 +7398,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
     }
+    let limitedRun: OrchestrationV2Run | undefined;
     if (command.usageLimitContinuationOfRunId !== undefined) {
       const run = usageLimitBlockedRun(projection.runs, projection.turnItems, null);
       const failure = latestRootProviderFailure(run, projection.turnItems);
@@ -7394,6 +7407,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       if (
         run?.id !== command.usageLimitContinuationOfRunId ||
         failure?.class !== "usage_limit" ||
+        isRepeatedPoolQuota(run, failure) ||
         threadShellFromProjection(projection).lastErrorClass !== "usage_limit" ||
         !recovery?.autoResume ||
         recovery.requestId !== command.usageLimitRecoveryRequestId ||
@@ -7428,6 +7442,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
         return;
       }
+      limitedRun = run;
     }
 
     if (command.restartContinuationOfRunId !== undefined) {
@@ -8103,6 +8118,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     // A message that names no model runs on the thread's pick when it starts, not a copy from now.
     const followsThreadSelection =
       command.modelSelection === undefined &&
+      limitedRun === undefined &&
       (command.scheduledTaskId !== undefined ||
         (shouldQueue &&
           !followsCurrentConversation(incomingMessage) &&
@@ -8118,6 +8134,28 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       !isBufferedProviderNotification(incomingMessage)
     ) {
       modelSelection = queueTailModelSelection(projection);
+    }
+    if (
+      limitedRun !== undefined &&
+      (limitedRun.providerInstanceId !== modelSelection.instanceId ||
+        limitedRun.modelSelection == null ||
+        modelSelection.model === ANTIGRAVITY_DEFAULT_MODEL ||
+        !modelSelectionsEqual(limitedRun.modelSelection, modelSelection))
+    ) {
+      const recovery = projection.thread.limitRecovery;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "thread.metadata-updated",
+        threadId: command.threadId,
+        occurredAt: yield* DateTime.now,
+        payload: {
+          ...projection.thread,
+          ...(recovery == null ? {} : { limitRecovery: { ...recovery, autoResume: false } }),
+        },
+      });
+      return;
     }
     yield* ensureGoalCommandSupported(command, command, modelSelection.instanceId);
     // Client messages resume held queues; server continuations and scheduled tasks do not.
@@ -17491,13 +17529,34 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           const command = { type: "thread.metadata.update", ...input } as const;
           // A Stop that reached the run before its limit failure landed had nothing to disarm.
           const stopped = yield* stopReachedRun(command, input.threadId, input.limitRecovery.runId);
+          let { limitRecovery } = input;
+          if (!stopped && limitRecovery.autoResume === true) {
+            const projection = yield* loadProjectionForCommand(command, ["runs", "turnItems"], {
+              turnItemTypes: ["error"],
+              turnItemRunIds: [limitRecovery.runId],
+            });
+            const run = usageLimitBlockedRun(projection.runs, projection.turnItems, null);
+            if (run?.id !== limitRecovery.runId) return;
+            if (isRepeatedPoolQuota(run, latestRootProviderFailure(run, projection.turnItems))) {
+              if (limitRecovery.snooze !== true) return;
+              limitRecovery = { ...limitRecovery, autoResume: false };
+            }
+          }
+          if (!stopped) {
+            const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
+            const autoResume =
+              limitRecovery.autoResume === true && settings.autoResumeLimitedThreads;
+            const snooze = limitRecovery.snooze === true && settings.snoozeLimitedThreads;
+            if (!autoResume && !snooze) return;
+            limitRecovery = { ...limitRecovery, autoResume, snooze };
+          }
           yield* dispatchWithReceiptEffect(
             stopped
               ? {
                   ...command,
-                  limitRecovery: { ...input.limitRecovery, autoResume: false, snooze: false },
+                  limitRecovery: { ...limitRecovery, autoResume: false, snooze: false },
                 }
-              : command,
+              : { ...command, limitRecovery },
           );
         }),
       );
