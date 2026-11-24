@@ -242,7 +242,9 @@ export const makeAntigravityAuth = Effect.fn("makeAntigravityAuth")(function* <
             if (operation !== "idle") {
               return yield* setupError(
                 "startProcess",
-                "Antigravity sign-in or sign-out is in progress. Try again after it finishes.",
+                operation === "closed"
+                  ? "This Antigravity provider was restarted. Send the message again."
+                  : "Antigravity sign-in or sign-out is in progress. Try again after it finishes.",
               );
             }
             processes.add(owned);

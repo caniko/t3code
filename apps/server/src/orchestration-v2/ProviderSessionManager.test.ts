@@ -39,6 +39,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 import { TestClock } from "effect/testing";
 import { McpSchema } from "effect/ai";
 import { HttpServer } from "effect/http";
@@ -699,6 +700,10 @@ function layerTest(input: {
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
   readonly installationGateLayer?: Layer.Layer<ProviderInstallationGate.ProviderInstallationGate>;
+  readonly instanceIdentity?: {
+    readonly current: SubscriptionRef.SubscriptionRef<object>;
+    readonly announceChanges: boolean;
+  };
 }) {
   const layerConfiguredEventSink =
     input.flakyReleaseWrites !== undefined
@@ -752,9 +757,25 @@ function layerTest(input: {
         ? {}
         : { eventStreamsEnded: input.eventStreamsEnded }),
     }).pipe(
-      Effect.map((adapter) =>
-        ProviderAdapterRegistry.layerSingle(input.withProvider?.(adapter) ?? adapter),
-      ),
+      Effect.map((adapter) => {
+        const single = ProviderAdapterRegistry.layerSingle(
+          input.withProvider?.(adapter) ?? adapter,
+        );
+        const identity = input.instanceIdentity;
+        if (identity === undefined) return single;
+        const changes = Stream.map(SubscriptionRef.changes(identity.current), () => undefined);
+        return Layer.effect(
+          ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+          Effect.gen(function* () {
+            const base = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+            return ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+              ...base,
+              instanceIdentity: () => SubscriptionRef.get(identity.current),
+              ...(identity.announceChanges ? { streamInstanceChanges: changes } : {}),
+            });
+          }),
+        ).pipe(Layer.provide(single));
+      }),
     ),
   );
   const layerConfiguredMcpRegistry =
@@ -1213,6 +1234,62 @@ it.effect("ProviderSessionManagerV2 closes every live session for a provider ins
       ),
     );
   }),
+);
+
+it.effect.each([
+  { when: "on change", announceChanges: true },
+  { when: "at next open", announceChanges: false },
+] as const)(
+  "ProviderSessionManagerV2 reopens a session whose provider instance was rebuilt ($when)",
+  ({ announceChanges }) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const eventStreamsEnded = yield* Queue.unbounded<ProviderSessionId>();
+      const current = yield* SubscriptionRef.make<object>({});
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-provider-session-manager-instance-rebuilt");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const open = manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* open;
+
+        yield* SubscriptionRef.set(current, {});
+        if (announceChanges) {
+          assert.equal(yield* Queue.take(eventStreamsEnded), providerSessionId);
+          assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+        }
+        yield* open;
+
+        const { openCount, closeCount } = yield* Ref.get(state);
+        assert.equal(openCount, 2);
+        assert.equal(closeCount, 1);
+      });
+
+      yield* effect.pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            eventStreamsEnded,
+            instanceIdentity: { current, announceChanges },
+          }),
+        ),
+      );
+    }),
 );
 
 it.effect("ProviderSessionManagerV2 opens provider sessions inside the installation gate", () =>

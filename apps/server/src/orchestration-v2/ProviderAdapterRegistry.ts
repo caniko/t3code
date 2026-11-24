@@ -12,6 +12,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Stream from "effect/Stream";
 
 import * as ModelManifest from "../provider/ModelManifest.ts";
 import { brokenRuntimeError } from "../provider/providerCompatibility.ts";
@@ -50,6 +51,9 @@ export interface ProviderAdapterRegistryV2Shape {
     instanceId: ProviderInstanceId,
   ) => Effect.Effect<ProviderAdapter.ProviderAdapterV2["Service"], ProviderAdapterRegistryV2Error>;
   readonly list: () => Effect.Effect<ReadonlyArray<ProviderInstanceId>>;
+  /** Changes when settings rebuild or remove the instance, which stops what the old one owned. */
+  readonly instanceIdentity?: (instanceId: ProviderInstanceId) => Effect.Effect<unknown>;
+  readonly streamInstanceChanges?: Stream.Stream<void>;
   readonly getFleetixPoolQuotaRoute?: (
     instanceId: ProviderInstanceId,
     settings: ServerSettings,
@@ -81,6 +85,8 @@ export const layerFromProviderInstanceRegistry: Layer.Layer<
     const instances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
     const manifest = yield* ModelManifest.ModelManifest;
     return ProviderAdapterRegistryV2.of({
+      instanceIdentity: instances.getInstance,
+      streamInstanceChanges: instances.streamChanges,
       getFleetixPoolQuotaRoute: Effect.fn("ProviderAdapterRegistryV2.getFleetixPoolQuotaRoute")(
         function* (instanceId, settings, projectId) {
           if (!resolveProjectProviderInstanceEnabled(settings, projectId, instanceId)) return;

@@ -106,12 +106,17 @@ export const makeCursorAuth = Effect.fn("makeCursorAuth")(function* (options: Cu
       : undefined;
   });
 
+  const unavailableDetail = () =>
+    operation === "closed"
+      ? "This Cursor provider was restarted. Send the message again."
+      : "Cursor sign-in or sign-out is in progress. Try again after it finishes.";
+
   const requireApiKey = Effect.gen(function* () {
     if (operation !== "idle") {
       return yield* new ProviderSetupError({
         instanceId: options.instanceId,
         operation: "credentials",
-        detail: "Cursor sign-in or sign-out is in progress. Try again after it finishes.",
+        detail: unavailableDetail(),
       });
     }
     const apiKey = yield* readApiKey;
@@ -136,7 +141,7 @@ export const makeCursorAuth = Effect.fn("makeCursorAuth")(function* (options: Cu
               return yield* new ProviderSetupError({
                 instanceId: options.instanceId,
                 operation: "session",
-                detail: "Cursor sign-in or sign-out is in progress. Try again after it finishes.",
+                detail: unavailableDetail(),
               });
             const child = yield* Scope.make();
             sessions.add(child);

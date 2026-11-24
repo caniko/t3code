@@ -339,6 +339,8 @@ interface LiveSessionEntry {
   /** Scope revocation to recorded credential ids so superseded sessions cannot revoke replacements opened before detach. */
   readonly mcpCredentialIdByThread: ReadonlyMap<ThreadId, string>;
   readonly supportsMultipleProviderThreads: boolean;
+  /** The registry's identity for the instance that opened this session. */
+  readonly instanceIdentity: unknown;
   readonly runtime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   readonly exposedRuntime: ProviderAdapter.ProviderAdapterV2SessionRuntime;
   readonly eventSubscribers: Ref.Ref<
@@ -2460,6 +2462,44 @@ export const layerWithOptions = (
         }).pipe(logReleaseFailure(providerSessionId));
       });
 
+      // A rebuilt instance has already stopped the old one's processes, so its sessions cannot
+      // run another turn. A busy session stays until its next open.
+      const releaseIfInstanceRetired = Effect.fn("ProviderSessionManager.releaseIfInstanceRetired")(
+        function* (entry: LiveSessionEntry) {
+          if (registry.instanceIdentity === undefined || entry.instanceIdentity === undefined) {
+            return;
+          }
+          const current = yield* registry.instanceIdentity(entry.runtime.instanceId);
+          if (current === entry.instanceIdentity) return;
+          const providerSessionId = entry.runtime.providerSessionId;
+          const key = sessionKey(providerSessionId);
+          const busy = (live: ReadonlyMap<string, LiveSessionEntry>) =>
+            (live.get(key)?.busyTurns.size ?? 0) > 0;
+          yield* releaseEntry({
+            providerSessionId,
+            reason: "idle_timeout",
+            detail: `Provider instance ${entry.runtime.instanceId} restarted; reopening the provider session.`,
+            keepIf: Effect.map(Ref.get(sessions), busy),
+          }).pipe(logReleaseFailure(providerSessionId));
+        },
+      );
+
+      const releaseRetiredInstanceSessions = Effect.fn(
+        "ProviderSessionManager.releaseRetiredInstanceSessions",
+      )(function* () {
+        for (const entry of (yield* Ref.get(sessions)).values()) {
+          const providerSessionId = entry.runtime.providerSessionId;
+          // Under the open lock so a replacement opened meanwhile is never the one released.
+          yield* sessionOpen.withLock(
+            providerSessionId,
+            Effect.gen(function* () {
+              if ((yield* Ref.get(sessions)).get(sessionKey(providerSessionId)) !== entry) return;
+              yield* releaseIfInstanceRetired(entry);
+            }),
+          );
+        }
+      });
+
       const observeActivity = (
         providerSessionId: ProviderSessionId,
         activity: Effect.Effect<void, ProviderSessionActivityError>,
@@ -3241,6 +3281,12 @@ export const layerWithOptions = (
         ),
       );
 
+      const instanceChanges = registry.streamInstanceChanges;
+      if (instanceChanges !== undefined) {
+        const consume = Stream.runForEach(instanceChanges, releaseRetiredInstanceSessions);
+        yield* consume.pipe(Effect.forkIn(layerScope));
+      }
+
       return ProviderSessionManagerV2.of({
         shutdown,
         withFleetixPoolQuotaRoute: Effect.fn("ProviderSessionManagerV2.withFleetixPoolQuotaRoute")(
@@ -3281,6 +3327,8 @@ export const layerWithOptions = (
                 }
               }
               const key = sessionKey(input.providerSessionId);
+              const opened = (yield* Ref.get(sessions)).get(key);
+              if (opened !== undefined) yield* releaseIfInstanceRetired(opened);
               const live = (yield* Ref.get(sessions)).get(key);
               if (live !== undefined) yield* releaseForLinkedEnvironments(live);
               const existing = (yield* Ref.get(sessions)).get(key);
@@ -3303,6 +3351,10 @@ export const layerWithOptions = (
                 return existing.exposedRuntime;
               }
 
+              // Read before the adapter, so a rebuild in between releases a live session
+              // rather than keeping a dead one.
+              const identity = registry.instanceIdentity?.(input.modelSelection.instanceId);
+              const instanceIdentity = identity === undefined ? undefined : yield* identity;
               const adapter = yield* registry.get(input.modelSelection.instanceId).pipe(
                 Effect.mapError(
                   (cause) =>
@@ -3401,6 +3453,7 @@ export const layerWithOptions = (
                 supportsMultipleProviderThreads:
                   runtime.providerSession.capabilities.sessions
                     .supportsMultipleProviderThreadsPerSession,
+                instanceIdentity,
                 runtime,
                 exposedRuntime,
                 eventSubscribers,
