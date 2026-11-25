@@ -15,7 +15,7 @@ vi.mock(import("~/state/sessionAccess"), async (original) => ({
 vi.mock(import("~/state/query"), async (original) => ({
   ...(await original()),
   useEnvironmentQuery: (() => ({
-    data: { shares: [{ principal: "dejana", role: "participant" }] },
+    data: { shares: [{ principal: "alice", role: "participant" }] },
   })) as never,
 }));
 
@@ -50,10 +50,10 @@ it("shares a session with a person and removes an existing share", async () => {
     role: "viewer",
   });
 
-  await userEvent.click(page.getByRole("button", { name: "Remove dejana" }));
+  await userEvent.click(page.getByRole("button", { name: "Remove alice" }));
   expect(access.mutate).toHaveBeenLastCalledWith({
     type: "thread.unshare",
     threadId,
-    principal: "dejana",
+    principal: "alice",
   });
 });
