@@ -823,9 +823,9 @@ it.effect("an agenix target names exactly one owner", () =>
   Effect.sync(() => {
     const decode = (agenix: object) =>
       decodeSecretInputExit({ label: "Token", reason: "CI.", delivery: "agenix", agenix });
-    assert.isTrue(Exit.isSuccess(decode({ host: "atlas", name: "x" })));
+    assert.isTrue(Exit.isSuccess(decode({ host: "host-a", name: "x" })));
     assert.isTrue(Exit.isFailure(decode({ name: "x" })));
-    assert.isTrue(Exit.isFailure(decode({ user: "can", host: "atlas", name: "x" })));
+    assert.isTrue(Exit.isFailure(decode({ user: "can", host: "host-a", name: "x" })));
     assert.isTrue(Exit.isFailure(decode({ user: "can", name: "x", expires: "soon" })));
     assert.isTrue(Exit.isFailure(decode({ user: "can", name: "x", verifyUrl: "http://a" })));
     assert.isTrue(Exit.isFailure(decode({ user: "can", name: "x", env: ["CF-TOKEN"] })));
