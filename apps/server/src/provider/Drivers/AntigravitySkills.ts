@@ -122,10 +122,15 @@ function parseSkillFrontmatter(contents: string, fileName: string) {
     const description = frontmatter.description?.trim();
     // Native names are not trimmed. Do not rename one to fit the picker contract.
     if (!name || name !== name.trim()) return undefined;
+    const disableModelInvocation = frontmatter["disable-model-invocation"];
+    const userInvocationOnly =
+      disableModelInvocation === true ||
+      (typeof disableModelInvocation === "string" &&
+        disableModelInvocation.toLowerCase() === "true");
     return {
       name,
       ...(description ? { description } : {}),
-      ...(frontmatter["disable-model-invocation"] === true ? { userInvocationOnly: true } : {}),
+      ...(userInvocationOnly ? { userInvocationOnly: true } : {}),
     };
   } catch {
     return undefined;

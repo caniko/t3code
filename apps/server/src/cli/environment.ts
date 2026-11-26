@@ -283,12 +283,15 @@ const environmentLinkCommand = Command.make("link", {
         if (
           Option.isSome(flags.url) ||
           Option.isSome(flags.pairingCode) ||
-          flags.alternateUrl.length > 0 ||
-          Option.isSome(flags.expectedEnvironmentId)
+          flags.alternateUrl.length > 0
         ) {
           return yield* new EnvironmentLinkUsageError({
-            detail:
-              "--from takes its addresses and pairing codes from the file and cannot verify a single expected environment.",
+            detail: "--from takes its addresses and pairing codes from the file.",
+          });
+        }
+        if (Option.isSome(flags.expectedEnvironmentId)) {
+          return yield* new EnvironmentLinkUsageError({
+            detail: "--expect-environment-id cannot be used with --from.",
           });
         }
         const text = yield* readLinkBatch(flags.from.value);

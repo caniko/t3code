@@ -14098,31 +14098,37 @@ describe("AcpAdapterV2", () => {
 
         // Unchanged note does not repeat on steer.
         const steer1 = yield* queueGate();
-        yield* steer(1, "Keep going", "Note A");
+        const steer1Ack = yield* steer(1, "Keep going", "Note A").pipe(Effect.forkChild);
         yield* Deferred.await(steer1.started);
         assert.notInclude(prompts.at(-1) ?? "", "external_mcp_app_item-1");
         yield* Deferred.succeed(turn1Initial.gate, { stopReason: "end_turn" });
 
         // Slash steer skips appContext so the next normal steer carries the changed note.
         const steerSlash = yield* queueGate();
-        yield* steer(1, "/status", "Note B");
+        const steerSlashAck = yield* steer(1, "/status", "Note B").pipe(Effect.forkChild);
         yield* Deferred.await(steerSlash.started);
         assert.notInclude(prompts.at(-1) ?? "", "external_mcp_app_item-1");
         yield* Deferred.succeed(steer1.gate, { stopReason: "end_turn" });
+        yield* Fiber.join(steer1Ack);
 
         const steerChanged = yield* queueGate();
-        yield* steer(1, "Use updated note", "Note B");
+        const steerChangedAck = yield* steer(1, "Use updated note", "Note B").pipe(
+          Effect.forkChild,
+        );
         yield* Deferred.await(steerChanged.started);
         assert.include(prompts.at(-1) ?? "", tag("Note B"));
         yield* Deferred.succeed(steerSlash.gate, { stopReason: "end_turn" });
+        yield* Fiber.join(steerSlashAck);
 
         // Second steer with the same note does not resend it.
         const steerSame = yield* queueGate();
-        yield* steer(1, "One more detail", "Note B");
+        const steerSameAck = yield* steer(1, "One more detail", "Note B").pipe(Effect.forkChild);
         yield* Deferred.await(steerSame.started);
         assert.notInclude(prompts.at(-1) ?? "", "external_mcp_app_item-1");
         yield* Deferred.succeed(steerChanged.gate, { stopReason: "end_turn" });
+        yield* Fiber.join(steerChangedAck);
         yield* Deferred.succeed(steerSame.gate, { stopReason: "end_turn" });
+        yield* Fiber.join(steerSameAck);
         yield* runtime.events.pipe(
           Stream.takeUntil((event) => event.type === "turn.terminal"),
           Stream.runDrain,
@@ -14146,7 +14152,7 @@ describe("AcpAdapterV2", () => {
         assert.notInclude(prompts.at(-1) ?? "", "external_mcp_app_item-1");
 
         const steerFailed = yield* queueGate();
-        yield* steer(2, "Try Note C", "Note C");
+        const steerFailedAck = yield* steer(2, "Try Note C", "Note C").pipe(Effect.forkChild);
         yield* Deferred.await(steerFailed.started);
         assert.include(prompts.at(-1) ?? "", tag("Note C"));
         yield* Deferred.succeed(turn2Initial.gate, { stopReason: "end_turn" });
@@ -14158,6 +14164,7 @@ describe("AcpAdapterV2", () => {
             method: "session/prompt",
           }),
         );
+        assert.isTrue(Exit.isFailure(yield* Fiber.await(steerFailedAck)));
         const turn2Events = Array.from(
           yield* runtime.events.pipe(
             Stream.takeUntil((event) => event.type === "turn.terminal"),

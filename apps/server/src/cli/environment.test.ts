@@ -88,6 +88,19 @@ it.effect("links a file of environments, reports each line, and fails when one d
         detail: "--from takes its addresses and pairing codes from the file.",
       });
 
+      const identityConflict = yield* runCli([
+        "environment",
+        "link",
+        "--from",
+        file,
+        "--expect-environment-id",
+        "environment-vm-1",
+      ]).pipe(Effect.flip);
+      expect(identityConflict).toMatchObject({
+        _tag: "EnvironmentLinkUsageError",
+        detail: "--expect-environment-id cannot be used with --from.",
+      });
+
       const failed = yield* link(file).pipe(Effect.flip);
       expect(failed).toMatchObject({ _tag: "EnvironmentLinkBatchError", failed: 1, total: 3 });
       const report = (yield* reports).at(-1) ?? "";

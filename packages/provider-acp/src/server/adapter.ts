@@ -8770,12 +8770,18 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             yield* Ref.set(loadingSessionId, activation.resumeSessionId);
           }
           const startup = Effect.gen(function* () {
+            if (activation !== undefined) yield* reportStartupPhase("resume");
             yield* spawnAcpRuntime(threadId, activation);
             yield* wireAcpRuntimeHandlers(runtime, yield* Ref.get(runtimeCallbackGeneration));
             return yield* runtime.start();
           });
           return yield* (flavor.withRuntimeStartup?.(startup) ?? startup).pipe(
             Effect.onError(() => Ref.set(loadingSessionId, null)),
+            Effect.ensuring(
+              activation === undefined
+                ? Effect.void
+                : Effect.suspend(() => reportStartupPhase(undefined)),
+            ),
           );
         });
 
@@ -11137,7 +11143,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                         () =>
                           runtime.prompt(
                             { prompt: steerPrompt },
-                            { dispatched, released: releasedForSteer },
+                            { dispatched: context.promptDispatched, released: releasedForSteer },
                           ),
                         superseded,
                       ).pipe(

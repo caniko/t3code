@@ -70,7 +70,7 @@ function gtAuth(input: SourceControlAuthProbeInput, defaultHost?: string) {
           host: ForgejoCli.parseForgejoRemote(entry.host)?.host ?? entry.host,
           account: entry.user || entry.host,
           active: entry === account,
-          authenticated: entry.verified,
+          authenticated: entry.verified === true,
           ...(entry.error ? { error: entry.error } : {}),
         })),
       }

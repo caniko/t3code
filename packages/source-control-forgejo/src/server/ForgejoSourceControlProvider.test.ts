@@ -3045,6 +3045,7 @@ function fjDiscoveryLayer(options: {
       },
     }),
     Layer.succeed(HostProcess.HomeDirectory, "/home/maria"),
+    Layer.succeed(SpawnExecutableResolution, onPath),
   );
 }
 
