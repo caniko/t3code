@@ -264,6 +264,101 @@ const addRolledBackRecoveryCandidate = Effect.fn("addRolledBackRecoveryCandidate
   return threadId;
 });
 
+it.effect(
+  "projects a thread-only operator request as pending and looks it up by each identifier",
+  () =>
+    Effect.gen(function* () {
+      const store = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = yield* addRolledBackRecoveryCandidate("operator-request");
+      const now = yield* DateTime.now;
+      const turnItemId = TurnItemId.make("turn-item:operator-request");
+      const timestamp = DateTime.formatIso(now);
+      const request = {
+        threadId,
+        turnItemId,
+        externalId: "operator-request-external",
+        requestId: "operator-request-id",
+        title: "Check deployment",
+        kind: "ops",
+        privilege: "elevated-external",
+        status: "pending",
+        waitPolicy: { mode: "async" },
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      } as const;
+      const card = {
+        type: "operator_request",
+        status: "waiting",
+        request,
+        id: turnItemId,
+        threadId,
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 2,
+        title: request.title,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+      } as const satisfies OrchestrationV2TurnItem;
+      yield* store.apply({
+        id: EventId.make("event:operator-request:pending"),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload: card,
+      });
+      for (const filter of [
+        {},
+        { threadId },
+        { turnItemId },
+        { requestId: request.requestId },
+        { externalId: request.externalId },
+      ]) {
+        assert.deepEqual(
+          (yield* store.listOperatorRequests(filter)).map((item) => item.request),
+          [request],
+        );
+      }
+      const memory = ProjectionStore.threadShellFromProjection(
+        yield* store.getThreadProjection(threadId),
+      );
+      const sql = (yield* store.getShellSnapshot()).threads.find(
+        (thread) => thread.id === threadId,
+      );
+      assert.equal(memory.pendingRuntimeRequest?.id, RuntimeRequestId.make(turnItemId));
+      assert.deepEqual(sql?.pendingRuntimeRequest, memory.pendingRuntimeRequest);
+      yield* store.apply({
+        id: EventId.make("event:operator-request:submitted"),
+        type: "turn-item.updated",
+        threadId,
+        occurredAt: now,
+        payload: {
+          ...card,
+          status: "completed",
+          completedAt: now,
+          request: {
+            ...request,
+            status: "submitted",
+            receipt: { status: "submitted", decidedAt: timestamp, decidedVia: "inline" },
+          },
+        },
+      });
+      assert.deepEqual(yield* store.listOperatorRequests({ threadId }), []);
+      assert.equal(
+        (yield* store.listOperatorRequests({ includeTerminal: true }))[0]?.request.status,
+        "submitted",
+      );
+      assert.isNull(
+        (yield* store.getShellSnapshot()).threads.find((thread) => thread.id === threadId)
+          ?.pendingRuntimeRequest,
+      );
+    }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("routes full projection reads to readers and retains uncommitted writer state", () =>
   Effect.gen(function* () {
     const store = yield* ProjectionStore.ProjectionStoreV2;

@@ -7,6 +7,17 @@ import {
 } from "./orchestrationV2.ts";
 import { OrchestrationDispatchCommandError } from "./orchestrationDispatch.ts";
 import {
+  OperatorRequestAnswerInput,
+  OperatorRequestAnswerResult,
+  OperatorRequestCancelInput,
+  OperatorRequestCancelResult,
+  OperatorRequestError,
+  OperatorRequestLaunchDesktopInput,
+  OperatorRequestLaunchDesktopResult,
+  OperatorRequestListPendingInput,
+  OperatorRequestListPendingResult,
+} from "./operatorRequest.ts";
+import {
   McpAppCallToolInput,
   McpAppCallToolResult,
   McpAppReadResourceInput,
@@ -519,6 +530,10 @@ export const WS_METHODS = {
   peerLinksLink: "peerLinks.link",
   peerLinksUnlink: "peerLinks.unlink",
   peerLinksAnswerRequest: "peerLinks.answerRequest",
+  operatorRequestsAnswer: "operatorRequests.answer",
+  operatorRequestsListPending: "operatorRequests.listPending",
+  operatorRequestsLaunchDesktop: "operatorRequests.launchDesktop",
+  operatorRequestsCancel: "operatorRequests.cancel",
   sessionAccessList: "sessionAccess.list",
   sessionAccessThreadShares: "sessionAccess.threadShares",
   sessionAccessMutate: "sessionAccess.mutate",
@@ -828,6 +843,31 @@ const WsPeerLinksUnlinkRpc = Rpc.make(WS_METHODS.peerLinksUnlink, {
 const WsPeerLinksAnswerRequestRpc = Rpc.make(WS_METHODS.peerLinksAnswerRequest, {
   payload: PeerLinkRequestAnswerInput,
   error: Schema.Union([PeerLinkRequestError, EnvironmentAuthorizationError]),
+});
+
+const OperatorRequestRpcError = Schema.Union([OperatorRequestError, EnvironmentAuthorizationError]);
+export const WsOperatorRequestsAnswerRpc = Rpc.make(WS_METHODS.operatorRequestsAnswer, {
+  payload: OperatorRequestAnswerInput,
+  success: OperatorRequestAnswerResult,
+  error: OperatorRequestRpcError,
+});
+export const WsOperatorRequestsListPendingRpc = Rpc.make(WS_METHODS.operatorRequestsListPending, {
+  payload: OperatorRequestListPendingInput,
+  success: OperatorRequestListPendingResult,
+  error: OperatorRequestRpcError,
+});
+export const WsOperatorRequestsLaunchDesktopRpc = Rpc.make(
+  WS_METHODS.operatorRequestsLaunchDesktop,
+  {
+    payload: OperatorRequestLaunchDesktopInput,
+    success: OperatorRequestLaunchDesktopResult,
+    error: OperatorRequestRpcError,
+  },
+);
+export const WsOperatorRequestsCancelRpc = Rpc.make(WS_METHODS.operatorRequestsCancel, {
+  payload: OperatorRequestCancelInput,
+  success: OperatorRequestCancelResult,
+  error: OperatorRequestRpcError,
 });
 
 const WsSessionAccessListRpc = Rpc.make(WS_METHODS.sessionAccessList, {
@@ -2048,6 +2088,10 @@ export const WsRpcGroup = RpcGroup.make(
   WsPeerLinksLinkRpc,
   WsPeerLinksUnlinkRpc,
   WsPeerLinksAnswerRequestRpc,
+  WsOperatorRequestsAnswerRpc,
+  WsOperatorRequestsListPendingRpc,
+  WsOperatorRequestsLaunchDesktopRpc,
+  WsOperatorRequestsCancelRpc,
   WsSessionAccessListRpc,
   WsSessionAccessThreadSharesRpc,
   WsSessionAccessMutateRpc,

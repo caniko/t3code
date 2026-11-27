@@ -3,6 +3,7 @@ import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
+import * as OperatorRequests from "./operatorRequests/OperatorRequests.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
 
 import * as DateTime from "effect/DateTime";
@@ -1481,6 +1482,7 @@ export const layerWsRpc = (
       const secretResolver = yield* SecretResolver.SecretResolver;
       const peerLinks = yield* PeerLinks.PeerLinks;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
+      const operatorRequests = yield* OperatorRequests.OperatorRequests;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -2026,6 +2028,10 @@ export const layerWsRpc = (
         );
       });
       const threadVisible = (threadId: ThreadId) => threadAllowed(threadId, "read");
+      const operatorRequestScope = (action: ThreadAction) => ({
+        ownerPrincipal: principal,
+        allowThread: (threadId: ThreadId) => threadAllowed(threadId, action),
+      });
       const scopeSearchResult = Effect.fn("ws.scopeSearchResult")(function* <
         R extends {
           readonly matches: ReadonlyArray<{ readonly threadId: ThreadId }>;
@@ -2816,6 +2822,14 @@ export const layerWsRpc = (
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
             Effect.andThen(peerLinkRequests.answer(input)),
           ),
+        [WS_METHODS.operatorRequestsListPending]: (input) =>
+          operatorRequests.listPending(input, operatorRequestScope("read")),
+        [WS_METHODS.operatorRequestsAnswer]: (input) =>
+          operatorRequests.answer(input, operatorRequestScope("write")),
+        [WS_METHODS.operatorRequestsCancel]: (input) =>
+          operatorRequests.cancel(input, operatorRequestScope("write")),
+        [WS_METHODS.operatorRequestsLaunchDesktop]: (input) =>
+          operatorRequests.launchDesktop(input, operatorRequestScope("write")),
         [WS_METHODS.serverUpdateSettings]:
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(function* ({ patch, providerInstanceMutation }) {
@@ -3613,6 +3627,7 @@ export const layer = Layer.unwrap(
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
     const peerLinks = yield* PeerLinks.PeerLinks;
     const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
+    const operatorRequests = yield* OperatorRequests.OperatorRequests;
     const sessionAccess = yield* SessionAccess.SessionAccess;
     const sql = yield* SqlClient.SqlClient;
     return HttpRouter.add(
@@ -3708,6 +3723,7 @@ export const layer = Layer.unwrap(
               Layer.provide(Layer.succeed(SessionAccess.SessionAccess, sessionAccess)),
               Layer.provide(Layer.succeed(PeerLinks.PeerLinks, peerLinks)),
               Layer.provide(Layer.succeed(PeerLinkRequests.PeerLinkRequests, peerLinkRequests)),
+              Layer.provide(Layer.succeed(OperatorRequests.OperatorRequests, operatorRequests)),
               Layer.provide(
                 SourceControlDiscovery.layer.pipe(
                   Layer.provide(

@@ -471,8 +471,18 @@ export interface ProjectionStoreV2Shape {
   readonly getNextTurnItemOrdinal: (
     threadId: ThreadId,
   ) => Effect.Effect<number, ProjectionStoreV2Error>;
+  readonly listOperatorRequests: (input: {
+    readonly threadId?: ThreadId | undefined;
+    readonly turnItemId?: TurnItemId | undefined;
+    readonly requestId?: string | undefined;
+    readonly externalId?: string | undefined;
+    readonly includeTerminal?: boolean | undefined;
+  }) => Effect.Effect<
+    ReadonlyArray<Extract<OrchestrationV2TurnItem, { type: "operator_request" }>>,
+    ProjectionStoreV2Error
+  >;
   readonly getTurnItem: (input: {
-    readonly threadId: ThreadId;
+    readonly threadId?: ThreadId | undefined;
     readonly itemId: TurnItemId;
   }) => Effect.Effect<OrchestrationV2TurnItem | null, ProjectionStoreV2Error>;
   readonly getMessagesById: (
@@ -1036,6 +1046,7 @@ type ShellThreadRow = {
   readonly pending_request_payload_json: string | null;
   readonly pending_secret_request_payload_json: string | null;
   readonly pending_link_request_payload_json: string | null;
+  readonly pending_operator_request_payload_json: string | null;
   readonly latest_user_message_at: string | null;
   readonly latest_user_authored_message_at: string | null;
   readonly has_actionable_proposed_plan: number;
@@ -1499,7 +1510,10 @@ function pendingRuntimeRequestSummary(
 function secretRequestAsPendingInput(
   item: OrchestrationV2TurnItem | null,
 ): OrchestrationV2PendingRuntimeRequestSummary | null {
-  if ((item?.type !== "secret_request" && item?.type !== "link_request") || item.nodeId === null)
+  if (
+    item?.type !== "operator_request" &&
+    ((item?.type !== "secret_request" && item?.type !== "link_request") || item.nodeId === null)
+  )
     return null;
   return {
     id: RuntimeRequestId.make(item.id),
@@ -1520,6 +1534,7 @@ const waitsOnUser = (
   latestUserAuthoredMessageAt: DateTime.Utc | null,
 ) =>
   (item.type === "link_request" && linkCardStillAsks(item, latestUserAuthoredMessageAt)) ||
+  item.type === "operator_request" ||
   (item.type === "secret_request" && item.runId !== null && liveRunIds.has(item.runId));
 
 const linkCardStillAsks = (
@@ -5519,13 +5534,32 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     const getTurnItem: ProjectionStoreV2Shape["getTurnItem"] = ({ threadId, itemId }) =>
       sql<{ payload_json: string }>`SELECT payload_json
         FROM orchestration_v2_projection_turn_items
-        WHERE turn_item_id = ${itemId} AND thread_id = ${threadId}`.pipe(
+        WHERE turn_item_id = ${itemId}
+        ${threadId === undefined ? sql`` : sql`AND thread_id = ${threadId}`}`.pipe(
         Effect.flatMap((rows) =>
           rows[0] === undefined
             ? Effect.succeed(null)
             : decodeTurnItemPayload(rows[0].payload_json),
         ),
-        Effect.mapError(controlReadError(threadId)),
+        Effect.mapError(controlReadError(threadId ?? ThreadId.make("turn-item-lookup"))),
+      );
+
+    const listOperatorRequests: ProjectionStoreV2Shape["listOperatorRequests"] = (input) =>
+      sql<{ payload_json: string }>`SELECT item.payload_json
+        FROM orchestration_v2_projection_turn_items item
+        JOIN orchestration_v2_projection_threads t ON t.thread_id = item.thread_id
+        WHERE item.type = 'operator_request' AND t.deleted_at IS NULL
+          ${input.includeTerminal === true ? sql`` : sql`AND item.status IN ('pending', 'running', 'waiting') AND item.status = 'waiting'`}
+          ${input.threadId === undefined ? sql`` : sql`AND item.thread_id = ${input.threadId}`}
+          ${input.turnItemId === undefined ? sql`` : sql`AND item.turn_item_id = ${input.turnItemId}`}
+          ${input.requestId === undefined ? sql`` : sql`AND json_extract(item.payload_json, '$.request.requestId') = ${input.requestId}`}
+          ${input.externalId === undefined ? sql`` : sql`AND json_extract(item.payload_json, '$.request.externalId') = ${input.externalId}`}
+        ORDER BY item.updated_at DESC, item.turn_item_id DESC`.pipe(
+        Effect.flatMap((rows) =>
+          Effect.forEach(rows, (row) => decodeTurnItemPayload(row.payload_json)),
+        ),
+        Effect.map((items) => items.filter((item) => item.type === "operator_request")),
+        Effect.mapError(controlReadError(input.threadId ?? ThreadId.make("operator-requests"))),
       );
 
     const getThreadAttachmentIds: ProjectionStoreV2Shape["getThreadAttachmentIds"] = (threadId) =>
@@ -6252,6 +6286,15 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 LIMIT 1
               ) AS pending_link_request_payload_json,
               (
+                SELECT operator_card.payload_json
+                FROM orchestration_v2_projection_turn_items operator_card
+                WHERE operator_card.thread_id = t.thread_id
+                  AND operator_card.status IN ('pending', 'running', 'waiting')
+                  AND operator_card.type = 'operator_request' AND operator_card.status = 'waiting'
+                ORDER BY operator_card.updated_at DESC, operator_card.turn_item_id DESC
+                LIMIT 1
+              ) AS pending_operator_request_payload_json,
+              (
                 SELECT message.updated_at
                 FROM orchestration_v2_projection_messages message
                 WHERE message.thread_id = t.thread_id
@@ -6553,6 +6596,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 WHERE request.thread_id = t.thread_id AND request.status = 'pending'
               )
               AND NOT EXISTS (
+                SELECT 1 FROM orchestration_v2_projection_turn_items item
+                WHERE item.thread_id = t.thread_id AND item.type = 'operator_request'
+                  AND item.status IN ('pending', 'running', 'waiting')
+                  AND item.status = 'waiting'
+              )
+              AND NOT EXISTS (
                 SELECT 1 FROM orchestration_v2_projection_turn_items link
                   INDEXED BY orchestration_v2_projection_turn_items_waiting_link_idx
                 WHERE link.thread_id = t.thread_id
@@ -6761,6 +6810,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           row.pending_link_request_payload_json === null
             ? null
             : yield* decodeTurnItemPayload(row.pending_link_request_payload_json),
+          row.pending_operator_request_payload_json === null
+            ? null
+            : yield* decodeTurnItemPayload(row.pending_operator_request_payload_json),
         ]
           .filter((item) => item !== null)
           .filter(
@@ -7207,6 +7259,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 AND item.status NOT IN ('completed', 'interrupted', 'failed', 'cancelled')
             )
             OR EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_turn_items item
+              WHERE item.thread_id = t.thread_id
+                AND item.status IN ('pending', 'running', 'waiting')
+                AND item.type = 'operator_request' AND item.status = 'waiting'
+            )
+            OR EXISTS (
               SELECT 1 FROM orchestration_v2_projection_turn_items link_request
               WHERE link_request.thread_id = t.thread_id
                 AND link_request.type = 'link_request' AND link_request.status = 'waiting'
@@ -7450,6 +7508,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       listAppOwnedChildThreadIds: readOnReader(listAppOwnedChildThreadIds),
       getNextTurnItemOrdinal: readOnReader(getNextTurnItemOrdinal),
       getTurnItem: readOnReader(getTurnItem),
+      listOperatorRequests: readOnReader(listOperatorRequests),
       getMessagesById: readOnReader(getMessagesById),
       getThreadRecords: (threadId, fields, filter) =>
         getThreadRecords(threadId, fields, filter).pipe(NodeSqliteClient.readOnly),

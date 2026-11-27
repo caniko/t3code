@@ -1,4 +1,6 @@
 import {
+  AuthAccessReadScope,
+  AuthAccessWriteScope,
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
   AuthFilesystemReadScope,
@@ -32,6 +34,19 @@ import {
 import * as RpcAuthorization from "./RpcAuthorization.ts";
 
 describe("RPC authorization scopes", () => {
+  it("separates reading operator requests from answering, cancelling, and launching them", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.operatorRequestsListPending)).toBe(
+      AuthAccessReadScope,
+    );
+    for (const method of [
+      WS_METHODS.operatorRequestsAnswer,
+      WS_METHODS.operatorRequestsCancel,
+      WS_METHODS.operatorRequestsLaunchDesktop,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthAccessWriteScope);
+    }
+  });
+
   it("declares exactly one scope for every RPC in the server group", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
   });

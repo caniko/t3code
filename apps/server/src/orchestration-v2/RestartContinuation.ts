@@ -92,6 +92,7 @@ function hasOpenAwaitedWork(
   const openItem = projection.turnItems.some((item) => {
     if (item.status !== "pending" && item.status !== "running" && item.status !== "waiting")
       return false;
+    if (item.type === "operator_request") return false;
     if (item.type === "subagent" && item.origin === "app_owned" && item.childThreadId !== null)
       return false;
     const work = cancelledTurnItemWork(item);

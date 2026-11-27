@@ -572,7 +572,10 @@ const layerScheduledTaskWebhookOrigin = Layer.effect(
   }),
 );
 
-const layerOrchestrationV2Runtime = RuntimeLayer.layerProduction.pipe(
+const layerOrchestrationV2Runtime = Layer.merge(
+  RuntimeLayer.layerProduction,
+  RuntimeLayer.layerOperatorRequests,
+).pipe(
   Layer.provide(layerScheduledTaskWebhookOrigin),
   Layer.provide(ProviderUsageAnalytics.layer),
   Layer.provide(layerCheckpointStore),

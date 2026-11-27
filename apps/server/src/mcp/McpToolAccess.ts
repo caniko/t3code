@@ -127,6 +127,30 @@ export const reads = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>)
     () => Effect.void,
   );
 
+export const createsOperatorRequest = <P, A, E, R>(
+  handle: (params: P, caller: Caller) => Effect.Effect<A, E, R>,
+) =>
+  declare(
+    (params: P) => orchestratingCaller.pipe(Effect.flatMap((caller) => handle(params, caller))),
+    undefined,
+  );
+
+export const decidesOperatorRequest = <P, A, E, R>(
+  handle: (params: P, caller: Caller) => Effect.Effect<A, E, R>,
+) =>
+  createsOperatorRequest<P, A, E | OrchestratorMcpFailure, R>((params, caller) =>
+    caller.scope.thread !== undefined ||
+    caller.scope.client === undefined ||
+    caller.scope.client.linked === true
+      ? Effect.fail(
+          new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "Deciding an operator request requires a writable operator credential.",
+          }),
+        )
+      : handle(params, caller),
+  );
+
 export const readsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
   declare((params: P) => requireThreadCaller.pipe(Effect.flatMap(() => handle(params))), undefined);
 
@@ -380,7 +404,7 @@ const linksUnavailable = new OrchestratorMcpFailure({
 
 /**
  * A principal-bound MCP client owns no environment-wide state. These are the
- * exact tools the thread/project CLI uses; every other tool is refused before
+ * exact tools the thread, project, and operator-request CLIs use; every other tool is refused before
  * linked forwarding or handler side effects. Owner and thread callers are not
  * restricted.
  */
@@ -393,6 +417,11 @@ export const PRINCIPAL_CLIENT_TOOLS: ReadonlySet<string> = new Set([
   "t3_thread_send",
   "t3_thread_wait",
   "t3_thread_interrupt",
+  "t3_operator_request",
+  "t3_operator_request_status",
+  "t3_operator_request_list",
+  "t3_operator_request_resolve",
+  "t3_operator_request_cancel",
 ]);
 
 export const isPrincipalClientScope = (scope: McpInvocationContext.McpInvocationScope) =>

@@ -915,6 +915,10 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
         .join("\n");
     case "user_input_request":
       return jsonText(item.questions);
+    case "operator_request":
+      return (
+        [item.request.reason, item.request.receipt?.summary].filter(Boolean).join("\n") || null
+      );
     case "file_change":
       return [
         item.fileName,

@@ -22,6 +22,8 @@ import {
   ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE,
   type ChatAttachment,
   CommandId,
+  isOperatorRequestDue,
+  isOperatorRequestTerminalStatus,
   type GuestMessageId,
   isCompactionCommandMessage,
   isOrchestrationV2WorkActive,
@@ -614,6 +616,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
       return command.parentThreadId;
     case "secret_request.record":
     case "link_request.record":
+    case "operator_request.record":
       return command.threadId;
     case "thread.fork":
     case "thread.merge_back":
@@ -2141,7 +2144,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ...(queuedMessage.senderThreadId === undefined
             ? {}
             : { senderThreadId: queuedMessage.senderThreadId }),
-          ...(queuedMessage.senderPrincipal === undefined ? {} : { senderPrincipal: queuedMessage.senderPrincipal }),
+          ...(queuedMessage.senderPrincipal === undefined
+            ? {}
+            : { senderPrincipal: queuedMessage.senderPrincipal }),
           ...(queuedMessage.idleCompaction === undefined
             ? {}
             : { idleCompaction: queuedMessage.idleCompaction }),
@@ -4185,6 +4190,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         cancelQueuedDelivery: false,
       });
       yield* closePendingLinkRequests({ command, events, threadId: command.threadId, now });
+      yield* closePendingOperatorRequests({ command, events, threadId: command.threadId, now });
     }
 
     // Archive and settle stop idle background work; serialized commands prevent starts racing detach.
@@ -4923,7 +4929,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ? {}
             : { scheduledTaskId: input.scheduledTaskId }),
           ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
-          ...(input.senderPrincipal === undefined ? {} : { senderPrincipal: input.senderPrincipal }),
+          ...(input.senderPrincipal === undefined
+            ? {}
+            : { senderPrincipal: input.senderPrincipal }),
           ...(input.idleCompaction === undefined ? {} : { idleCompaction: input.idleCompaction }),
           id: input.messageId,
           threadId: input.command.threadId,
@@ -4944,7 +4952,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             ? {}
             : { scheduledTaskId: input.scheduledTaskId }),
           ...(input.senderThreadId === undefined ? {} : { senderThreadId: input.senderThreadId }),
-          ...(input.senderPrincipal === undefined ? {} : { senderPrincipal: input.senderPrincipal }),
+          ...(input.senderPrincipal === undefined
+            ? {}
+            : { senderPrincipal: input.senderPrincipal }),
           ...(input.idleCompaction === undefined ? {} : { idleCompaction: input.idleCompaction }),
           id: idAllocator.derive.userTurnItem({ messageId: input.messageId }),
           threadId: input.command.threadId,
@@ -5932,7 +5942,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ? {}
           : { scheduledTaskId: command.scheduledTaskId }),
         ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
-        ...(command.senderPrincipal === undefined ? {} : { senderPrincipal: command.senderPrincipal }),
+        ...(command.senderPrincipal === undefined
+          ? {}
+          : { senderPrincipal: command.senderPrincipal }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
         forceRestart: dispatchMode.type === "restart_active",
       });
@@ -6168,7 +6180,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ? {}
           : { scheduledTaskId: command.scheduledTaskId }),
         ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
-        ...(command.senderPrincipal === undefined ? {} : { senderPrincipal: command.senderPrincipal }),
+        ...(command.senderPrincipal === undefined
+          ? {}
+          : { senderPrincipal: command.senderPrincipal }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
         id: command.messageId,
         threadId: command.threadId,
@@ -6535,7 +6549,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ? {}
           : { scheduledTaskId: command.scheduledTaskId }),
         ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
-        ...(command.senderPrincipal === undefined ? {} : { senderPrincipal: command.senderPrincipal }),
+        ...(command.senderPrincipal === undefined
+          ? {}
+          : { senderPrincipal: command.senderPrincipal }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
         id: command.messageId,
         threadId: command.threadId,
@@ -6558,7 +6574,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           ? {}
           : { scheduledTaskId: command.scheduledTaskId }),
         ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
-        ...(command.senderPrincipal === undefined ? {} : { senderPrincipal: command.senderPrincipal }),
+        ...(command.senderPrincipal === undefined
+          ? {}
+          : { senderPrincipal: command.senderPrincipal }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
         id: idAllocator.derive.userTurnItem({ messageId: command.messageId }),
         threadId: command.threadId,
@@ -7289,7 +7307,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ? {}
         : { scheduledTaskId: command.scheduledTaskId }),
       ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
-      ...(command.senderPrincipal === undefined ? {} : { senderPrincipal: command.senderPrincipal }),
+      ...(command.senderPrincipal === undefined
+        ? {}
+        : { senderPrincipal: command.senderPrincipal }),
       ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
       id: command.messageId,
       threadId: command.threadId,
@@ -7312,7 +7332,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ? {}
         : { scheduledTaskId: command.scheduledTaskId }),
       ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
-      ...(command.senderPrincipal === undefined ? {} : { senderPrincipal: command.senderPrincipal }),
+      ...(command.senderPrincipal === undefined
+        ? {}
+        : { senderPrincipal: command.senderPrincipal }),
       ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
       id: idAllocator.derive.userTurnItem({ messageId: command.messageId }),
       threadId: command.threadId,
@@ -9042,6 +9064,183 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     },
   );
 
+  const dispatchOperatorRequestRecord = Effect.fn("orchestrationV2.dispatch.operatorRequestRecord")(
+    function* (
+      command: Extract<
+        OrchestrationV2InternalCommand,
+        { readonly type: "operator_request.record" }
+      >,
+      events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+      effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
+    ) {
+      const { threadId, turnItemId, wake } = command;
+      const projection = yield* projectionStore
+        .getThreadRecords(threadId, ["runs", "turnItems"], { turnItemTypes: [], messageRoles: [] })
+        .pipe(mapDispatchError(command));
+      const existing = yield* projectionStore
+        .getTurnItem({ itemId: turnItemId })
+        .pipe(mapDispatchError(command));
+      const reject = (cause: string) =>
+        new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause,
+        });
+      if (
+        existing !== null &&
+        (existing.threadId !== threadId ||
+          existing.type !== "operator_request" ||
+          existing.request.requestId !== command.request.requestId)
+      ) {
+        return yield* reject("Turn item belongs to another request.");
+      }
+      if (
+        existing?.type === "operator_request" &&
+        isOperatorRequestTerminalStatus(existing.request.status)
+      ) {
+        // Stop/archive may close the request before an answer commits.
+        return;
+      }
+      const now = yield* DateTime.now;
+      // A decision can cross the deadline while waiting for the orchestration lock.
+      const request =
+        existing?.type === "operator_request" &&
+        isOperatorRequestDue(existing.request, DateTime.toEpochMillis(now))
+          ? {
+              ...existing.request,
+              status: "expired" as const,
+              updatedAt: DateTime.formatIso(now),
+              receipt: {
+                status: "expired" as const,
+                decidedAt: DateTime.formatIso(now),
+                decidedVia: "external" as const,
+              },
+            }
+          : command.request;
+      const terminal = isOperatorRequestTerminalStatus(request.status);
+      const run = projection.runs.find((candidate) => candidate.id === request.runId);
+      if (
+        existing === null &&
+        (projection.thread.archivedAt !== null ||
+          projection.thread.deletedAt !== null ||
+          (request.runId !== undefined &&
+            (run === undefined ||
+              !isActiveRun(run) ||
+              (request.nodeId !== undefined && request.nodeId !== run.rootNodeId) ||
+              (yield* stopReachedRun(command, threadId, run.id)))) ||
+          (request.runId === undefined && request.nodeId !== undefined))
+      ) {
+        return yield* reject("Operator request target is not active.");
+      }
+      const nodeId = existing?.nodeId ?? run?.rootNodeId ?? null;
+      const runId = existing?.runId ?? run?.id ?? null;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "turn-item.updated",
+        threadId,
+        ...(runId === null ? {} : { runId }),
+        ...(nodeId === null ? {} : { nodeId }),
+        occurredAt: now,
+        payload: {
+          type: "operator_request",
+          request: { ...request, threadId, turnItemId },
+          id: turnItemId,
+          threadId,
+          runId,
+          nodeId,
+          providerThreadId: existing?.providerThreadId ?? run?.providerThreadId ?? null,
+          providerTurnId: existing?.providerTurnId ?? null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: existing?.ordinal ?? (yield* nextTurnItemOrdinal(projection)),
+          status: terminal
+            ? request.status === "submitted"
+              ? "completed"
+              : "cancelled"
+            : "waiting",
+          title: request.title,
+          startedAt: existing?.startedAt ?? now,
+          completedAt: terminal ? now : null,
+          updatedAt: now,
+        },
+      });
+      if (
+        terminal &&
+        request.status !== "expired" &&
+        wake !== undefined &&
+        projection.thread.archivedAt === null &&
+        projection.thread.deletedAt === null
+      ) {
+        yield* dispatchMessage(
+          {
+            type: "message.dispatch",
+            commandId: command.commandId,
+            threadId,
+            ...wake,
+            attachments: [],
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "agent",
+            creationSource: "server",
+          },
+          events,
+          effects,
+        );
+      }
+    },
+  );
+
+  const closePendingOperatorRequests = Effect.fn("orchestrationV2.closePendingOperatorRequests")(
+    function* (input: {
+      readonly command: OrchestrationV2ServerCommand;
+      readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
+      readonly threadId: ThreadId;
+      readonly now: DateTime.Utc;
+    }) {
+      const { turnItems } = yield* projectionStore
+        .getThreadRecords(input.threadId, ["turnItems"], {
+          turnItemTypes: ["operator_request"],
+          turnItemStatuses: ["waiting"],
+          messageRoles: [],
+        })
+        .pipe(mapDispatchError(input.command));
+      const decidedAt = DateTime.formatIso(input.now);
+      for (const item of turnItems) {
+        if (
+          item.type !== "operator_request" ||
+          isOperatorRequestTerminalStatus(item.request.status)
+        )
+          continue;
+        const status = isOperatorRequestDue(item.request, DateTime.toEpochMillis(input.now))
+          ? "expired"
+          : "cancelled";
+        yield* emit(
+          input.events,
+          input.command,
+        )({
+          type: "turn-item.updated",
+          threadId: input.threadId,
+          ...(item.runId === null ? {} : { runId: item.runId }),
+          ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
+          occurredAt: input.now,
+          payload: {
+            ...item,
+            request: {
+              ...item.request,
+              status,
+              updatedAt: decidedAt,
+              receipt: { status, decidedAt, decidedVia: "external" },
+            },
+            status: "cancelled",
+            completedAt: input.now,
+            updatedAt: input.now,
+          },
+        });
+      }
+    },
+  );
+
   const dispatchRuntimeRequestRespond = Effect.fn("Orchestrator.dispatchRuntimeRequestRespond")(
     function* (
       command: Extract<OrchestrationV2Command, { readonly type: "runtime-request.respond" }>,
@@ -9704,7 +9903,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ...(queuedMessage.senderThreadId === undefined
         ? {}
         : { senderThreadId: queuedMessage.senderThreadId }),
-      ...(queuedMessage.senderPrincipal === undefined ? {} : { senderPrincipal: queuedMessage.senderPrincipal }),
+      ...(queuedMessage.senderPrincipal === undefined
+        ? {}
+        : { senderPrincipal: queuedMessage.senderPrincipal }),
       ...(queuedMessage.idleCompaction === undefined
         ? {}
         : { idleCompaction: queuedMessage.idleCompaction }),
@@ -10987,6 +11188,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     yield* closePendingLinkRequests({ ...input, threadId: thread.id });
+    yield* closePendingOperatorRequests({ ...input, threadId: thread.id });
   });
 
   const dispatchInterruptUnresponsive = Effect.fn("Orchestrator.dispatchInterruptUnresponsive")(
@@ -13495,6 +13697,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "link_request.record":
         yield* dispatchLinkRequestRecord(command, events, effects);
         break;
+      case "operator_request.record":
+        yield* dispatchOperatorRequestRecord(command, events, effects);
+        break;
       default:
         return yield* dispatchUnsupported(command);
     }
@@ -13596,6 +13801,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command.type === "thread.interrupt.unresponsive" ||
           command.type === "thread.stop" ||
           command.type === "subagent.stop" ||
+          // An operator request can close on Stop/archive while its answer is in flight.
+          command.type === "operator_request.record" ||
           // Closing a share again, or after it ended, is not an error.
           command.type === "thread.guest-share.close" ||
           (command.type === "thread.delete" && command.onlyIfUnused === true),

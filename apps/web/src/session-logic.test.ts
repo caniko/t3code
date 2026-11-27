@@ -33,6 +33,7 @@ import {
   selectMessageImageResources,
   createMessageAttachmentPreviewProjector,
   providerErrorPresentation,
+  timelineEntryIsPersistentResourceCard,
   type TimelineEntry,
   workEntryIndicatesToolFailure,
   workEntryDisplayIndicatesToolFailure,
@@ -1391,6 +1392,36 @@ describe("work-log failure policy (#7999/#7893)", () => {
 });
 
 describe("incremental v2 timeline entries", () => {
+  it("keeps a pending operator request as a standalone persistent card", () => {
+    const fixture = makeStreamingTimelineFixture("Working");
+    const row = fixture.visibleTurnItems.at(-1)!;
+    const requestItem = {
+      ...row.item,
+      id: TurnItemId.make("review-request"),
+      type: "operator_request",
+      status: "waiting",
+      providerThreadId: row.item.providerThreadId ?? null,
+      request: {
+        requestId: "review-request",
+        kind: "custom",
+        privilege: "user",
+        title: "Review the draft",
+        status: "pending",
+        waitPolicy: { mode: "async" },
+        createdAt: fixture.time(7),
+        updatedAt: fixture.time(7),
+      },
+    } satisfies OrchestrationV2TurnItem;
+    const entries = deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: [{ ...row, item: requestItem, sourceItemId: requestItem.id }],
+      optimisticMessages: [],
+      attachmentUrlById: new Map(),
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.kind).toBe("event");
+    expect(timelineEntryIsPersistentResourceCard(entries[0]!)).toBe(true);
+  });
+
   it("retains history and attachment previews through decoded streaming updates", () => {
     const fixture = makeStreamingTimelineFixture("Partial");
     const attachment = {
