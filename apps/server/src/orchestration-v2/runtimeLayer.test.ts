@@ -11659,6 +11659,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           assert.deepEqual(pendingStarts[0]?.request, {
             type: "provider-turn.start",
             runId: source.id,
+            providerInstanceId: source.providerInstanceId,
           });
         }
         const afterRetries = yield* orchestrator.getThreadProjection(threadId);
@@ -11770,7 +11771,13 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           );
           assert.deepEqual(
             starts.filter((effect) => effect.status === "pending").map((effect) => effect.request),
-            [{ type: "provider-turn.start", runId: run.id }],
+            [
+              {
+                type: "provider-turn.start",
+                runId: run.id,
+                providerInstanceId: run.providerInstanceId,
+              },
+            ],
           );
         });
         yield* recovery.reconcile(trigger);

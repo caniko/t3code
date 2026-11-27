@@ -6,6 +6,7 @@ import {
   ModelSelection,
   NodeId,
   NonNegativeInt,
+  ProviderInstanceId,
   ProviderSessionId,
   RunAttemptId,
   ProviderApprovalDecision,
@@ -59,6 +60,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
   Schema.Struct({
     type: Schema.Literal("provider-turn.start"),
     runId: RunId,
+    providerInstanceId: Schema.optional(ProviderInstanceId),
   }),
   Schema.Struct({
     type: Schema.Literal("provider-turn.interrupt"),
@@ -83,6 +85,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
     providerTurnId: ProviderTurnId,
     interruptedAttemptId: RunAttemptId,
     runId: RunId,
+    providerInstanceId: Schema.optional(ProviderInstanceId),
     sessionTransition: Schema.optional(
       Schema.Union([
         Schema.Struct({
@@ -255,9 +258,13 @@ export interface EffectOutboxV2Shape {
     readonly workerId: string;
     readonly excludeRestartContinuations?: boolean;
     readonly maxRunningTitleGenerations?: number;
+    readonly maxRunningTurnStartsPerProvider?: number;
+    readonly maxRunningTurnStarts?: number;
   }) => Effect.Effect<Option.Option<OrchestrationEffectV2>, EffectOutboxError>;
   readonly nextClaimableAt: (input?: {
     readonly maxRunningTitleGenerations?: number;
+    readonly maxRunningTurnStartsPerProvider?: number;
+    readonly maxRunningTurnStarts?: number;
   }) => Effect.Effect<Option.Option<DateTime.Utc>, EffectOutboxError>;
   readonly succeed: (input: {
     readonly effectId: string;
@@ -344,11 +351,16 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
         Array.from({ length: Math.min(64, Math.max(0, Math.floor(count))) }, () => undefined),
       ).pipe(Effect.asVoid);
     const urgentControlTypes = sql`('provider-turn.interrupt', 'runtime-request.respond')`;
+    const turnStartTypes = sql`('provider-turn.start', 'provider-turn.restart')`;
     // A running steer can need a control before it releases the thread's queue.
     const claimableCandidatePredicate = (
       availableBefore?: string,
       excludeRestartContinuations = false,
-      maxRunningTitleGenerations?: number,
+      limits: {
+        readonly maxRunningTitleGenerations?: number;
+        readonly maxRunningTurnStartsPerProvider?: number;
+        readonly maxRunningTurnStarts?: number;
+      } = {},
     ) =>
       sql`
         ${
@@ -405,7 +417,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             )
         )
         AND ${
-          maxRunningTitleGenerations === undefined
+          limits.maxRunningTitleGenerations === undefined
             ? sql`1 = 1`
             : sql`(
                 candidate.effect_type != 'thread-title.generate'
@@ -414,7 +426,36 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
                   FROM orchestration_v2_effect_outbox AS running_title
                   WHERE running_title.status = 'running'
                     AND running_title.effect_type = 'thread-title.generate'
-                ) < ${maxRunningTitleGenerations}
+                ) < ${limits.maxRunningTitleGenerations}
+              )`
+        }
+        AND ${
+          limits.maxRunningTurnStarts === undefined
+            ? sql`1 = 1`
+            : sql`(
+                candidate.effect_type NOT IN ${turnStartTypes}
+                OR (
+                  SELECT COUNT(*)
+                  FROM orchestration_v2_effect_outbox AS running_turn_start
+                  WHERE running_turn_start.status = 'running'
+                    AND running_turn_start.effect_type IN ${turnStartTypes}
+                ) < ${limits.maxRunningTurnStarts}
+              )`
+        }
+        AND ${
+          limits.maxRunningTurnStartsPerProvider === undefined
+            ? sql`1 = 1`
+            : sql`(
+                candidate.effect_type NOT IN ${turnStartTypes}
+                OR json_extract(candidate.payload_json, '$.providerInstanceId') IS NULL
+                OR (
+                  SELECT COUNT(*)
+                  FROM orchestration_v2_effect_outbox AS running_provider_turn_start
+                  WHERE running_provider_turn_start.status = 'running'
+                    AND running_provider_turn_start.effect_type IN ${turnStartTypes}
+                    AND json_extract(running_provider_turn_start.payload_json, '$.providerInstanceId') =
+                      json_extract(candidate.payload_json, '$.providerInstanceId')
+                ) < ${limits.maxRunningTurnStartsPerProvider}
               )`
         }
       `;
@@ -605,7 +646,13 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       ),
       // The worker polls for the next effect even when there is no work to claim.
       claimNext: Effect.fnUntraced(
-        function* ({ workerId, excludeRestartContinuations = false, maxRunningTitleGenerations }) {
+        function* ({
+          workerId,
+          excludeRestartContinuations = false,
+          maxRunningTitleGenerations,
+          maxRunningTurnStartsPerProvider,
+          maxRunningTurnStarts,
+        }) {
           const now = yield* DateTime.now;
           const nowIso = DateTime.formatIso(now);
           // Idle claims return empty; tracing their full SQL on every poll overwhelms useful traces.
@@ -620,11 +667,13 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
             WHERE effect_id = (
               SELECT candidate.effect_id
               FROM orchestration_v2_effect_outbox AS candidate
-              WHERE ${claimableCandidatePredicate(
-                nowIso,
-                excludeRestartContinuations,
-                maxRunningTitleGenerations,
-              )}
+              WHERE ${claimableCandidatePredicate(nowIso, excludeRestartContinuations, {
+                ...(maxRunningTitleGenerations === undefined ? {} : { maxRunningTitleGenerations }),
+                ...(maxRunningTurnStartsPerProvider === undefined
+                  ? {}
+                  : { maxRunningTurnStartsPerProvider }),
+                ...(maxRunningTurnStarts === undefined ? {} : { maxRunningTurnStarts }),
+              })}
                 AND ${excludeRestartContinuations ? sql`candidate.effect_type != 'provider-runtime.continue'` : sql`1 = 1`}
               ORDER BY candidate.available_at ASC, candidate.created_at ASC, candidate.effect_id ASC
               LIMIT 1
@@ -660,11 +709,23 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
       nextClaimableAt: Effect.fnUntraced(
         function* ({
           maxRunningTitleGenerations,
-        }: { readonly maxRunningTitleGenerations?: number } = {}) {
+          maxRunningTurnStartsPerProvider,
+          maxRunningTurnStarts,
+        }: {
+          readonly maxRunningTitleGenerations?: number;
+          readonly maxRunningTurnStartsPerProvider?: number;
+          readonly maxRunningTurnStarts?: number;
+        } = {}) {
           const rows = yield* sql<{ readonly available_at: string | null }>`
             SELECT MIN(candidate.available_at) AS available_at
             FROM orchestration_v2_effect_outbox AS candidate
-            WHERE ${claimableCandidatePredicate(undefined, false, maxRunningTitleGenerations)}
+            WHERE ${claimableCandidatePredicate(undefined, false, {
+              ...(maxRunningTitleGenerations === undefined ? {} : { maxRunningTitleGenerations }),
+              ...(maxRunningTurnStartsPerProvider === undefined
+                ? {}
+                : { maxRunningTurnStartsPerProvider }),
+              ...(maxRunningTurnStarts === undefined ? {} : { maxRunningTurnStarts }),
+            })}
           `.pipe(NodeSqliteClient.readOnly, Effect.withTracerEnabled(false));
           const availableAt = rows[0]?.available_at;
           if (availableAt === undefined || availableAt === null) return Option.none();

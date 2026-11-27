@@ -1937,7 +1937,7 @@ effectIt.effect("preserves a replacement committed before exhausted start settle
       );
       const { storedEffect } = yield* enqueueStart(projection);
       expect(yield* worker.drain()).toBe(1);
-      yield* TestClock.adjust("100 millis");
+      yield* TestClock.adjust("5 seconds");
       expect(yield* worker.drain(1)).toBe(1);
       expect(escapedStartError).toMatchObject({ cause: { write: storageFailure } });
       expect(yield* outbox.get("effect:replacement-restart")).toMatchObject({

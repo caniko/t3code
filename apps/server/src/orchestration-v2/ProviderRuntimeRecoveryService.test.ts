@@ -782,7 +782,15 @@ it.effect.each([
     assert.isEmpty(command.effects);
     assert.deepEqual(
       written.map((effect) => effect.request),
-      resent ? [{ type: "provider-turn.start", runId }] : [],
+      resent
+        ? [
+            {
+              type: "provider-turn.start",
+              runId,
+              providerInstanceId: ProviderInstanceId.make("codex"),
+            },
+          ]
+        : [],
     );
     if (terminalized) {
       assert.equal(

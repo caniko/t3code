@@ -1,5 +1,6 @@
 import { CommandId, type RunId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -68,6 +69,40 @@ function isNonRetryableProviderTurnControlFailure(effectType: string, errorText:
 // Keep an owner for starting runs when persistence or restart cleanup fails.
 const ownsStartingRun = (effectType: EffectOutbox.OrchestrationEffectV2["request"]["type"]) =>
   effectType === "provider-turn.start" || effectType === "provider-turn.restart";
+
+const SLOW_TURN_START_RETRY_THRESHOLD_MS = 10_000;
+
+const hasStartupOrTransportErrorTag = (cause: Cause.Cause<unknown>): boolean => {
+  const seen = new Set<unknown>();
+  const visit = (value: unknown): boolean => {
+    if (typeof value !== "object" || value === null || seen.has(value)) return false;
+    seen.add(value);
+    const record = value as { readonly _tag?: unknown; readonly cause?: unknown };
+    if (record._tag === "ProviderSessionOpenError" || record._tag === "AcpTransportError") {
+      return true;
+    }
+    return record.cause !== undefined && visit(record.cause);
+  };
+  return Cause.findErrorOption(cause).pipe(Option.exists(visit));
+};
+
+const retryDelayMsFor = (
+  effect: EffectOutbox.OrchestrationEffectV2,
+  elapsedMs: number,
+  cause: Cause.Cause<unknown>,
+  errorText: string,
+): number => {
+  const exponent = Math.max(0, effect.attemptCount - 1);
+  if (
+    ownsStartingRun(effect.request.type) &&
+    (elapsedMs >= SLOW_TURN_START_RETRY_THRESHOLD_MS ||
+      hasStartupOrTransportErrorTag(cause) ||
+      /ProviderSessionOpenError|AcpTransportError|timed out/i.test(errorText))
+  ) {
+    return Math.min(30_000, 5_000 * 2 ** exponent);
+  }
+  return Math.min(30_000, 100 * 2 ** exponent);
+};
 
 const cannotSettleRun = (cause: Cause.Cause<unknown>) =>
   Cause.findErrorOption(cause).pipe(
@@ -784,10 +819,14 @@ export interface OrchestrationEffectWorkerV2Shape {
   readonly awaitWork: Effect.Effect<void>;
   readonly runOnce: (input?: {
     readonly maxRunningTitleGenerations?: number;
+    readonly maxRunningTurnStartsPerProvider?: number;
+    readonly maxRunningTurnStarts?: number;
   }) => Effect.Effect<boolean, OrchestrationEffectWorkerError>;
   readonly runRecoveryOnce: Effect.Effect<boolean, OrchestrationEffectWorkerError>;
   readonly nextClaimableAt: (input?: {
     readonly maxRunningTitleGenerations?: number;
+    readonly maxRunningTurnStartsPerProvider?: number;
+    readonly maxRunningTurnStarts?: number;
   }) => Effect.Effect<Option.Option<DateTime.Utc>, OrchestrationEffectWorkerError>;
   readonly drain: (maxEffects?: number) => Effect.Effect<number, OrchestrationEffectWorkerError>;
 }
@@ -951,6 +990,7 @@ export const layerWithOptions = (
           }).pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           if (cancelledBeforeExecution) return true;
 
+          const executionStartedAtMs = yield* Clock.currentTimeMillis;
           const execution = executor
             .execute(effect, { willRetry: effect.attemptCount < maxAttempts })
             .pipe(boundExecution(effect), Effect.as("executed" as const));
@@ -975,6 +1015,7 @@ export const layerWithOptions = (
             }).pipe(Effect.onError((cause) => recoverPostSuccessSettlement(effect, cause)));
           }
 
+          const elapsedMs = Math.max(0, (yield* Clock.currentTimeMillis) - executionStartedAtMs);
           const error = Cause.pretty(exit.cause);
           const nonRetryable = isNonRetryableProviderTurnControlFailure(effect.request.type, error);
           yield* Effect.logWarning("Orchestration effect execution failed", {
@@ -998,7 +1039,7 @@ export const layerWithOptions = (
                     effectId: effect.id,
                     workerId,
                     error,
-                    delayMs: Math.min(30_000, 100 * 2 ** Math.max(0, effect.attemptCount - 1)),
+                    delayMs: retryDelayMsFor(effect, elapsedMs, exit.cause, error),
                   })
                   .pipe(Effect.onError((cause) => requeueClaim(effect, cause)));
           if (!updated) {
@@ -1054,6 +1095,8 @@ export const layer = layerWithOptions();
 export interface OrchestrationEffectDaemonOptions {
   readonly concurrency?: number;
   readonly livenessPollIntervalMs?: number;
+  readonly maxRunningTurnStartsPerProvider?: number;
+  readonly maxRunningTurnStarts?: number;
 }
 
 const DEFAULT_EFFECT_WORKER_CONCURRENCY = 4;
@@ -1076,8 +1119,25 @@ export const runDaemonWithOptions = (options: OrchestrationEffectDaemonOptions =
       const livenessPollIntervalMs = Number.isFinite(requestedLivenessPollIntervalMs)
         ? Math.max(1, Math.floor(requestedLivenessPollIntervalMs))
         : DEFAULT_EFFECT_WORKER_LIVENESS_POLL_INTERVAL_MS;
+      const requestedMaxRunningTurnStartsPerProvider =
+        options.maxRunningTurnStartsPerProvider ?? concurrency;
+      const maxRunningTurnStartsPerProvider = Number.isFinite(
+        requestedMaxRunningTurnStartsPerProvider,
+      )
+        ? Math.max(1, Math.floor(requestedMaxRunningTurnStartsPerProvider))
+        : concurrency;
+      const defaultMaxRunningTurnStarts = Math.max(concurrency * 3, 12);
+      const requestedMaxRunningTurnStarts =
+        options.maxRunningTurnStarts ?? defaultMaxRunningTurnStarts;
+      const maxRunningTurnStarts = Number.isFinite(requestedMaxRunningTurnStarts)
+        ? Math.max(1, Math.floor(requestedMaxRunningTurnStarts))
+        : defaultMaxRunningTurnStarts;
       // Title generation can run for minutes; leave at least one worker free for turn work.
-      const claimLimits = concurrency > 1 ? { maxRunningTitleGenerations: concurrency - 1 } : {};
+      const claimLimits = {
+        ...(concurrency > 1 ? { maxRunningTitleGenerations: concurrency - 1 } : {}),
+        maxRunningTurnStartsPerProvider,
+        maxRunningTurnStarts,
+      };
       // Notifications wake promptly; availableAt persists retry timing, and liveness polling recovers missed wakeups.
       const runWorker = Effect.gen(function* () {
         while (true) {

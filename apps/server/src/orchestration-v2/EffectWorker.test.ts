@@ -34,6 +34,7 @@ import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EffectWorker from "./EffectWorker.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectionMaintenance from "./ProjectionMaintenance.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
@@ -839,5 +840,293 @@ it.effect.each([3, 4])(
         yield* Ref.get(events),
         processLossCount > 3 ? ["recover-child"] : ["dispatch", "recover-child"],
       );
+    }),
+);
+
+it.effect(
+  "throttles stalled per-provider turn starts without blocking other providers or controls, and wakes on settle",
+  () =>
+    Effect.gen(function* () {
+      const providerA = ProviderInstanceId.make("antigravity-a");
+      const providerB = ProviderInstanceId.make("codex-b");
+      const threadA1 = ThreadId.make("thread:throttle:a1");
+      const threadA2 = ThreadId.make("thread:throttle:a2");
+      const threadA3 = ThreadId.make("thread:throttle:a3");
+      const threadA4 = ThreadId.make("thread:throttle:a4");
+      const threadB1 = ThreadId.make("thread:throttle:b1");
+      const threadControl = ThreadId.make("thread:throttle:control");
+
+      const a1Started = yield* Deferred.make<void>();
+      const a2Started = yield* Deferred.make<void>();
+      const a3Started = yield* Deferred.make<void>();
+      const a4Started = yield* Deferred.make<void>();
+      const b1Started = yield* Deferred.make<void>();
+      const controlStarted = yield* Deferred.make<void>();
+      const releaseA1 = yield* Deferred.make<void>();
+      const releaseA2 = yield* Deferred.make<void>();
+      const releaseA3 = yield* Deferred.make<void>();
+
+      const layerOutbox = EffectOutbox.layer.pipe(Layer.provide(SqlitePersistence.layerMemory));
+
+      yield* Effect.gen(function* () {
+        const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const layerExecutor = Layer.succeed(
+          EffectWorker.OrchestrationEffectExecutorV2,
+          EffectWorker.OrchestrationEffectExecutorV2.of({
+            execute: (effect) => {
+              if (effect.id === "effect:throttle:a1") {
+                return Deferred.succeed(a1Started, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseA1)),
+                );
+              }
+              if (effect.id === "effect:throttle:a2") {
+                return Deferred.succeed(a2Started, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseA2)),
+                  Effect.andThen(
+                    Effect.fail(
+                      new EffectWorker.OrchestrationEffectExecutionError({
+                        effectId: effect.id,
+                        effectType: effect.request.type,
+                        cause: "simulated stalled provider failure",
+                      }),
+                    ),
+                  ),
+                );
+              }
+              if (effect.id === "effect:throttle:a3") {
+                return Deferred.succeed(a3Started, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseA3)),
+                );
+              }
+              if (effect.id === "effect:throttle:a4") {
+                return Deferred.succeed(a4Started, undefined).pipe(Effect.asVoid);
+              }
+              if (effect.id === "effect:throttle:b1") {
+                return Deferred.succeed(b1Started, undefined).pipe(Effect.asVoid);
+              }
+              if (effect.id === "effect:throttle:control") {
+                return Deferred.succeed(controlStarted, undefined).pipe(Effect.asVoid);
+              }
+              return Effect.void;
+            },
+          }),
+        );
+        const layerWorker = EffectWorker.layerWithOptions({
+          workerId: "throttle-worker",
+          maxAttempts: 1,
+        }).pipe(
+          Layer.provide(
+            Layer.merge(Layer.succeed(EffectOutbox.EffectOutboxV2, outbox), layerExecutor),
+          ),
+        );
+
+        yield* outbox.enqueue([
+          {
+            id: "effect:throttle:a1",
+            commandId: CommandId.make("command:throttle:a1"),
+            threadId: threadA1,
+            request: {
+              type: "provider-turn.start",
+              runId: RunId.make("run:throttle:a1"),
+              providerInstanceId: providerA,
+            },
+          },
+          {
+            id: "effect:throttle:a2",
+            commandId: CommandId.make("command:throttle:a2"),
+            threadId: threadA2,
+            request: {
+              type: "provider-turn.start",
+              runId: RunId.make("run:throttle:a2"),
+              providerInstanceId: providerA,
+            },
+          },
+          {
+            id: "effect:throttle:a3",
+            commandId: CommandId.make("command:throttle:a3"),
+            threadId: threadA3,
+            request: {
+              type: "provider-turn.start",
+              runId: RunId.make("run:throttle:a3"),
+              providerInstanceId: providerA,
+            },
+          },
+          {
+            id: "effect:throttle:a4",
+            commandId: CommandId.make("command:throttle:a4"),
+            threadId: threadA4,
+            request: {
+              type: "provider-turn.start",
+              runId: RunId.make("run:throttle:a4"),
+              providerInstanceId: providerA,
+            },
+          },
+        ]);
+
+        yield* Effect.gen(function* () {
+          yield* EffectWorker.runDaemonWithOptions({
+            concurrency: 2,
+            livenessPollIntervalMs: 60_000,
+          }).pipe(Effect.forkScoped);
+
+          yield* Deferred.await(a1Started);
+          yield* Deferred.await(a2Started);
+
+          // Advance past EFFECT_WORKER_SLOT_WAIT (30s) so worker slots free up.
+          yield* TestClock.adjust(Duration.seconds(35));
+
+          // Extra pending provider-A turn starts must remain pending (not claimed).
+          const a3 = Option.getOrThrow(yield* outbox.get("effect:throttle:a3"));
+          assert.equal(a3.status, "pending");
+          const a4 = Option.getOrThrow(yield* outbox.get("effect:throttle:a4"));
+          assert.equal(a4.status, "pending");
+
+          // Provider B turn start and a control effect must run immediately.
+          yield* outbox.enqueue([
+            {
+              id: "effect:throttle:b1",
+              commandId: CommandId.make("command:throttle:b1"),
+              threadId: threadB1,
+              request: {
+                type: "provider-turn.start",
+                runId: RunId.make("run:throttle:b1"),
+                providerInstanceId: providerB,
+              },
+            },
+            {
+              id: "effect:throttle:control",
+              commandId: CommandId.make("command:throttle:control"),
+              threadId: threadControl,
+              request: {
+                type: "provider-turn.interrupt",
+                providerSessionId: oldSessionId,
+                providerThreadId,
+                providerTurnId,
+              },
+            },
+          ]);
+          yield* outbox.notifyAvailable(2);
+
+          yield* Deferred.await(b1Started);
+          yield* Deferred.await(controlStarted);
+
+          // Completing A1 wakes A3 promptly without waiting for liveness polling.
+          yield* Deferred.succeed(releaseA1, undefined);
+          yield* Deferred.await(a3Started);
+
+          // Failing A2 frees its slot and wakes A4 promptly as well.
+          yield* Deferred.succeed(releaseA2, undefined);
+          yield* Deferred.await(a4Started);
+
+          yield* Deferred.succeed(releaseA3, undefined);
+          yield* outbox.awaitSettled("effect:throttle:a3");
+          yield* outbox.awaitSettled("effect:throttle:a4");
+        }).pipe(Effect.provide(layerWorker), Effect.scoped);
+      }).pipe(Effect.provide(layerOutbox));
+    }),
+);
+
+it.effect(
+  "uses 5s-30s backoff for slow or startup-timeout turn starts and 100ms backoff for fast generic failures",
+  () =>
+    Effect.gen(function* () {
+      const runRetrySequence = (input: {
+        readonly attempts: ReadonlyArray<number>;
+        readonly sleepMs: number;
+        readonly cause: unknown;
+      }) =>
+        Effect.gen(function* () {
+          const delays = yield* Ref.make<ReadonlyArray<number>>([]);
+          const remaining = yield* Ref.make<ReadonlyArray<number>>(input.attempts);
+          const now = DateTime.formatIso(yield* DateTime.now);
+          const workerId = "backoff-worker";
+          const layerOutbox = Layer.mock(EffectOutbox.EffectOutboxV2)({
+            claimNext: () =>
+              Ref.modify(remaining, ([next, ...rest]) => [next, rest]).pipe(
+                Effect.map((attemptCount) =>
+                  attemptCount === undefined
+                    ? Option.none()
+                    : Option.some<EffectOutbox.OrchestrationEffectV2>({
+                        id: `effect:backoff:${attemptCount}`,
+                        commandId: CommandId.make(`command:backoff:${attemptCount}`),
+                        threadId,
+                        request: { type: "provider-turn.start", runId },
+                        status: "running",
+                        attemptCount,
+                        availableAt: now,
+                        leaseOwner: workerId,
+                        createdAt: now,
+                        updatedAt: now,
+                        completedAt: null,
+                        lastError: null,
+                      }),
+                ),
+              ),
+            get: () => Effect.succeedNone,
+            awaitCancellation: () => Effect.never,
+            clearCancellation: () => Effect.void,
+            retry: ({ delayMs }) =>
+              Ref.update(delays, (existing) => [...existing, delayMs]).pipe(Effect.as(true)),
+          });
+          const layerExecutor = Layer.succeed(
+            EffectWorker.OrchestrationEffectExecutorV2,
+            EffectWorker.OrchestrationEffectExecutorV2.of({
+              execute: (effect) =>
+                (input.sleepMs > 0
+                  ? Effect.sleep(Duration.millis(input.sleepMs))
+                  : Effect.void
+                ).pipe(
+                  Effect.andThen(
+                    Effect.fail(
+                      new EffectWorker.OrchestrationEffectExecutionError({
+                        effectId: effect.id,
+                        effectType: effect.request.type,
+                        cause: input.cause,
+                      }),
+                    ),
+                  ),
+                ),
+            }),
+          );
+          const layerWorker = EffectWorker.layerWithOptions({ workerId, maxAttempts: 10 }).pipe(
+            Layer.provide(Layer.merge(layerOutbox, layerExecutor)),
+          );
+          yield* Effect.gen(function* () {
+            const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            for (const _ of input.attempts) {
+              const fiber = yield* worker.runOnce().pipe(Effect.forkChild);
+              if (input.sleepMs > 0) {
+                yield* TestClock.adjust(Duration.millis(input.sleepMs));
+              }
+              yield* Fiber.join(fiber);
+            }
+          }).pipe(Effect.provide(layerWorker));
+          return yield* Ref.get(delays);
+        });
+
+      const fastGeneric = yield* runRetrySequence({
+        attempts: [1, 2, 3],
+        sleepMs: 0,
+        cause: "transient sqlite busy",
+      });
+      assert.deepEqual(fastGeneric, [100, 200, 400]);
+
+      const slowFailure = yield* runRetrySequence({
+        attempts: [1, 2, 3, 4],
+        sleepMs: 10_000,
+        cause: "generic failure after 10s",
+      });
+      assert.deepEqual(slowFailure, [5_000, 10_000, 20_000, 30_000]);
+
+      const startupTimeout = yield* runRetrySequence({
+        attempts: [1, 2, 3, 4],
+        sleepMs: 0,
+        cause: new ProviderSessionManager.ProviderSessionOpenError({
+          instanceId: ProviderInstanceId.make("antigravity"),
+          providerSessionId: oldSessionId,
+          cause: "ACP initialize timed out",
+        }),
+      });
+      assert.deepEqual(startupTimeout, [5_000, 10_000, 20_000, 30_000]);
     }),
 );

@@ -3462,7 +3462,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             id: `effect:${commandId}:provider-turn.start:${queuedRun.id}:${yield* idAllocator.allocate.event({ threadId, commandId })}`,
             commandId,
             threadId,
-            request: { type: "provider-turn.start", runId: queuedRun.id },
+            request: {
+              type: "provider-turn.start",
+              runId: queuedRun.id,
+              providerInstanceId: queuedRun.providerInstanceId,
+            },
           },
         ],
       );
@@ -7286,6 +7290,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           providerTurnId: providerTurn.id,
           interruptedAttemptId,
           runId: targetRun.id,
+          providerInstanceId: input.modelSelection.instanceId,
           ...(restartSessionTransition === null
             ? {}
             : { sessionTransition: restartSessionTransition }),
@@ -9098,7 +9103,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         id: `effect:${command.commandId}:provider-turn.start:${runId}`,
         commandId: command.commandId,
         threadId: command.threadId,
-        request: { type: "provider-turn.start", runId },
+        request: {
+          type: "provider-turn.start",
+          runId,
+          providerInstanceId: modelSelection.instanceId,
+        },
       } satisfies PendingOrchestrationEffectV2;
       if (dispatchMode.type !== "defer_start") {
         yield* Ref.update(effects, (existing) => [...existing, pendingEffect]);
@@ -10143,7 +10152,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       id: `effect:${command.commandId}:provider-turn.start:${runId}`,
       commandId: command.commandId,
       threadId: command.threadId,
-      request: { type: "provider-turn.start", runId },
+      request: {
+        type: "provider-turn.start",
+        runId,
+        providerInstanceId: modelSelection.instanceId,
+      },
     } satisfies PendingOrchestrationEffectV2;
     yield* Ref.update(effects, (existing) => [...existing, pendingEffect]);
   });
@@ -13033,7 +13046,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           id: `effect:${command.commandId}:provider-turn.start:${state.run.id}`,
           commandId: command.commandId,
           threadId: command.threadId,
-          request: { type: "provider-turn.start", runId: state.run.id },
+          request: {
+            type: "provider-turn.start",
+            runId: state.run.id,
+            providerInstanceId: state.run.providerInstanceId,
+          },
         } satisfies PendingOrchestrationEffectV2,
       ]);
     },
