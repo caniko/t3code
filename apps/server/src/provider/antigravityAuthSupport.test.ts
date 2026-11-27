@@ -910,6 +910,36 @@ it.layer(NodeServices.layer)("Antigravity profile preparation", (it) => {
     }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
   });
 
+  it.effect("serializes preparation of the same normalized profile", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const profileDirectory = yield* fs.makeTempDirectoryScoped();
+      const proceed = yield* Deferred.make<void>();
+      const first = preflightHelper(Deferred.await(proceed));
+      const second = preflightHelper(Effect.void);
+      const prepare = (directory: string, spawner: typeof first.spawner) =>
+        prepareAntigravityProfile({
+          profileDirectory: directory,
+          userHome: path.join(profileDirectory, "home"),
+          runtimeExecutablePath: "/fake/node",
+        }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
+      const opening = yield* prepare(profileDirectory, first.spawner).pipe(Effect.forkChild);
+      yield* Deferred.await(first.started);
+      const waiting = yield* prepare(`${profileDirectory}/.`, second.spawner).pipe(
+        Effect.forkChild({ startImmediately: true }),
+      );
+      yield* TestClock.adjust(1);
+      expect(second.spawns.count).toBe(0);
+      yield* Deferred.succeed(proceed, undefined);
+      const [profile] = yield* Fiber.joinAll([opening, waiting]);
+      expect(second.spawns.count).toBe(1);
+      expect(
+        decodeJson(yield* fs.readFileString(path.join(profile!.acpDirectory, "settings.json"))),
+      ).toEqual({ auth: { type: "oauth-personal" } });
+    }),
+  );
+
   it.effect("allows a browser preflight that takes longer than five seconds", () =>
     Effect.gen(function* () {
       const helper = preflightHelper(Effect.sleep("20 seconds"));
