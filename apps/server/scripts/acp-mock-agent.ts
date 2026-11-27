@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
+import * as NodeReadline from "node:readline";
 
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -61,6 +62,7 @@ const completeFirstPromptOnCancel = process.env.T3_ACP_COMPLETE_FIRST_PROMPT_ON_
 const floodStderr = process.env.T3_ACP_FLOOD_STDERR === "1";
 const hangPromptForever = process.env.T3_ACP_HANG_PROMPT_FOREVER === "1";
 const busySecondPrompt = process.env.T3_ACP_BUSY_SECOND_PROMPT === "1";
+const steerBehavior = process.env.T3_ACP_STEER_BEHAVIOR;
 const agentVersion = process.env.T3_ACP_AGENT_VERSION ?? "0.0.0";
 const geminiApiKey = process.env.GEMINI_API_KEY;
 const idleError = process.env.T3_ACP_IDLE_ERROR;
@@ -2353,4 +2355,302 @@ const program = Effect.gen(function* () {
   Effect.provide(NodeServices.layer),
 );
 
-NodeRuntime.runMain(program);
+// Real `agy acp` speaks ACP v1 (agentInfo/agentCapabilities), which permits overlapping
+// `session/prompt` RPCs over stdio for prompt steering. EffectAcpAgent speaks ACP v2,
+// whose client rejects overlapping prompts locally before they reach the wire.
+function runV1SteerBehaviorAgent(behavior: string): void {
+  let currentModel = "gemini-test-low";
+  let currentModeId = "default";
+  let promptOrdinal = 0;
+  let nextAgentRequestId = 1;
+  const pendingClientResponses = new Map<
+    number,
+    { readonly resolve: (value: unknown) => void; readonly reject: (error: unknown) => void }
+  >();
+  let resolveSteerRejected: (() => void) | undefined;
+  const steerRejected = new Promise<void>((resolve) => {
+    resolveSteerRejected = resolve;
+  });
+
+  const writeMessage = (message: unknown): void => {
+    process.stdout.write(`${JSON.stringify(message)}\n`);
+  };
+  const writeResult = (id: string | number | null, result: unknown): void => {
+    writeMessage({ jsonrpc: "2.0", id, result });
+  };
+  const writeError = (
+    id: string | number | null,
+    code: number,
+    message: string,
+    data?: unknown,
+  ): void => {
+    writeMessage({
+      jsonrpc: "2.0",
+      id,
+      error: { code, message, ...(data === undefined ? {} : { data }) },
+    });
+  };
+  const sendUpdate = (targetSessionId: string, update: unknown): void => {
+    writeMessage({
+      jsonrpc: "2.0",
+      method: "session/update",
+      params: { sessionId: targetSessionId, update },
+    });
+  };
+  const requestClient = (method: string, params: unknown): Promise<unknown> =>
+    new Promise((resolve, reject) => {
+      const id = nextAgentRequestId++;
+      pendingClientResponses.set(id, { resolve, reject });
+      writeMessage({ jsonrpc: "2.0", id, method, params });
+    });
+  const configOptions = () => [
+    {
+      type: "select",
+      id: "model",
+      name: "Model",
+      category: "model",
+      currentValue: currentModel,
+      options: [
+        { value: "gemini-test-low", name: "Gemini Test (Low)" },
+        { value: "gemini-test-high", name: "Gemini Test (High)" },
+      ],
+    },
+  ];
+  const extractPromptText = (params: Record<string, unknown>): string => {
+    const prompt = Array.isArray(params.prompt) ? params.prompt : [];
+    return prompt
+      .flatMap((block) =>
+        typeof block === "object" &&
+        block !== null &&
+        (block as { readonly type?: unknown }).type === "text" &&
+        typeof (block as { readonly text?: unknown }).text === "string"
+          ? [(block as { readonly text: string }).text]
+          : [],
+      )
+      .join("\n");
+  };
+
+  const handlePrompt = async (
+    id: string | number | null,
+    params: Record<string, unknown>,
+  ): Promise<void> => {
+    const targetSessionId =
+      typeof params.sessionId === "string" ? params.sessionId : "mock-session-1";
+    const ordinal = ++promptOrdinal;
+    if (
+      behavior === "raced-blocked-steer-question" ||
+      behavior === "raced-blocked-steer-permission"
+    ) {
+      if (ordinal === 1) {
+        sendUpdate(targetSessionId, {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Working on turn 1..." },
+        });
+        await steerRejected;
+        if (behavior === "raced-blocked-steer-question") {
+          await requestClient("elicitation/create", {
+            sessionId: targetSessionId,
+            message: "Need one answer",
+            mode: "form",
+            requestedSchema: {
+              type: "object",
+              properties: { port: { type: "string", title: "Which port?" } },
+              required: ["port"],
+            },
+          });
+        } else {
+          await requestClient("session/request_permission", {
+            sessionId: targetSessionId,
+            toolCall: {
+              toolCallId: "cmd_raced",
+              title: "Run a command?",
+              kind: "execute",
+              status: "pending",
+            },
+            options: [
+              { optionId: "allow_once", name: "Allow", kind: "allow_once" },
+              { optionId: "reject_once", name: "Reject", kind: "reject_once" },
+            ],
+          });
+        }
+        sendUpdate(targetSessionId, {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Answered and finished turn 1." },
+        });
+        writeResult(id, { stopReason: "end_turn" });
+        return;
+      }
+      if (ordinal === 2) {
+        resolveSteerRejected?.();
+        const blockedDetail = `Can't add this prompt to session ${targetSessionId}: the running prompt is waiting for a permission or question answer; answer it or send session/cancel, then send this prompt again`;
+        if (behavior === "raced-blocked-steer-question") {
+          writeError(id, -32603, "Internal error", { details: blockedDetail });
+        } else {
+          writeError(id, -32603, blockedDetail);
+        }
+        return;
+      }
+      sendUpdate(targetSessionId, {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Finished turn 2." },
+      });
+      writeResult(id, { stopReason: "end_turn" });
+      return;
+    }
+    if (behavior === "rejected-steer-orphaned") {
+      if (ordinal === 1) {
+        sendUpdate(targetSessionId, {
+          sessionUpdate: "tool_call",
+          toolCallId: "call_orphan",
+          kind: "execute",
+          title: "node orphan.mjs",
+          status: "in_progress",
+          rawInput: { CommandLine: "node orphan.mjs" },
+        });
+        // Leave prompt #1 orphaned on the agent so the rejected steer forces quarantine & teardown.
+        return;
+      }
+      sendUpdate(targetSessionId, {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "late orphaned frame" },
+      });
+      writeError(id, -32603, "Cannot accept the steer");
+      return;
+    }
+    if (behavior === "blocked-start-turn") {
+      writeError(
+        id,
+        -32603,
+        `Can't add this prompt to session ${targetSessionId}: the running prompt is waiting for a permission or question answer; answer it or send session/cancel, then send this prompt again`,
+      );
+      return;
+    }
+    if (behavior === "ask-question-then-complete") {
+      if (ordinal === 1) {
+        await requestClient("elicitation/create", {
+          sessionId: targetSessionId,
+          message: "Need one answer",
+          mode: "form",
+          requestedSchema: {
+            type: "object",
+            properties: { port: { type: "string", title: "Which port?" } },
+            required: ["port"],
+          },
+        });
+        sendUpdate(targetSessionId, {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Turn 1 completed." },
+        });
+        writeResult(id, { stopReason: "end_turn" });
+        return;
+      }
+      sendUpdate(targetSessionId, {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: `Turn ${ordinal}: ${extractPromptText(params)}` },
+      });
+      writeResult(id, { stopReason: "end_turn" });
+      return;
+    }
+    sendUpdate(targetSessionId, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: `Turn ${ordinal}: ${extractPromptText(params)}` },
+    });
+    writeResult(id, { stopReason: "end_turn" });
+  };
+
+  const rl = NodeReadline.createInterface({
+    input: process.stdin,
+    crlfDelay: Number.POSITIVE_INFINITY,
+  });
+  rl.on("line", (line) => {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) return;
+    const message = JSON.parse(trimmed) as {
+      readonly id?: string | number | null;
+      readonly method?: string;
+      readonly params?: Record<string, unknown>;
+      readonly result?: unknown;
+      readonly error?: unknown;
+    };
+    if (message.method === undefined && typeof message.id === "number") {
+      const pending = pendingClientResponses.get(message.id);
+      if (pending !== undefined) {
+        pendingClientResponses.delete(message.id);
+        if (message.error !== undefined) {
+          pending.reject(message.error);
+        } else {
+          pending.resolve(message.result);
+        }
+      }
+      return;
+    }
+    const id = message.id ?? null;
+    const params = message.params ?? {};
+    switch (message.method) {
+      case "initialize":
+        writeResult(id, {
+          protocolVersion: 2,
+          agentInfo: { name: "t3-acp-mock-agent", version: agentVersion },
+          agentCapabilities: {
+            sessionCapabilities: { resume: {}, close: {} },
+          },
+          authMethods: [{ id: "oauth-personal", name: "Google", description: "Google account" }],
+        });
+        return;
+      case "authenticate":
+        writeResult(id, {});
+        return;
+      case "session/new":
+      case "session/resume":
+      case "session/load": {
+        const targetSessionId =
+          typeof params.sessionId === "string" ? params.sessionId : "mock-session-1";
+        writeResult(id, {
+          sessionId: targetSessionId,
+          configOptions: configOptions(),
+          modes: {
+            currentModeId,
+            availableModes: [
+              { id: "default", name: "Default" },
+              { id: "auto", name: "Auto" },
+            ],
+          },
+        });
+        return;
+      }
+      case "session/set_config_option": {
+        if (params.configId === "model" && typeof params.value === "string") {
+          currentModel = params.value;
+        }
+        writeResult(id, { configOptions: configOptions() });
+        return;
+      }
+      case "session/set_mode": {
+        if (typeof params.modeId === "string") {
+          currentModeId = params.modeId;
+        }
+        writeResult(id, {});
+        return;
+      }
+      case "session/close":
+        writeResult(id, {});
+        return;
+      case "session/prompt":
+        void handlePrompt(id, params);
+        return;
+      default:
+        if (message.id !== undefined) {
+          writeError(id, -32601, `Method not found: ${message.method}`);
+        }
+    }
+  });
+  rl.on("close", () => {
+    process.exit(0);
+  });
+}
+
+if (steerBehavior !== undefined) {
+  runV1SteerBehaviorAgent(steerBehavior);
+} else {
+  NodeRuntime.runMain(program);
+}

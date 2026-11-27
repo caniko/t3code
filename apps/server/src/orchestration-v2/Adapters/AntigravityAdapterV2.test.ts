@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
   ChatFileAttachment,
+  CommandId,
   MessageId,
   NodeId,
   ProjectId,
@@ -11,6 +12,7 @@ import {
   RunAttemptId,
   RunId,
   ThreadId,
+  type OrchestrationV2DomainEvent,
 } from "@t3tools/contracts";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import {
@@ -31,6 +33,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/process";
 import * as TestClock from "effect/testing/TestClock";
@@ -40,8 +43,13 @@ import * as EffectAcpErrors from "effect-acp/errors";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import { makeAcpAdapterV2 } from "@t3tools/provider-acp/server/adapter";
+import * as EffectWorker from "../EffectWorker.ts";
+import * as Orchestrator from "../Orchestrator.ts";
+import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
+import * as ProviderReplayHarness from "../testkit/ProviderReplayHarness.ts";
 import { makeAntigravityAcpRuntime } from "../../provider/acp/AntigravityAcpSupport.ts";
 import { normalizeAntigravitySessionUpdate } from "../../provider/acp/AntigravityProtocol.ts";
 import { ANTIGRAVITY_SIGN_IN_REQUIRED_MESSAGE } from "../../provider/antigravityAuthSupport.ts";
@@ -1552,6 +1560,8 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
     readonly profileDirectory?: string;
     readonly initialToolCalls?: ReadonlyArray<EffectAcpSchema.SessionUpdate>;
     readonly runtimeMode?: "approval-required";
+    readonly useRealPrompt?: boolean;
+    readonly mockEnv?: (runtimeOrdinal: number) => Record<string, string>;
     readonly prompt?: (
       runtimeOrdinal: number,
       promptOrdinal: number,
@@ -1568,8 +1578,17 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
   let sessionUpdate: Parameters<RuntimeService["handleSessionUpdate"]>[0] | undefined;
   let requestPermission: Parameters<RuntimeService["handleRequestPermission"]>[0] | undefined;
   let elicit: Parameters<RuntimeService["handleElicitation"]>[0] | undefined;
+  let incomingRequest: AntigravityAdapterV2RuntimeInput["onIncomingRequest"];
   let acknowledgeResponse: AntigravityAdapterV2RuntimeInput["onOutgoingResponse"];
   let runtimes = 0;
+  const runtimeClosedByOrdinal = new Map<number, Deferred.Deferred<void>>();
+  const runtimeClosed = (ordinal: number) =>
+    Effect.suspend(() => {
+      const deferred = runtimeClosedByOrdinal.get(ordinal);
+      return deferred === undefined
+        ? Effect.die(`runtime ${ordinal} was not started`)
+        : Deferred.await(deferred);
+    });
   const send = (update: EffectAcpSchema.SessionUpdate) =>
     sessionUpdate === undefined
       ? Effect.die("the adapter must handle session updates")
@@ -1603,23 +1622,29 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
     makeRuntime: (input) => {
       const runtimeOrdinal = ++runtimes;
       let promptOrdinal = 0;
+      incomingRequest = input.onIncomingRequest;
       acknowledgeResponse = input.onOutgoingResponse;
       terminate = input.onTermination;
-      return makeAntigravityAcpRuntime({
-        ...input,
-        childProcessSpawner,
-        spawn: {
-          command: process.execPath,
-          args: [mockAgentPath],
-          cwd: input.cwd,
-          env: {
-            T3_ACP_ANTIGRAVITY: "1",
-            ...(steering === undefined ? {} : { T3_ACP_AGENT_VERSION: steering.agentVersion }),
+      return Effect.gen(function* () {
+        const closed = yield* Deferred.make<void>();
+        runtimeClosedByOrdinal.set(runtimeOrdinal, closed);
+        const scope = yield* Scope.Scope;
+        yield* Scope.addFinalizer(scope, Deferred.succeed(closed, undefined).pipe(Effect.asVoid));
+        const runtime = yield* makeAntigravityAcpRuntime({
+          ...input,
+          childProcessSpawner,
+          spawn: {
+            command: process.execPath,
+            args: [mockAgentPath],
+            cwd: input.cwd,
+            env: {
+              T3_ACP_ANTIGRAVITY: "1",
+              ...(steering === undefined ? {} : { T3_ACP_AGENT_VERSION: steering.agentVersion }),
+              ...(options?.mockEnv?.(runtimeOrdinal) ?? {}),
+            },
           },
-        },
-      }).pipe(
-        Effect.provideService(SecureRandom.SecureRandom, crypto),
-        Effect.map((runtime): RuntimeService => ({
+        }).pipe(Effect.provideService(SecureRandom.SecureRandom, crypto));
+        return {
           ...runtime,
           cancel: Effect.sync(() => {
             cancels += 1;
@@ -1636,48 +1661,58 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
             Effect.sync(() => {
               elicit = handler;
             }).pipe(Effect.andThen(runtime.handleElicitation(handler))),
-          prompt: (payload, promptOptions) =>
-            Effect.gen(function* () {
-              prompts.push({ prompt: payload.prompt, released: promptOptions?.released });
-              if (promptOptions?.dispatched !== undefined) {
-                yield* Deferred.succeed(promptOptions.dispatched, undefined);
-              }
-              if (options?.prompt !== undefined) {
-                return yield* options.prompt(runtimeOrdinal, ++promptOrdinal);
-              }
-              if (prompts.length > 1) {
-                yield* Deferred.succeed(steered, undefined);
-                yield* Deferred.await(releaseSteer);
-                return { stopReason: "end_turn" as const };
-              }
-              if (options?.initialToolCalls !== undefined) {
-                for (const toolUpdate of options.initialToolCalls) {
-                  yield* send(toolUpdate);
-                }
-              } else {
-                yield* send(
-                  detachedChildProfile === undefined
-                    ? { sessionUpdate: "tool_call", ...command, status: "in_progress" }
-                    : {
-                        sessionUpdate: "tool_call",
-                        toolCallId: "call_research",
-                        kind: "other",
-                        title: "Run invoke_subagent",
-                        status: "completed",
-                        rawInput: { TypeName: "research", Role: "Researcher", Prompt: "Read it" },
-                      },
-                );
-              }
-              yield* send({
-                sessionUpdate: "agent_message_chunk",
-                content: { type: "text", text: "I'll render once the fetch finishes." },
-              });
-              yield* send(usage);
-              if (steering?.holdsFirstPrompt === true) yield* Deferred.await(steered);
-              return { stopReason: "end_turn" as const };
-            }),
-        })),
-      );
+          prompt:
+            options?.useRealPrompt === true
+              ? (payload, promptOptions) =>
+                  Effect.sync(() => {
+                    prompts.push({ prompt: payload.prompt, released: promptOptions?.released });
+                  }).pipe(Effect.andThen(runtime.prompt(payload, promptOptions)))
+              : (payload, promptOptions) =>
+                  Effect.gen(function* () {
+                    prompts.push({ prompt: payload.prompt, released: promptOptions?.released });
+                    if (promptOptions?.dispatched !== undefined) {
+                      yield* Deferred.succeed(promptOptions.dispatched, undefined);
+                    }
+                    if (options?.prompt !== undefined) {
+                      return yield* options.prompt(runtimeOrdinal, ++promptOrdinal);
+                    }
+                    if (prompts.length > 1) {
+                      yield* Deferred.succeed(steered, undefined);
+                      yield* Deferred.await(releaseSteer);
+                      return { stopReason: "end_turn" as const };
+                    }
+                    if (options?.initialToolCalls !== undefined) {
+                      for (const toolUpdate of options.initialToolCalls) {
+                        yield* send(toolUpdate);
+                      }
+                    } else {
+                      yield* send(
+                        detachedChildProfile === undefined
+                          ? { sessionUpdate: "tool_call", ...command, status: "in_progress" }
+                          : {
+                              sessionUpdate: "tool_call",
+                              toolCallId: "call_research",
+                              kind: "other",
+                              title: "Run invoke_subagent",
+                              status: "completed",
+                              rawInput: {
+                                TypeName: "research",
+                                Role: "Researcher",
+                                Prompt: "Read it",
+                              },
+                            },
+                      );
+                    }
+                    yield* send({
+                      sessionUpdate: "agent_message_chunk",
+                      content: { type: "text", text: "I'll render once the fetch finishes." },
+                    });
+                    yield* send(usage);
+                    if (steering?.holdsFirstPrompt === true) yield* Deferred.await(steered);
+                    return { stopReason: "end_turn" as const };
+                  }),
+        } satisfies RuntimeService;
+      });
     },
     withProcess: (close, task) =>
       Effect.sync(() => {
@@ -1738,7 +1773,11 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
     runtimePolicy,
   });
   const now = yield* DateTime.now;
-  const startTurn = (ordinal: number, continuation: boolean) =>
+  const startTurn = (
+    ordinal: number,
+    continuation: boolean,
+    appContext?: ProviderAdapter.ProviderAdapterV2TurnInput["appContext"],
+  ) =>
     session.startTurn({
       appThread: {
         createdBy: "user",
@@ -1778,6 +1817,7 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
         text: "chart the throughput",
         attachments: [],
       },
+      ...(appContext === undefined ? {} : { appContext }),
       modelSelection,
       runtimePolicy,
     });
@@ -1808,6 +1848,9 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
       elicit?.(...args) ?? Effect.die("the adapter must handle elicitation"),
     cancels: () => cancels,
     runtimes: () => runtimes,
+    runtimeClosed,
+    incomingRequest: (requestId: string, method: string) =>
+      incomingRequest?.(requestId, method, {}) ?? Effect.die("missing incoming request callback"),
     acknowledgeResponse: (requestId: string) =>
       acknowledgeResponse?.(requestId) ?? Effect.die("missing response acknowledgement callback"),
     prompts,
@@ -1934,38 +1977,197 @@ it.effect.each(["user_input", "approval"] as const)(
     }).pipe(Effect.provide(layerSession)),
 );
 
-it.effect.each(["steer", "start"] as const)(
-  "replaces a wedged runtime after a rejected %s prompt",
-  (source) =>
+it.effect(
+  "declines steering when a wire permission/elicitation arrives before pendingRuntimeRequests, without declining non-blocking requests",
+  () =>
     Effect.gen(function* () {
-      const promptStarted = yield* Deferred.make<void>();
+      const releasePrompt1 = yield* Deferred.make<void>();
+      const steerStarted = yield* Deferred.make<void>();
       const opened = yield* openSessionWithRunningCommand(
         {},
         undefined,
         { agentVersion: "1.5.13", holdsFirstPrompt: false },
         {
-          prompt: (runtime, ordinal) =>
-            runtime > 1
-              ? Effect.succeed({ stopReason: "end_turn" as const })
-              : source === "steer" && ordinal === 1
-                ? Deferred.succeed(promptStarted, undefined).pipe(Effect.andThen(Effect.never))
-                : Effect.fail(
-                    source === "start"
-                      ? antigravityBlockedPromptError()
-                      : new EffectAcpErrors.AcpRequestError({
-                          code: -32603,
-                          errorMessage: "Cannot accept the steer",
-                        }),
-                  ),
+          prompt: (_runtime, ordinal) =>
+            ordinal === 1
+              ? Deferred.await(releasePrompt1).pipe(Effect.as({ stopReason: "end_turn" as const }))
+              : Deferred.succeed(steerStarted, undefined).pipe(
+                  Effect.as({ stopReason: "end_turn" as const }),
+                ),
+        },
+      );
+      yield* opened.startTurn(1, false);
+      const started = (yield* opened.until(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      )).at(-1);
+      assert(started?.type === "provider_turn.updated");
+
+      // Incoming blocking request on the wire before any runtime_request.updated is projected.
+      yield* opened.incomingRequest("wire-perm-1", "session/request_permission");
+      const declined = yield* opened.session
+        .steerTurn({
+          threadId: ThreadId.make("thread-antigravity-wake"),
+          runId: RunId.make("run-antigravity-wake-1"),
+          providerThread: opened.providerThread,
+          providerTurnId: started.providerTurn.id,
+          message: {
+            messageId: MessageId.make("message-antigravity-early-guard"),
+            text: "Child finished",
+            attachments: [],
+            createdBy: "agent",
+            creationSource: "mcp",
+          },
+        })
+        .pipe(Effect.flip);
+      assert.instanceOf(declined, ProviderAdapter.ProviderAdapterSteerDeclinedError);
+      assert.lengthOf(opened.prompts, 1);
+      yield* opened.acknowledgeResponse("wire-perm-1");
+
+      // Non-blocking incoming requests (e.g. fs/read_text_file) must not decline steers.
+      yield* opened.incomingRequest("wire-fs-1", "fs/read_text_file");
+      yield* opened.session.steerTurn({
+        threadId: ThreadId.make("thread-antigravity-wake"),
+        runId: RunId.make("run-antigravity-wake-1"),
+        providerThread: opened.providerThread,
+        providerTurnId: started.providerTurn.id,
+        message: {
+          messageId: MessageId.make("message-antigravity-nonblocking-steer"),
+          text: "Proceed after fs read",
+          attachments: [],
+          createdBy: "agent",
+          creationSource: "mcp",
+        },
+      });
+      yield* Deferred.await(steerStarted);
+      yield* opened.acknowledgeResponse("wire-fs-1");
+      yield* Deferred.succeed(releasePrompt1, undefined);
+      const terminal = (yield* opened.throughTerminal).at(-1);
+      assert(terminal?.type === "turn.terminal" && terminal.status === "completed");
+      assert.equal(opened.runtimes(), 1);
+    }).pipe(Effect.provide(layerSession)),
+);
+
+it.effect.each(["user_input", "approval"] as const)(
+  "recovers from a raced blocked steer on real AcpSessionRuntime.prompt without failing the active %s turn",
+  (kind) =>
+    Effect.gen(function* () {
+      const opened = yield* openSessionWithRunningCommand(
+        {},
+        undefined,
+        { agentVersion: "1.5.13", holdsFirstPrompt: false },
+        {
+          runtimeMode: "approval-required",
+          useRealPrompt: true,
+          mockEnv: () => ({
+            T3_ACP_STEER_BEHAVIOR:
+              kind === "user_input"
+                ? "raced-blocked-steer-question"
+                : "raced-blocked-steer-permission",
+          }),
+        },
+      );
+      yield* opened.startTurn(1, false);
+      const started = (yield* opened.until(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      )).at(-1);
+      assert(started?.type === "provider_turn.updated");
+      yield* opened.until(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "assistant_message" &&
+          event.turnItem.text.includes("Working on turn 1..."),
+      );
+
+      // Steer races BEFORE the agent sends the elicitation/permission over stdio.
+      // Real AcpSessionRuntime.prompt hands off via `released` and receives the blocked error.
+      const racedAppContext = [{ key: "raced_ctx", text: "must survive rollback" }] as const;
+      const steer = yield* opened.session
+        .steerTurn({
+          threadId: ThreadId.make("thread-antigravity-wake"),
+          runId: RunId.make("run-antigravity-wake-1"),
+          providerThread: opened.providerThread,
+          providerTurnId: started.providerTurn.id,
+          appContext: racedAppContext,
+          message: {
+            messageId: MessageId.make("message-antigravity-raced-blocked-steer"),
+            text: "Child finished",
+            attachments: [],
+            createdBy: "agent",
+            creationSource: "mcp",
+          },
+        })
+        .pipe(Effect.flip);
+      assert.instanceOf(steer, ProviderAdapter.ProviderAdapterSteerDeclinedError);
+      assert.equal(opened.runtimes(), 1);
+
+      // Now the real permission/question from prompt #1 arrives and Turn 1 completes once answered.
+      const pending = (yield* opened.until(
+        (event) =>
+          event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+      )).at(-1);
+      assert(pending?.type === "runtime_request.updated");
+      const { runtimeRequest } = pending;
+      assert.equal(runtimeRequest.kind, kind === "approval" ? "command" : kind);
+      yield* opened.session.respondToRuntimeRequest({
+        requestId: runtimeRequest.id,
+        ...(runtimeRequest.kind === "user_input"
+          ? { answers: { port: "3000" } }
+          : { decision: "accept" }),
+      });
+
+      const terminal = (yield* opened.throughTerminal).at(-1);
+      assert(terminal?.type === "turn.terminal" && terminal.status === "completed");
+      assert.equal(opened.runtimes(), 1);
+
+      // The next turn runs on the same healthy runtime and receives the rolled-back appContext.
+      yield* opened.startTurn(2, false, racedAppContext);
+      const next = (yield* opened.throughTerminal).at(-1);
+      assert(next?.type === "turn.terminal" && next.status === "completed");
+      assert.equal(opened.runtimes(), 1);
+      const turn2Prompt = opened.prompts.at(-1)?.prompt ?? [];
+      assert.isTrue(
+        turn2Prompt.some(
+          (block) => block.type === "text" && block.text.includes("must survive rollback"),
+        ),
+        "rolled-back appContext from the declined steer must be delivered on Turn 2",
+      );
+    }).pipe(Effect.provide(layerSession)),
+);
+
+it.effect.each(["steer", "start"] as const)(
+  "quarantines and immediately tears down a wedged runtime after a rejected %s prompt on real AcpSessionRuntime.prompt",
+  (source) =>
+    Effect.gen(function* () {
+      const opened = yield* openSessionWithRunningCommand(
+        {},
+        undefined,
+        { agentVersion: "1.5.13", holdsFirstPrompt: false },
+        {
+          useRealPrompt: true,
+          mockEnv: (runtimeOrdinal) =>
+            runtimeOrdinal === 1
+              ? {
+                  T3_ACP_STEER_BEHAVIOR:
+                    source === "steer" ? "rejected-steer-orphaned" : "blocked-start-turn",
+                }
+              : {},
         },
       );
       yield* opened.startTurn(1, false);
       if (source === "steer") {
-        yield* Deferred.await(promptStarted);
-        const started = (yield* opened.until((event) => event.type === "provider_turn.updated")).at(
-          -1,
-        );
+        const started = (yield* opened.until(
+          (event) =>
+            event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+        )).at(-1);
         assert(started?.type === "provider_turn.updated");
+        yield* opened.until(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "command_execution" &&
+            event.turnItem.status === "running",
+        );
         yield* opened.session
           .steerTurn({
             threadId: ThreadId.make("thread-antigravity-wake"),
@@ -1985,10 +2187,369 @@ it.effect.each(["steer", "start"] as const)(
       const failed = (yield* opened.throughTerminal).at(-1);
       assert(failed?.type === "turn.terminal" && failed.status === "failed");
 
+      // Wedged runtime must be torn down immediately — before Turn 2 even starts.
+      yield* opened.runtimeClosed(1);
+      assert.isFalse(
+        yield* opened.session.hasPendingBackgroundWork ?? Effect.succeed(false),
+        "quarantined wedged runtime must not pin sessionHasPendingBackgroundWork",
+      );
+      assert.lengthOf(opened.offers, 0);
+
       yield* opened.startTurn(2, false);
       const next = (yield* opened.throughTerminal).at(-1);
       assert(next?.type === "turn.terminal" && next.status === "completed");
       assert.equal(opened.runtimes(), 2);
+      assert.lengthOf(opened.offers, 0);
+    }).pipe(Effect.provide(layerSession)),
+);
+
+it.effect(
+  "cancels pending approvals and user inputs and drops late orphaned updates on wedged failure quarantine",
+  () =>
+    Effect.gen(function* () {
+      const failPrompt1 = yield* Deferred.make<void>();
+      const opened = yield* openSessionWithRunningCommand(
+        {},
+        undefined,
+        { agentVersion: "1.5.13", holdsFirstPrompt: false },
+        {
+          runtimeMode: "approval-required",
+          prompt: (runtimeOrdinal) =>
+            runtimeOrdinal === 1
+              ? Deferred.await(failPrompt1).pipe(
+                  Effect.andThen(Effect.fail(antigravityBlockedPromptError())),
+                )
+              : Effect.succeed({ stopReason: "end_turn" as const }),
+        },
+      );
+      yield* opened.startTurn(1, false);
+      yield* opened.until(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+
+      // Open BOTH a pending approval AND a pending user_input request on Turn 1.
+      yield* opened
+        .requestPermission(
+          {
+            sessionId: "mock-session-1",
+            toolCall: { toolCallId: "cmd_quarantine", kind: "execute", title: "Run command?" },
+            options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+          },
+          { requestId: "quarantine-approval", method: "session/request_permission" },
+        )
+        .pipe(Effect.forkScoped);
+      const pendingApproval = (yield* opened.until(
+        (event) =>
+          event.type === "runtime_request.updated" &&
+          event.runtimeRequest.status === "pending" &&
+          event.runtimeRequest.kind === "command",
+      )).at(-1);
+      assert(pendingApproval?.type === "runtime_request.updated");
+
+      yield* opened
+        .elicit(
+          {
+            sessionId: "mock-session-1",
+            mode: "form",
+            message: "Need one answer",
+            requestedSchema: {
+              type: "object",
+              properties: { port: { type: "string", title: "Which port?" } },
+              required: ["port"],
+            },
+          },
+          { requestId: "quarantine-question", method: "elicitation/create" },
+        )
+        .pipe(Effect.forkScoped);
+      const pendingQuestion = (yield* opened.until(
+        (event) =>
+          event.type === "runtime_request.updated" &&
+          event.runtimeRequest.status === "pending" &&
+          event.runtimeRequest.kind === "user_input",
+      )).at(-1);
+      assert(pendingQuestion?.type === "runtime_request.updated");
+
+      // Fail Turn 1 with a wedged blocked-session error.
+      yield* Deferred.succeed(failPrompt1, undefined);
+      const seenToTerminal = yield* opened.throughTerminal;
+      const failed = seenToTerminal.at(-1);
+      assert(failed?.type === "turn.terminal" && failed.status === "failed");
+
+      const cancelledRequestIds = new Set(
+        seenToTerminal
+          .filter(
+            (event): event is Extract<typeof event, { type: "runtime_request.updated" }> =>
+              event.type === "runtime_request.updated" &&
+              event.runtimeRequest.status === "cancelled",
+          )
+          .map((event) => event.runtimeRequest.id),
+      );
+      assert.isTrue(
+        cancelledRequestIds.has(pendingApproval.runtimeRequest.id),
+        "pending approval must be cancelled during wedged quarantine",
+      );
+      assert.isTrue(
+        cancelledRequestIds.has(pendingQuestion.runtimeRequest.id),
+        "pending user_input must be cancelled during wedged quarantine",
+      );
+
+      // Late session/update frames from the orphaned runtime must be ignored and never buffer.
+      yield* opened.send({
+        sessionUpdate: "tool_call_update",
+        ...opened.command,
+        status: "completed",
+        rawOutput: { output: "stale orphan completion", exit_code: 0 },
+      });
+      yield* opened.send({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "stale orphan assistant text" },
+      });
+
+      yield* opened.runtimeClosed(1);
+      assert.lengthOf(opened.offers, 0);
+      assert.isFalse(yield* opened.session.hasPendingBackgroundWork ?? Effect.succeed(false));
+
+      yield* opened.startTurn(2, false);
+      const turn2Events = yield* opened.throughTerminal;
+      const next = turn2Events.at(-1);
+      assert(next?.type === "turn.terminal" && next.status === "completed");
+      assert.equal(opened.runtimes(), 2);
+      assert.isFalse(
+        turn2Events.some(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "assistant_message" &&
+            event.turnItem.text.includes("stale orphan"),
+        ),
+        "orphaned updates must never replay into the replacement runtime",
+      );
+    }).pipe(Effect.provide(layerSession)),
+);
+
+it.effect(
+  "does not dispatch a delayed prompt #1 fiber when a steer supersedes it before dispatch",
+  () =>
+    Effect.gen(function* () {
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const opened = yield* openSessionWithRunningCommand(
+        {},
+        undefined,
+        { agentVersion: "1.5.13", holdsFirstPrompt: false },
+        {
+          useRealPrompt: true,
+          mockEnv: () => ({ T3_ACP_STEER_BEHAVIOR: "complete-with-text" }),
+        },
+      );
+      const nativeThreadId = opened.providerThread.nativeThreadRef?.nativeId ?? "mock-session-1";
+      const providerTurnId = idAllocator.derive.providerTurn({
+        driver: opened.providerThread.driver,
+        nativeTurnId: `provider-instance:${opened.providerThread.providerInstanceId}:${nativeThreadId}:turn:1`,
+      });
+      yield* opened.startTurn(1, false);
+      // Steer immediately before prompt #1's forked fiber runs sendPromptWhenIdle.
+      yield* opened.session.steerTurn({
+        threadId: ThreadId.make("thread-antigravity-wake"),
+        runId: RunId.make("run-antigravity-wake-1"),
+        providerThread: opened.providerThread,
+        providerTurnId,
+        message: {
+          messageId: MessageId.make("message-antigravity-immediate-steer"),
+          text: "Immediate steer before prompt 1 runs",
+          attachments: [],
+          createdBy: "user",
+          creationSource: "web",
+        },
+      });
+      const events = yield* opened.throughTerminal;
+      const terminal = events.at(-1);
+      assert(terminal?.type === "turn.terminal" && terminal.status === "completed");
+      assert.equal(opened.runtimes(), 1);
+      assert.lengthOf(
+        opened.prompts,
+        1,
+        "superseded delayed prompt #1 fiber must not dispatch a second session/prompt",
+      );
+      assert.isTrue(
+        opened.prompts[0]!.prompt.some(
+          (block) =>
+            block.type === "text" && block.text.includes("Immediate steer before prompt 1 runs"),
+        ),
+      );
+      assert.isTrue(
+        events.some(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "assistant_message" &&
+            event.turnItem.text.includes("Immediate steer before prompt 1 runs"),
+        ),
+      );
+    }).pipe(Effect.provide(layerSession)),
+);
+
+it.effect(
+  "queues a declined steer during a pending ask_question end-to-end and runs it after Turn 1 completes",
+  () =>
+    Effect.gen(function* () {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const path = yield* Path.Path;
+      const crypto = yield* SecureRandom.SecureRandom;
+      const selfInvocation = yield* resolveSelfInvocation();
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      const cwd = yield* checkpointWorkspace("antigravity-declined-steer-e2e");
+      const instanceId = ProviderInstanceId.make("antigravity-e2e-steer");
+      const modelSelection = { instanceId, model: "gemini-test-low" } as const;
+      const adapter = yield* makeAntigravityAdapterV2({
+        instanceId,
+        selfInvocation,
+        makeRuntime: (input) =>
+          makeAntigravityAcpRuntime({
+            ...input,
+            childProcessSpawner,
+            spawn: {
+              command: process.execPath,
+              args: [mockAgentPath],
+              cwd: input.cwd,
+              env: {
+                T3_ACP_ANTIGRAVITY: "1",
+                T3_ACP_AGENT_VERSION: "1.5.13",
+                T3_ACP_STEER_BEHAVIOR: "ask-question-then-complete",
+              },
+            },
+          }).pipe(Effect.provideService(SecureRandom.SecureRandom, crypto)),
+        withProcess: (_close, task) => task,
+        defaultModel: Effect.undefined,
+      });
+      const layer = ProviderReplayHarness.layerWithRegistry(
+        { name: "antigravity-declined-steer-e2e" },
+        ProviderAdapterRegistry.layerFromAdapters([adapter]),
+        { runEffectWorker: false },
+      );
+
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const threadId = ThreadId.make("thread:antigravity-declined-steer-e2e");
+        const waitForDomainEvent = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
+          orchestrator.streamDomainEvents.pipe(
+            Stream.filter(predicate),
+            Stream.take(1),
+            Stream.runHead,
+            Effect.forkScoped,
+          );
+
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("create-e2e"),
+          threadId,
+          projectId: ProjectId.make("project:antigravity-declined-steer-e2e"),
+          title: "Antigravity declined steer e2e",
+          modelSelection,
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: cwd,
+          createdBy: "user",
+          creationSource: "web",
+        });
+
+        const pendingQuestionEvent = yield* waitForDomainEvent(
+          (event) =>
+            event.type === "runtime-request.updated" &&
+            event.payload.kind === "user_input" &&
+            event.payload.status === "pending",
+        );
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("turn-1"),
+          threadId,
+          messageId: MessageId.make("message:turn-1"),
+          text: "Start turn 1",
+          attachments: [],
+          dispatchMode: { type: "start_immediately" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* worker.drain();
+        const questionOption = yield* Fiber.join(pendingQuestionEvent);
+        assert(
+          questionOption._tag === "Some" && questionOption.value.type === "runtime-request.updated",
+        );
+        const questionRequestId = questionOption.value.payload.id;
+
+        const beforeSteer = yield* orchestrator.getThreadProjection(threadId);
+        const turn1Run = beforeSteer.runs[0]!;
+
+        // Dispatch a steer while Turn 1 is waiting on ask_question.
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("steer-1"),
+          threadId,
+          messageId: MessageId.make("message:steer-1"),
+          text: "Queued follow-up after question",
+          attachments: [],
+          dispatchMode: { type: "steer_active", targetRunId: turn1Run.id },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        yield* worker.drain();
+
+        const midProjection = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(midProjection.runs[0]?.status, "running");
+        assert.isTrue(
+          midProjection.runs.some(
+            (run) =>
+              run.status === "queued" && run.userMessageId === MessageId.make("message:steer-1"),
+          ),
+          "declined steer must be queued as a follow-up run without failing Turn 1",
+        );
+
+        // Answer the ask_question; Turn 1 completes and Turn 2 runs automatically.
+        const turn1Completed = yield* waitForDomainEvent(
+          (event) =>
+            event.type === "run.updated" &&
+            event.payload.id === turn1Run.id &&
+            event.payload.status === "completed",
+        );
+        yield* orchestrator.dispatch({
+          type: "runtime-request.respond",
+          commandId: CommandId.make("answer-question"),
+          threadId,
+          requestId: questionRequestId,
+          answers: { port: "3000" },
+        });
+        yield* worker.drain();
+        yield* Fiber.join(turn1Completed);
+
+        const queuedRun = midProjection.runs.find((run) => run.status === "queued")!;
+        const turn2Completed = yield* waitForDomainEvent(
+          (event) =>
+            event.type === "run.updated" &&
+            event.payload.id === queuedRun.id &&
+            event.payload.status === "completed",
+        );
+        yield* worker.drain();
+        yield* orchestrator.resumeQueuedRuns;
+        yield* worker.drain();
+        yield* Fiber.join(turn2Completed);
+
+        const finalProjection = yield* orchestrator.getThreadProjection(threadId);
+        assert.equal(finalProjection.runs[0]?.status, "completed");
+        assert.equal(
+          finalProjection.runs.find((run) => run.id === queuedRun.id)?.status,
+          "completed",
+        );
+        assert.isTrue(
+          finalProjection.visibleTurnItems.some(
+            ({ item }) =>
+              item.type === "assistant_message" &&
+              item.text.includes("Queued follow-up after question"),
+          ),
+          "queued follow-up run must deliver the declined steer message after Turn 1 completes",
+        );
+      }).pipe(Effect.provide(layer));
     }).pipe(Effect.provide(layerSession)),
 );
 
