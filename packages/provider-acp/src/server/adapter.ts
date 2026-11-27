@@ -1117,6 +1117,7 @@ function negotiatedCapabilities(
   const canSwitchModel =
     modelOptionArrivesLate || canSwitchModelInSession(setup.configOptions, setup.models);
   const canLoad = agent.loadSession === true;
+  const canResumeNativeThread = canLoad || session?.resume != null;
   const canFork = session?.fork != null;
   return {
     ...base,
@@ -1126,6 +1127,7 @@ function negotiatedCapabilities(
     },
     threads: {
       ...base.threads,
+      canResumeNativeThread,
       canReadThreadSnapshot: canLoad,
       canForkThread: canFork,
       canForkFromTurn: canFork && forksFromTurn,

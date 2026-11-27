@@ -310,6 +310,8 @@ export const OrchestrationV2SessionCapabilities = Schema.Struct({
 export type OrchestrationV2SessionCapabilities = typeof OrchestrationV2SessionCapabilities.Type;
 
 export const OrchestrationV2ThreadCapabilities = Schema.Struct({
+  // A released session can reopen its saved native thread without a summary handoff.
+  canResumeNativeThread: Schema.optional(Schema.Boolean),
   canCreateEmptyThread: Schema.Boolean,
   canReadThreadSnapshot: Schema.Boolean,
   canRollbackThread: Schema.Boolean,

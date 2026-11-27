@@ -23,6 +23,7 @@ import {
   ProviderInstanceId,
   type ProviderSessionId,
   RunId,
+  RuntimeRequestId,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -38,6 +39,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { TestClock } from "effect/testing";
@@ -148,6 +150,7 @@ const layerFlakyReleaseEventSink = (flaky: FlakyReleaseWrites) =>
 const layerPausingAttachEventSink = (pause: {
   readonly armed: Ref.Ref<boolean>;
   readonly paused: Deferred.Deferred<void>;
+  readonly release?: Deferred.Deferred<void>;
 }) =>
   Layer.effect(
     EventSink.EventSinkV2,
@@ -160,7 +163,10 @@ const layerPausingAttachEventSink = (pause: {
             const attach = input.events.some((event) => event.type === "provider-session.attached");
             if (attach && (yield* Ref.getAndSet(pause.armed, false))) {
               yield* Deferred.succeed(pause.paused, undefined);
-              return yield* Effect.never;
+              if (pause.release === undefined) {
+                return yield* Effect.never;
+              }
+              yield* Deferred.await(pause.release);
             }
             return yield* delegate.write(input);
           }),
@@ -480,6 +486,7 @@ function unimplemented(detail: string) {
 const makeProviderAdapter = Effect.fnUntraced(function* (
   state: Ref.Ref<TestProviderRuntimeState>,
   options: {
+    readonly instanceId?: ProviderInstanceId;
     readonly failEventStream?: boolean;
     readonly normalizeThreadLoadModelSelection?: (selection: ModelSelection) => ModelSelection;
     readonly capabilities?: OrchestrationV2ProviderCapabilities;
@@ -492,6 +499,9 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
       readonly initialProviderItemIdentityVersion?: 2;
     }) => Effect.Effect<void>;
     readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
+    readonly hasPendingBackgroundWorkForSession?: (
+      providerSessionId: ProviderSessionId,
+    ) => Effect.Effect<boolean>;
     readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
     readonly backgroundTasksEndWithProcess?: boolean;
     readonly hangSessionScopeClose?: boolean;
@@ -502,15 +512,20 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     readonly archive?: Effect.Effect<void, ProviderAdapter.ProviderAdapterProtocolError>;
     readonly spawnBeforeOpen?: boolean;
     readonly scopeCloseReached?: Deferred.Deferred<void>;
+    readonly beforeScopeClose?: Effect.Effect<void>;
     readonly eventStreamsEnded?: Queue.Queue<ProviderSessionId>;
   } = {},
 ) {
+  const instanceId = options.instanceId ?? ProviderInstanceId.make("codex");
   const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
   const countClose = Effect.addFinalizer(() =>
-    Ref.update(state, (current) => ({
-      ...current,
-      closeCount: current.closeCount + 1,
-    })).pipe(
+    (options.beforeScopeClose ?? Effect.void).pipe(
+      Effect.andThen(
+        Ref.update(state, (current) => ({
+          ...current,
+          closeCount: current.closeCount + 1,
+        })),
+      ),
       Effect.andThen(
         options.unloads === undefined ? Effect.void : Queue.offer(options.unloads, "close"),
       ),
@@ -524,7 +539,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
     ).pipe(Effect.andThen(Effect.never)),
   );
   return ProviderAdapter.ProviderAdapterV2.of({
-    instanceId: ProviderInstanceId.make("codex"),
+    instanceId,
     driver: CODEX_DRIVER,
     getCapabilities: () => Effect.succeed(options.capabilities ?? CodexCapabilities),
     planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
@@ -553,6 +568,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
             now,
             ...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
           }),
+          providerInstanceId: instanceId,
           ...(options.extensionStatuses === undefined
             ? {}
             : { extensionStatuses: options.extensionStatuses }),
@@ -572,7 +588,7 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
         }
 
         return {
-          instanceId: ProviderInstanceId.make("codex"),
+          instanceId,
           driver: CODEX_DRIVER,
           providerSessionId: input.providerSessionId,
           ...(options.normalizeThreadLoadModelSelection === undefined
@@ -604,9 +620,15 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
           ...(options.backgroundTasksEndWithProcess === false
             ? {}
             : { backgroundTasksEndWithProcess: true as const }),
-          ...(options.hasPendingBackgroundWork === undefined
-            ? {}
-            : { hasPendingBackgroundWork: options.hasPendingBackgroundWork }),
+          ...(options.hasPendingBackgroundWorkForSession !== undefined
+            ? {
+                hasPendingBackgroundWork: options.hasPendingBackgroundWorkForSession(
+                  input.providerSessionId,
+                ),
+              }
+            : options.hasPendingBackgroundWork === undefined
+              ? {}
+              : { hasPendingBackgroundWork: options.hasPendingBackgroundWork }),
           ...(options.hasPendingBackgroundWorkForThread === undefined
             ? {}
             : {
@@ -660,6 +682,17 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
 function layerTest(input: {
   readonly state: Ref.Ref<TestProviderRuntimeState>;
   readonly idleTimeoutMs?: number;
+  readonly maxConcurrentExclusiveOpensPerInstance?: number;
+  readonly maxLiveExclusiveSessionsPerInstance?: number;
+  readonly extraAdapters?: ReadonlyArray<{
+    readonly instanceId: ProviderInstanceId;
+    readonly state: Ref.Ref<TestProviderRuntimeState>;
+    readonly capabilities?: OrchestrationV2ProviderCapabilities;
+    readonly beforeOpen?: (input: {
+      readonly providerSessionId: ProviderSessionId;
+      readonly initialProviderItemIdentityVersion?: 2;
+    }) => Effect.Effect<void>;
+  }>;
   readonly withProvider?: (
     adapter: ProviderAdapter.ProviderAdapterV2["Service"],
   ) => ProviderAdapter.ProviderAdapterV2["Service"];
@@ -685,6 +718,9 @@ function layerTest(input: {
     readonly paused: Deferred.Deferred<void>;
   };
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
+  readonly hasPendingBackgroundWorkForSession?: (
+    providerSessionId: ProviderSessionId,
+  ) => Effect.Effect<boolean>;
   readonly hasPendingBackgroundWorkForThread?: Effect.Effect<boolean>;
   readonly backgroundTasksEndWithProcess?: boolean;
   readonly hangSessionScopeClose?: boolean;
@@ -695,6 +731,7 @@ function layerTest(input: {
   readonly archive?: Effect.Effect<void, ProviderAdapter.ProviderAdapterProtocolError>;
   readonly spawnBeforeOpen?: boolean;
   readonly scopeCloseReached?: Deferred.Deferred<void>;
+  readonly beforeScopeClose?: Effect.Effect<void>;
   readonly eventStreamsEnded?: Queue.Queue<ProviderSessionId>;
   readonly releaseRecorded?: Deferred.Deferred<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
@@ -735,6 +772,9 @@ function layerTest(input: {
       ...(input.hasPendingBackgroundWork === undefined
         ? {}
         : { hasPendingBackgroundWork: input.hasPendingBackgroundWork }),
+      ...(input.hasPendingBackgroundWorkForSession === undefined
+        ? {}
+        : { hasPendingBackgroundWorkForSession: input.hasPendingBackgroundWorkForSession }),
       ...(input.hasPendingBackgroundWorkForThread === undefined
         ? {}
         : { hasPendingBackgroundWorkForThread: input.hasPendingBackgroundWorkForThread }),
@@ -747,6 +787,7 @@ function layerTest(input: {
       ...(input.startTurn === undefined ? {} : { startTurn: input.startTurn }),
       ...(input.interruptTurn === undefined ? {} : { interruptTurn: input.interruptTurn }),
       ...(input.beforeUnload === undefined ? {} : { beforeUnload: input.beforeUnload }),
+      ...(input.beforeScopeClose === undefined ? {} : { beforeScopeClose: input.beforeScopeClose }),
       ...(input.unloads === undefined ? {} : { unloads: input.unloads }),
       ...(input.archive === undefined ? {} : { archive: input.archive }),
       ...(input.spawnBeforeOpen === undefined ? {} : { spawnBeforeOpen: input.spawnBeforeOpen }),
@@ -757,25 +798,37 @@ function layerTest(input: {
         ? {}
         : { eventStreamsEnded: input.eventStreamsEnded }),
     }).pipe(
-      Effect.map((adapter) => {
-        const single = ProviderAdapterRegistry.layerSingle(
-          input.withProvider?.(adapter) ?? adapter,
-        );
-        const identity = input.instanceIdentity;
-        if (identity === undefined) return single;
-        const changes = Stream.map(SubscriptionRef.changes(identity.current), () => undefined);
-        return Layer.effect(
-          ProviderAdapterRegistry.ProviderAdapterRegistryV2,
-          Effect.gen(function* () {
-            const base = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
-            return ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
-              ...base,
-              instanceIdentity: () => SubscriptionRef.get(identity.current),
-              ...(identity.announceChanges ? { streamInstanceChanges: changes } : {}),
-            });
+      Effect.flatMap((adapter) =>
+        Effect.forEach(input.extraAdapters ?? [], (extra) =>
+          makeProviderAdapter(extra.state, {
+            instanceId: extra.instanceId,
+            ...(extra.capabilities === undefined ? {} : { capabilities: extra.capabilities }),
+            ...(extra.beforeOpen === undefined ? {} : { beforeOpen: extra.beforeOpen }),
           }),
-        ).pipe(Layer.provide(single));
-      }),
+        ).pipe(
+          Effect.map((extras) => {
+            const primary = input.withProvider?.(adapter) ?? adapter;
+            const single =
+              extras.length === 0
+                ? ProviderAdapterRegistry.layerSingle(primary)
+                : ProviderAdapterRegistry.layerFromAdapters([primary, ...extras]);
+            const identity = input.instanceIdentity;
+            if (identity === undefined) return single;
+            const changes = Stream.map(SubscriptionRef.changes(identity.current), () => undefined);
+            return Layer.effect(
+              ProviderAdapterRegistry.ProviderAdapterRegistryV2,
+              Effect.gen(function* () {
+                const base = yield* ProviderAdapterRegistry.ProviderAdapterRegistryV2;
+                return ProviderAdapterRegistry.ProviderAdapterRegistryV2.of({
+                  ...base,
+                  instanceIdentity: () => SubscriptionRef.get(identity.current),
+                  ...(identity.announceChanges ? { streamInstanceChanges: changes } : {}),
+                });
+              }),
+            ).pipe(Layer.provide(single));
+          }),
+        ),
+      ),
     ),
   );
   const layerConfiguredMcpRegistry =
@@ -808,6 +861,16 @@ function layerTest(input: {
     ProviderSessionManager.layerWithOptions({
       ...(input.idleTimeoutMs === undefined ? {} : { idleTimeoutMs: input.idleTimeoutMs }),
       ...(input.maxIdlePinMs === undefined ? {} : { maxIdlePinMs: input.maxIdlePinMs }),
+      ...(input.maxConcurrentExclusiveOpensPerInstance === undefined
+        ? {}
+        : {
+            maxConcurrentExclusiveOpensPerInstance: input.maxConcurrentExclusiveOpensPerInstance,
+          }),
+      ...(input.maxLiveExclusiveSessionsPerInstance === undefined
+        ? {}
+        : {
+            maxLiveExclusiveSessionsPerInstance: input.maxLiveExclusiveSessionsPerInstance,
+          }),
     }).pipe(
       Layer.provide(
         Layer.mergeAll(
@@ -2196,15 +2259,38 @@ it.effect(
 );
 
 it.effect.each([
-  { resume: "native resume", supportsNativeResume: true, minutes: 2 },
-  { resume: "no native resume", supportsNativeResume: false, minutes: 30 },
+  {
+    resume: "native turn resume fallback",
+    supportsNativeResume: true,
+    nativeThread: undefined,
+    minutes: 2,
+  },
+  {
+    resume: "no native turn resume fallback",
+    supportsNativeResume: false,
+    nativeThread: undefined,
+    minutes: 30,
+  },
+  {
+    resume: "native thread resume only",
+    supportsNativeResume: false,
+    nativeThread: true,
+    minutes: 2,
+  },
+  {
+    resume: "native turn resume only",
+    supportsNativeResume: true,
+    nativeThread: false,
+    minutes: 30,
+  },
 ])(
   "ProviderSessionManagerV2 releases an idle session with $resume after $minutes minutes",
-  ({ supportsNativeResume, minutes }) =>
+  ({ supportsNativeResume, nativeThread, minutes }) =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
       const capabilities = {
         ...CodexCapabilities,
+        threads: { ...CodexCapabilities.threads, canResumeNativeThread: nativeThread },
         turns: { ...CodexCapabilities.turns, supportsNativeResume },
       };
       yield* Effect.gen(function* () {
@@ -6336,4 +6422,1134 @@ it.effect("ProviderSessionManagerV2 gives a delegated child its project's device
     });
     assert.isTrue(child?.capabilities?.has("device"));
   }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 bounds concurrent exclusive cold opens per instance without blocking another instance",
+  () =>
+    Effect.gen(function* () {
+      const stateA = yield* Ref.make(emptyState);
+      const stateB = yield* Ref.make(emptyState);
+      const secondInstanceId = ProviderInstanceId.make("codex-secondary");
+      const secondSelection = {
+        instanceId: secondInstanceId,
+        model: "gpt-5.4",
+      } satisfies ModelSelection;
+      const inFlight = yield* Ref.make(0);
+      const maxInFlight = yield* Ref.make(0);
+      const firstTwoStarted = yield* Deferred.make<void>();
+      const releaseGates = yield* Queue.unbounded<Deferred.Deferred<void>>();
+
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadIdsA = [0, 1, 2, 3, 4].map((i) => ThreadId.make(`thread-excl-open-a-${i}`));
+        const threadIdB = ThreadId.make("thread-excl-open-b");
+        for (const threadId of [...threadIdsA, threadIdB]) {
+          yield* eventSink.write({
+            events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+          });
+        }
+        const sessionIdsA = yield* Effect.forEach(threadIdsA, (threadId) =>
+          idAllocator.allocate.providerSession({
+            providerInstanceId: modelSelection.instanceId,
+            threadId,
+          }),
+        );
+        const sessionIdB = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: secondInstanceId,
+          threadId: threadIdB,
+        });
+
+        const fibersA = yield* Effect.forEach(threadIdsA, (threadId, index) =>
+          manager
+            .open({
+              threadId,
+              providerSessionId: sessionIdsA[index]!,
+              modelSelection,
+              runtimePolicy,
+            })
+            .pipe(Effect.forkChild({ startImmediately: true })),
+        );
+
+        yield* Deferred.await(firstTwoStarted);
+        yield* Effect.yieldNow;
+        assert.equal(yield* Ref.get(inFlight), 2);
+        assert.equal(yield* Ref.get(maxInFlight), 2);
+
+        // A second provider instance opens immediately while instance A's semaphore is saturated.
+        yield* manager.open({
+          threadId: threadIdB,
+          providerSessionId: sessionIdB,
+          modelSelection: secondSelection,
+          runtimePolicy,
+        });
+        assert.isTrue(yield* manager.isLive(sessionIdB));
+        assert.equal((yield* Ref.get(stateB)).openCount, 1);
+
+        // Release each instance A cold open deterministically until all 5 complete.
+        for (let i = 0; i < 5; i += 1) {
+          const gate = yield* Queue.take(releaseGates);
+          yield* Deferred.succeed(gate, undefined);
+        }
+        yield* Fiber.joinAll(fibersA);
+        assert.equal(yield* Ref.get(maxInFlight), 2);
+        assert.equal((yield* Ref.get(stateA)).openCount, 5);
+        for (const sessionId of sessionIdsA) {
+          assert.isTrue(yield* manager.isLive(sessionId));
+        }
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state: stateA,
+            capabilities: ExclusiveCapabilities,
+            idleTimeoutMs: 60_000,
+            maxConcurrentExclusiveOpensPerInstance: 2,
+            maxLiveExclusiveSessionsPerInstance: Infinity,
+            beforeOpen: () =>
+              Effect.gen(function* () {
+                const gate = yield* Deferred.make<void>();
+                yield* Queue.offer(releaseGates, gate);
+                const active = yield* Ref.updateAndGet(inFlight, (n) => n + 1);
+                yield* Ref.update(maxInFlight, (m) => Math.max(m, active));
+                if (active === 2) {
+                  yield* Deferred.succeed(firstTwoStarted, undefined);
+                }
+                yield* Deferred.await(gate).pipe(
+                  Effect.ensuring(Ref.update(inFlight, (n) => n - 1)),
+                );
+              }),
+            extraAdapters: [
+              {
+                instanceId: secondInstanceId,
+                state: stateB,
+                capabilities: ExclusiveCapabilities,
+              },
+            ],
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 reuses a live exclusive session without waiting on the cold-open semaphore",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const secondOpenEntered = yield* Deferred.make<void>();
+      const releaseSecondOpen = yield* Deferred.make<void>();
+      const openCalls = yield* Ref.make(0);
+
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const thread1 = ThreadId.make("thread-excl-reuse-1");
+        const thread2 = ThreadId.make("thread-excl-reuse-2");
+        for (const threadId of [thread1, thread2]) {
+          yield* eventSink.write({
+            events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+          });
+        }
+        const session1 = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: thread1,
+        });
+        const session2 = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: thread2,
+        });
+
+        const runtime1 = yield* manager.open({
+          threadId: thread1,
+          providerSessionId: session1,
+          modelSelection,
+          runtimePolicy,
+        });
+
+        // Saturate the sole cold-open permit with session 2.
+        const opening2 = yield* manager
+          .open({
+            threadId: thread2,
+            providerSessionId: session2,
+            modelSelection,
+            runtimePolicy,
+          })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(secondOpenEntered);
+
+        // Reusing live session 1 must succeed immediately without blocking on session 2.
+        const reused = yield* manager.open({
+          threadId: thread1,
+          providerSessionId: session1,
+          modelSelection,
+          runtimePolicy,
+        });
+        assert.strictEqual(reused, runtime1);
+
+        yield* Deferred.succeed(releaseSecondOpen, undefined);
+        yield* Fiber.join(opening2);
+        assert.isTrue(yield* manager.isLive(session2));
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            capabilities: ExclusiveCapabilities,
+            idleTimeoutMs: 60_000,
+            maxConcurrentExclusiveOpensPerInstance: 1,
+            maxLiveExclusiveSessionsPerInstance: Infinity,
+            beforeOpen: () =>
+              Ref.updateAndGet(openCalls, (n) => n + 1).pipe(
+                Effect.flatMap((count) =>
+                  count === 2
+                    ? Deferred.succeed(secondOpenEntered, undefined).pipe(
+                        Effect.andThen(Deferred.await(releaseSecondOpen)),
+                      )
+                    : Effect.void,
+                ),
+              ),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 evicts the oldest idle resumable exclusive session when at the live cap",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threads = [1, 2, 3].map((i) => ThreadId.make(`thread-excl-lru-${i}`));
+        for (const threadId of threads) {
+          yield* eventSink.write({
+            events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+          });
+        }
+        const sessions = yield* Effect.forEach(threads, (threadId) =>
+          idAllocator.allocate.providerSession({
+            providerInstanceId: modelSelection.instanceId,
+            threadId,
+          }),
+        );
+
+        yield* manager.open({
+          threadId: threads[0]!,
+          providerSessionId: sessions[0]!,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* TestClock.adjust("1 second");
+        yield* manager.open({
+          threadId: threads[1]!,
+          providerSessionId: sessions[1]!,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* TestClock.adjust("1 second");
+        // Reusing session 0 refreshes its lastActivityAtMs, making session 1 the LRU victim.
+        yield* manager.open({
+          threadId: threads[0]!,
+          providerSessionId: sessions[0]!,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* TestClock.adjust("1 second");
+
+        yield* manager.open({
+          threadId: threads[2]!,
+          providerSessionId: sessions[2]!,
+          modelSelection,
+          runtimePolicy,
+        });
+
+        assert.isTrue(yield* manager.isLive(sessions[0]!));
+        assert.isFalse(yield* manager.isLive(sessions[1]!));
+        assert.isTrue(yield* manager.isLive(sessions[2]!));
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            capabilities: ExclusiveCapabilities,
+            idleTimeoutMs: 60_000,
+            maxLiveExclusiveSessionsPerInstance: 2,
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 protects busy, background-work, pending-request, and awaiting-delivery sessions from LRU eviction and falls back to a soft cap",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const bgWorkSessionRef = yield* Ref.make<ProviderSessionId | undefined>(undefined);
+      const bgErrorSessionRef = yield* Ref.make<ProviderSessionId | undefined>(undefined);
+
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+
+        const parentThread = ThreadId.make("thread-excl-protect-parent");
+        const busyThread = ThreadId.make("thread-excl-protect-busy");
+        const bgWorkThread = ThreadId.make("thread-excl-protect-bg");
+        const bgErrorThread = ThreadId.make("thread-excl-protect-bg-err");
+        const requestThread = ThreadId.make("thread-excl-protect-request");
+        const childThread = ThreadId.make("thread-excl-protect-child");
+        const overflowThread = ThreadId.make("thread-excl-protect-overflow");
+
+        const parentRunId = idAllocator.derive.run({ threadId: parentThread, ordinal: 1 });
+        const delegatedNodeId = idAllocator.derive.nodeFromProviderItem({
+          driver: CODEX_DRIVER,
+          nativeItemId: "delegated-awaiting-delivery",
+        });
+
+        for (const threadId of [
+          parentThread,
+          busyThread,
+          bgWorkThread,
+          bgErrorThread,
+          requestThread,
+          overflowThread,
+        ]) {
+          yield* eventSink.write({
+            events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+          });
+        }
+        const childCreated = yield* makeThreadCreatedEvent({
+          idAllocator,
+          threadId: childThread,
+          now,
+          delegatedBy: parentThread,
+        });
+        yield* eventSink.write({
+          events: [
+            {
+              ...childCreated,
+              payload: {
+                ...childCreated.payload,
+                forkedFrom: {
+                  type: "node",
+                  nodeId: delegatedNodeId,
+                },
+              },
+            },
+            {
+              id: yield* idAllocator.allocate.event({ threadId: parentThread }),
+              type: "subagent.updated",
+              threadId: parentThread,
+              occurredAt: now,
+              payload: {
+                id: delegatedNodeId,
+                threadId: parentThread,
+                runId: parentRunId,
+                parentNodeId: idAllocator.derive.rootNode({ runId: parentRunId }),
+                origin: "app_owned",
+                createdBy: "agent",
+                driver: CODEX_DRIVER,
+                providerInstanceId: modelSelection.instanceId,
+                providerThreadId: null,
+                childThreadId: childThread,
+                nativeTaskRef: null,
+                prompt: "Pending delivery child",
+                title: "Child",
+                model: null,
+                status: "completed",
+                result: "done",
+                completionDelivery: { state: "pending", observedByRunId: null },
+                startedAt: now,
+                completedAt: now,
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+
+        const busySession = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: busyThread,
+        });
+        const bgWorkSession = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: bgWorkThread,
+        });
+        const bgErrorSession = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: bgErrorThread,
+        });
+        const requestSession = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: requestThread,
+        });
+        const childSession = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: childThread,
+        });
+        const overflowSession = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: overflowThread,
+        });
+
+        yield* Ref.set(bgWorkSessionRef, bgWorkSession);
+        yield* Ref.set(bgErrorSessionRef, bgErrorSession);
+
+        // 1. Busy session
+        const busyRuntime = yield* manager.open({
+          threadId: busyThread,
+          providerSessionId: busySession,
+          modelSelection,
+          runtimePolicy,
+        });
+        const busyProviderThread = makeProviderThread({
+          idAllocator,
+          threadId: busyThread,
+          providerSessionId: busySession,
+          now,
+          nativeThreadId: "native-busy",
+        });
+        const busyRunId = idAllocator.derive.run({ threadId: busyThread, ordinal: 1 });
+        yield* busyRuntime.startTurn({
+          appThread: (yield* projectionStore.getThreadProjection(busyThread)).thread,
+          threadId: busyThread,
+          runId: busyRunId,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: idAllocator.derive.runAttempt({ runId: busyRunId, attemptOrdinal: 1 }),
+          rootNodeId: idAllocator.derive.rootNode({ runId: busyRunId }),
+          providerThread: busyProviderThread,
+          modelSelection,
+          runtimePolicy,
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: yield* idAllocator.allocate.message({ threadId: busyThread, ordinal: 1 }),
+            text: "working",
+            attachments: [],
+          },
+        });
+        yield* TestClock.adjust("1 second");
+
+        // 2. Session with hasPendingBackgroundWork === true
+        yield* manager.open({
+          threadId: bgWorkThread,
+          providerSessionId: bgWorkSession,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* TestClock.adjust("1 second");
+
+        // 3. Session whose hasPendingBackgroundWork probe errors (fail-safe skip)
+        yield* manager.open({
+          threadId: bgErrorThread,
+          providerSessionId: bgErrorSession,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* TestClock.adjust("1 second");
+
+        // 4. Session with pending live runtime request
+        yield* manager.open({
+          threadId: requestThread,
+          providerSessionId: requestSession,
+          modelSelection,
+          runtimePolicy,
+        });
+        const requestId = RuntimeRequestId.make("runtime-request:pending-approval-protect");
+        const requestNodeId = idAllocator.derive.nodeFromProviderItem({
+          driver: CODEX_DRIVER,
+          nativeItemId: "pending-approval-protect-node",
+        });
+        yield* eventSink.write({
+          events: [
+            {
+              id: yield* idAllocator.allocate.event({ threadId: requestThread }),
+              type: "runtime-request.updated",
+              threadId: requestThread,
+              nodeId: requestNodeId,
+              driver: CODEX_DRIVER,
+              occurredAt: now,
+              payload: {
+                id: requestId,
+                nodeId: requestNodeId,
+                providerTurnId: null,
+                nativeRequestRef: {
+                  driver: CODEX_DRIVER,
+                  nativeId: "pending-approval-protect",
+                  strength: "strong",
+                },
+                kind: "command",
+                status: "pending",
+                responseCapability: {
+                  type: "live",
+                  providerSessionId: requestSession,
+                },
+                createdAt: now,
+                resolvedAt: null,
+              },
+            },
+          ],
+        });
+        yield* TestClock.adjust("1 second");
+
+        // 5. Session for delegated child awaiting completion delivery
+        yield* manager.open({
+          threadId: childThread,
+          providerSessionId: childSession,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* TestClock.adjust("1 second");
+
+        // Cap is 2, yet all 5 existing sessions are protected. Opening a 6th must still succeed
+        // (soft cap, no deadlock) and keep all 5 protected sessions live.
+        yield* manager.open({
+          threadId: overflowThread,
+          providerSessionId: overflowSession,
+          modelSelection,
+          runtimePolicy,
+        });
+
+        for (const sessionId of [
+          busySession,
+          bgWorkSession,
+          bgErrorSession,
+          requestSession,
+          childSession,
+          overflowSession,
+        ]) {
+          assert.isTrue(yield* manager.isLive(sessionId));
+        }
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            capabilities: ExclusiveCapabilities,
+            idleTimeoutMs: 60_000,
+            maxLiveExclusiveSessionsPerInstance: 2,
+            hasPendingBackgroundWorkForSession: (providerSessionId) =>
+              Effect.gen(function* () {
+                if (providerSessionId === (yield* Ref.get(bgWorkSessionRef))) return true;
+                if (providerSessionId === (yield* Ref.get(bgErrorSessionRef))) {
+                  return yield* Effect.die(new Error("probe failed"));
+                }
+                return false;
+              }),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 never evicts non-resumable exclusive sessions under the LRU cap",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const nonResumableCapabilities: OrchestrationV2ProviderCapabilities = {
+        ...ExclusiveCapabilities,
+        threads: { ...ExclusiveCapabilities.threads, canResumeNativeThread: false },
+        turns: { ...ExclusiveCapabilities.turns, supportsNativeResume: false },
+      };
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const thread1 = ThreadId.make("thread-excl-nonresumable-1");
+        const thread2 = ThreadId.make("thread-excl-nonresumable-2");
+        for (const threadId of [thread1, thread2]) {
+          yield* eventSink.write({
+            events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+          });
+        }
+        const session1 = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: thread1,
+        });
+        const session2 = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: thread2,
+        });
+
+        yield* manager.open({
+          threadId: thread1,
+          providerSessionId: session1,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* TestClock.adjust("1 second");
+        yield* manager.open({
+          threadId: thread2,
+          providerSessionId: session2,
+          modelSelection,
+          runtimePolicy,
+        });
+
+        assert.isTrue(yield* manager.isLive(session1));
+        assert.isTrue(yield* manager.isLive(session2));
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            capabilities: nonResumableCapabilities,
+            idleTimeoutMs: 60_000,
+            maxLiveExclusiveSessionsPerInstance: 1,
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 finishes victim scope close and release records if an evicting open() is interrupted",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const scopeCloseEntered = yield* Deferred.make<void>();
+      const allowScopeClose = yield* Deferred.make<void>();
+      const releaseRecorded = yield* Deferred.make<void>();
+
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const thread1 = ThreadId.make("thread-evict-interrupt-1");
+        const thread2 = ThreadId.make("thread-evict-interrupt-2");
+        for (const threadId of [thread1, thread2]) {
+          yield* eventSink.write({
+            events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+          });
+        }
+        const session1 = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: thread1,
+        });
+        const session2 = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: thread2,
+        });
+
+        yield* manager.open({
+          threadId: thread1,
+          providerSessionId: session1,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* TestClock.adjust("1 second");
+
+        const openFiber = yield* manager
+          .open({
+            threadId: thread2,
+            providerSessionId: session2,
+            modelSelection,
+            runtimePolicy,
+          })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+
+        yield* Deferred.await(scopeCloseEntered);
+        // Interrupt the opening caller while the victim's scope close is still blocked.
+        yield* Fiber.interrupt(openFiber);
+        assert.isFalse(yield* manager.isLive(session1));
+        assert.isFalse(yield* manager.isLive(session2));
+        assert.equal((yield* Ref.get(state)).closeCount, 0);
+
+        yield* Deferred.succeed(allowScopeClose, undefined);
+        yield* Deferred.await(releaseRecorded);
+        assert.equal((yield* Ref.get(state)).closeCount, 1);
+        const projection = yield* projectionStore.getThreadProjection(thread1);
+        assert.equal(
+          projection.providerSessions.find((session) => session.id === session1)?.status,
+          "stopped",
+        );
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            capabilities: ExclusiveCapabilities,
+            idleTimeoutMs: 60_000,
+            maxLiveExclusiveSessionsPerInstance: 1,
+            releaseRecorded,
+            beforeScopeClose: Deferred.succeed(scopeCloseEntered, undefined).pipe(
+              Effect.andThen(Deferred.await(allowScopeClose)),
+            ),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 protects idle-looking exclusive sessions whose thread has a starting run from LRU eviction",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const thread1 = ThreadId.make("thread-excl-starting-run-1");
+        const thread2 = ThreadId.make("thread-excl-starting-run-2");
+        for (const threadId of [thread1, thread2]) {
+          yield* eventSink.write({
+            events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+          });
+        }
+        const session1 = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: thread1,
+        });
+        const session2 = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: thread2,
+        });
+
+        yield* manager.open({
+          threadId: thread1,
+          providerSessionId: session1,
+          modelSelection,
+          runtimePolicy,
+        });
+
+        // Persist a run in status "starting" (before startTurn calls markBusy).
+        const runId = idAllocator.derive.run({ threadId: thread1, ordinal: 1 });
+        const attemptId = idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 });
+        const rootNodeId = idAllocator.derive.rootNode({ runId });
+        const userMessageId = yield* idAllocator.allocate.message({
+          threadId: thread1,
+          ordinal: 1,
+        });
+        yield* eventSink.write({
+          events: [
+            {
+              id: yield* idAllocator.allocate.event({ threadId: thread1 }),
+              type: "run.created",
+              threadId: thread1,
+              runId,
+              occurredAt: now,
+              payload: {
+                id: runId,
+                threadId: thread1,
+                ordinal: 1,
+                providerInstanceId: modelSelection.instanceId,
+                modelSelection,
+                providerThreadId: null,
+                userMessageId,
+                rootNodeId,
+                activeAttemptId: attemptId,
+                status: "starting",
+                requestedAt: now,
+                startedAt: null,
+                completedAt: null,
+                checkpointId: null,
+                contextHandoffId: null,
+              },
+            },
+          ],
+        });
+        yield* TestClock.adjust("1 second");
+
+        yield* manager.open({
+          threadId: thread2,
+          providerSessionId: session2,
+          modelSelection,
+          runtimePolicy,
+        });
+
+        assert.isTrue(yield* manager.isLive(session1));
+        assert.isTrue(yield* manager.isLive(session2));
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            capabilities: ExclusiveCapabilities,
+            idleTimeoutMs: 60_000,
+            maxLiveExclusiveSessionsPerInstance: 1,
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 cold-opens a live replacement if an idle session is evicted during open() reuse",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const armed = yield* Ref.make(false);
+      const paused = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const thread1 = ThreadId.make("thread-excl-reuse-race-1");
+        const thread2 = ThreadId.make("thread-excl-reuse-race-2");
+        for (const threadId of [thread1, thread2]) {
+          yield* eventSink.write({
+            events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+          });
+        }
+        const session1 = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: thread1,
+        });
+
+        const initialRuntime = yield* manager.open({
+          threadId: thread1,
+          providerSessionId: session1,
+          modelSelection,
+          runtimePolicy,
+        });
+        assert.equal((yield* Ref.get(state)).openCount, 1);
+
+        // Pause open()'s reuse path inside ensureThreadAttached, then evict/close the existing session.
+        yield* Ref.set(armed, true);
+        const reuseFiber = yield* manager
+          .open({
+            threadId: thread2,
+            providerSessionId: session1,
+            modelSelection,
+            runtimePolicy,
+          })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+
+        yield* Deferred.await(paused);
+        yield* manager.close(session1);
+        assert.equal((yield* Ref.get(state)).closeCount, 1);
+        assert.isFalse(yield* manager.isLive(session1));
+
+        yield* Deferred.succeed(release, undefined);
+        const replacementRuntime = yield* Fiber.join(reuseFiber);
+
+        assert.notEqual(replacementRuntime, initialRuntime);
+        assert.equal((yield* Ref.get(state)).openCount, 2);
+        assert.isTrue(yield* manager.isLive(session1));
+        const providerThread2 = makeProviderThread({
+          idAllocator,
+          threadId: thread2,
+          providerSessionId: session1,
+          now,
+          nativeThreadId: "native-reuse-race-2",
+        });
+        const runId = idAllocator.derive.run({ threadId: thread2, ordinal: 1 });
+        yield* replacementRuntime.startTurn({
+          appThread: (yield* projectionStore.getThreadProjection(thread2)).thread,
+          threadId: thread2,
+          runId,
+          runOrdinal: 1,
+          providerTurnOrdinal: 1,
+          attemptId: idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 }),
+          rootNodeId: idAllocator.derive.rootNode({ runId }),
+          providerThread: providerThread2,
+          modelSelection,
+          runtimePolicy,
+          message: {
+            createdBy: "user",
+            creationSource: "web",
+            messageId: yield* idAllocator.allocate.message({ threadId: thread2, ordinal: 1 }),
+            text: "still live",
+            attachments: [],
+          },
+        });
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            pauseAttachWrite: { armed, paused, release },
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 accounts for in-flight exclusive cold opens so concurrent opens do not overshoot the live cap",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const concurrentOpens = yield* Ref.make(0);
+      const bothInFlight = yield* Deferred.make<void>();
+      const releaseOpens = yield* Deferred.make<void>();
+      const gatedSessions = yield* Ref.make<ReadonlySet<ProviderSessionId>>(new Set());
+
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const thread1 = ThreadId.make("thread-excl-inflight-1");
+        const thread2 = ThreadId.make("thread-excl-inflight-2");
+        const thread3 = ThreadId.make("thread-excl-inflight-3");
+        for (const threadId of [thread1, thread2, thread3]) {
+          yield* eventSink.write({
+            events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+          });
+        }
+        const session1 = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: thread1,
+        });
+        const session2 = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: thread2,
+        });
+        const session3 = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: thread3,
+        });
+
+        // Open 1 idle session (live === cap - 1 with cap === 2).
+        yield* manager.open({
+          threadId: thread1,
+          providerSessionId: session1,
+          modelSelection,
+          runtimePolicy,
+        });
+        yield* TestClock.adjust("1 second");
+        yield* Ref.set(gatedSessions, new Set([session2, session3]));
+
+        // Launch 2 concurrent cold opens; together with session1 they would exceed cap === 2.
+        const fiber2 = yield* manager
+          .open({
+            threadId: thread2,
+            providerSessionId: session2,
+            modelSelection,
+            runtimePolicy,
+          })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        const fiber3 = yield* manager
+          .open({
+            threadId: thread3,
+            providerSessionId: session3,
+            modelSelection,
+            runtimePolicy,
+          })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+
+        yield* Deferred.await(bothInFlight);
+        yield* Deferred.succeed(releaseOpens, undefined);
+        yield* Fiber.joinAll([fiber2, fiber3]);
+
+        assert.isFalse(yield* manager.isLive(session1));
+        assert.isTrue(yield* manager.isLive(session2));
+        assert.isTrue(yield* manager.isLive(session3));
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            capabilities: ExclusiveCapabilities,
+            idleTimeoutMs: 60_000,
+            maxConcurrentExclusiveOpensPerInstance: 2,
+            maxLiveExclusiveSessionsPerInstance: 2,
+            beforeOpen: ({ providerSessionId }) =>
+              Effect.gen(function* () {
+                if (!(yield* Ref.get(gatedSessions)).has(providerSessionId)) return;
+                const active = yield* Ref.updateAndGet(concurrentOpens, (n) => n + 1);
+                if (active === 2) {
+                  yield* Deferred.succeed(bothInFlight, undefined);
+                }
+                yield* Deferred.await(releaseOpens);
+              }),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 still reopens an idle exclusive session on linkedEnvironmentsEnabled toggle when a run is in starting status",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const settings = yield* ServerSettings.ServerSettingsService.pipe(
+        Effect.provide(ServerSettings.layerTest()),
+      );
+      yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-excl-linked-env-starting");
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+
+        yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        assert.equal((yield* Ref.get(state)).openCount, 1);
+
+        // Persist a run in status "starting" (the state during open() before startTurn).
+        const runId = idAllocator.derive.run({ threadId, ordinal: 1 });
+        const attemptId = idAllocator.derive.runAttempt({ runId, attemptOrdinal: 1 });
+        const rootNodeId = idAllocator.derive.rootNode({ runId });
+        const userMessageId = yield* idAllocator.allocate.message({
+          threadId,
+          ordinal: 1,
+        });
+        yield* eventSink.write({
+          events: [
+            {
+              id: yield* idAllocator.allocate.event({ threadId }),
+              type: "run.created",
+              threadId,
+              runId,
+              occurredAt: now,
+              payload: {
+                id: runId,
+                threadId,
+                ordinal: 1,
+                providerInstanceId: modelSelection.instanceId,
+                modelSelection,
+                providerThreadId: null,
+                userMessageId,
+                rootNodeId,
+                activeAttemptId: attemptId,
+                status: "starting",
+                requestedAt: now,
+                startedAt: null,
+                completedAt: null,
+                checkpointId: null,
+                contextHandoffId: null,
+              },
+            },
+          ],
+        });
+
+        yield* settings.updateSettings({ linkedEnvironmentsEnabled: true });
+        yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+
+        assert.equal((yield* Ref.get(state)).openCount, 2);
+        assert.equal((yield* Ref.get(state)).closeCount, 1);
+      }).pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            capabilities: ExclusiveCapabilities,
+            serverSettingsLayer: Layer.succeed(ServerSettings.ServerSettingsService, settings),
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 runs teardown inline when a non-shutdown release runs after layerScope is closed",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const streamStarted = yield* Deferred.make<void>();
+      const layerScopeClosing = yield* Deferred.make<void>();
+      const closeCompleted = yield* Deferred.make<void>();
+      const managerScope = yield* Scope.make();
+      const context = yield* Layer.buildWithScope(
+        layerTest({
+          state,
+          idleTimeoutMs: 60_000,
+          capabilities: ExclusiveCapabilities,
+          withProvider: (adapter) => ({
+            ...adapter,
+            openSession: (openInput) =>
+              adapter.openSession(openInput).pipe(
+                Effect.map((runtime) => ({
+                  ...runtime,
+                  // startEventPump is forked in ProviderSessionManager's internal layerScope after
+                  // its shutdown finalizer, so Stream.ensuring runs in LIFO order once layerScope
+                  // is Closed and before shutdown drains sessions.
+                  events: Stream.fromEffect(Deferred.succeed(streamStarted, undefined)).pipe(
+                    Stream.drain,
+                    Stream.concat(runtime.events),
+                    Stream.ensuring(
+                      Deferred.succeed(layerScopeClosing, undefined).pipe(
+                        Effect.andThen(Deferred.await(closeCompleted)),
+                      ),
+                    ),
+                  ),
+                })),
+              ),
+          }),
+        }),
+        managerScope,
+      );
+
+      const closeResult = yield* Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-closed-scope-release");
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+
+        yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        assert.equal((yield* Ref.get(state)).openCount, 1);
+        yield* Deferred.await(streamStarted);
+
+        // Run a normal interruptible manual close once layerScope is Closed (before shutdown).
+        const closeFiber = yield* Effect.gen(function* () {
+          yield* Deferred.await(layerScopeClosing);
+          const exit = yield* Effect.exit(manager.close(providerSessionId));
+          const closeCountBeforeShutdown = (yield* Ref.get(state)).closeCount;
+          const projection = yield* projectionStore.getThreadProjection(threadId);
+          const statusBeforeShutdown = projection.providerSessions.find(
+            (session) => session.id === providerSessionId,
+          )?.status;
+          return { exit, closeCountBeforeShutdown, statusBeforeShutdown };
+        }).pipe(
+          Effect.ensuring(Deferred.succeed(closeCompleted, undefined)),
+          Effect.forkChild({ startImmediately: true }),
+        );
+
+        yield* Scope.close(managerScope, Exit.void);
+        return yield* Fiber.join(closeFiber);
+      }).pipe(Effect.provide(context));
+
+      assert.isTrue(Exit.isSuccess(closeResult.exit));
+      assert.equal(closeResult.closeCountBeforeShutdown, 1);
+      assert.equal(closeResult.statusBeforeShutdown, "stopped");
+      assert.equal((yield* Ref.get(state)).closeCount, 1);
+    }),
 );

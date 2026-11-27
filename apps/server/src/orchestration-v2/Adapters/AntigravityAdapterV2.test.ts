@@ -305,12 +305,12 @@ it.live("sends the T3 HTTP bridge and profile MCP servers on new and resumed ses
 
 describe("AntigravityAdapterV2 compaction", () => {
   it.live.each([
-    { nativeGoals: false, compact: false },
-    { nativeGoals: true, compact: false },
-    { nativeGoals: false, compact: true },
+    { nativeGoals: false, compact: false, resume: "none" },
+    { nativeGoals: true, compact: false, resume: "load" },
+    { nativeGoals: false, compact: true, resume: "resume" },
   ])(
-    "negotiates native goals ($nativeGoals) and advertised compaction ($compact)",
-    ({ nativeGoals, compact }) =>
+    "negotiates native goals ($nativeGoals), compaction ($compact) and thread resume ($resume)",
+    ({ nativeGoals, compact, resume }) =>
       Effect.gen(function* () {
         const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
         const fileSystem = yield* FileSystem.FileSystem;
@@ -350,6 +350,20 @@ describe("AntigravityAdapterV2 compaction", () => {
               Effect.provideService(SecureRandom.SecureRandom, crypto),
               Effect.map((runtime) => ({
                 ...runtime,
+                start: () =>
+                  runtime.start().pipe(
+                    Effect.map((started) => ({
+                      ...started,
+                      initializeResult: {
+                        ...started.initializeResult,
+                        agentCapabilities: {
+                          ...started.initializeResult.agentCapabilities,
+                          loadSession: resume === "load",
+                          sessionCapabilities: resume === "resume" ? { resume: {} } : {},
+                        },
+                      },
+                    })),
+                  ),
                 drainEvents: Deferred.succeed(startupMilestone, undefined).pipe(
                   Effect.andThen(runtime.drainEvents),
                 ),
@@ -398,6 +412,11 @@ describe("AntigravityAdapterV2 compaction", () => {
         const compactThread = session.compactThread;
         assert.isDefined(compactThread);
         assert.equal(session.providerSession.capabilities.turns.supportsNativeGoals, nativeGoals);
+        assert.equal(
+          session.providerSession.capabilities.threads.canResumeNativeThread,
+          resume !== "none",
+        );
+        assert.isFalse(session.providerSession.capabilities.turns.supportsNativeResume);
         assert.equal((yield* adapter.getCapabilities()).turns.supportsNativeGoals, nativeGoals);
         const providerThread = yield* session.ensureThread({
           threadId,
