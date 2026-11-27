@@ -1712,4 +1712,123 @@ describe("AcpSessionRuntime", () => {
         ]);
       }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
+
+  it.effect.each(["pre-queue-timeout", "pre-queue-failure"] as const)(
+    "cancels a released queued prompt cleanly without propagating an unqueued active prompt's %s under wait-for-prompt",
+    (mode) =>
+      Effect.gen(function* () {
+        const tempDir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "acp-runtime-"));
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true })),
+        );
+        const requestLogPath = NodePath.join(tempDir, "requests.ndjson");
+        const p1Dispatched = yield* Deferred.make<void>();
+        const p1Released = yield* Deferred.make<void>();
+        const p1OnWire = yield* Deferred.make<void>();
+        const p2Dispatched = yield* Deferred.make<void>();
+        const p2Held = yield* Deferred.make<void>();
+        const releaseP2Failure = yield* Deferred.make<void>();
+        const cancelReceived = yield* Deferred.make<void>();
+        let barriersAcknowledged = 0;
+
+        const runtime = yield* AcpSessionRuntime.make({
+          ...mockRuntimeOptions,
+          spawn: {
+            ...mockRuntimeOptions.spawn,
+            env: {
+              T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL: "1",
+              T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+            },
+          },
+          cancelBehavior: "wait-for-prompt",
+          interruptPromptOnCancel: false,
+          cancelTimeout: "5 seconds",
+        });
+        yield* runtime.getEvents().pipe(
+          Stream.runForEach((event) => {
+            if (event._tag === "EventStreamBarrier") {
+              barriersAcknowledged += 1;
+              return Deferred.succeed(event.acknowledge, undefined);
+            }
+            if (
+              event._tag === "ToolCallUpdated" &&
+              event.toolCall.toolCallId === "native-cancel-tool"
+            ) {
+              return Deferred.succeed(p1OnWire, undefined);
+            }
+            if (event._tag === "ThoughtDelta" && event.text === "native-cancel-received") {
+              return Deferred.succeed(cancelReceived, undefined);
+            }
+            return Effect.void;
+          }),
+          Effect.forkChild,
+        );
+        yield* runtime.start();
+
+        // Prompt #1 reaches the wire, then releases promptSerializationSemaphore into releasedPromptsRef.
+        const p1 = yield* runtime
+          .prompt(
+            { prompt: [{ type: "text", text: "first" }] },
+            { dispatched: p1Dispatched, released: p1Released },
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(p1Dispatched);
+        yield* Deferred.await(p1OnWire);
+        yield* Deferred.succeed(p1Released, undefined);
+
+        // Prompt #2 occupies activePromptRef but never queues on the wire.
+        const p2 = yield* runtime
+          .prompt(
+            { prompt: [{ type: "text", text: "second" }] },
+            {
+              dispatched: p2Dispatched,
+              withDispatch: () =>
+                mode === "pre-queue-timeout"
+                  ? Deferred.succeed(p2Held, undefined).pipe(Effect.andThen(Effect.never))
+                  : Deferred.succeed(p2Held, undefined).pipe(
+                      Effect.andThen(Deferred.await(releaseP2Failure)),
+                      Effect.andThen(
+                        Effect.fail(
+                          new EffectAcpErrors.AcpTransportError({
+                            detail: "pre-queue dispatch failure",
+                            cause: "route-rejected",
+                          }),
+                        ),
+                      ),
+                    ),
+            },
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(p2Dispatched);
+        yield* Deferred.await(p2Held);
+
+        const cancel = yield* runtime.cancel.pipe(Effect.forkChild({ startImmediately: true }));
+        if (mode === "pre-queue-timeout") {
+          yield* TestClock.adjust("5 seconds");
+        } else {
+          yield* Deferred.succeed(releaseP2Failure, undefined);
+        }
+
+        yield* Deferred.await(cancelReceived);
+        yield* runtime.request("_test/finish-cancel", {});
+
+        const cancelExit = yield* Fiber.await(cancel);
+        expect(cancelExit).toEqual(Exit.void);
+        const p1Exit = yield* Fiber.await(p1);
+        expect(p1Exit).toEqual(
+          Exit.succeed({ stopReason: "cancelled", _meta: { nativeCancel: true } }),
+        );
+        const p2Exit = yield* Fiber.await(p2);
+        expect(Exit.isFailure(p2Exit)).toBe(true);
+        expect(barriersAcknowledged).toBeGreaterThan(0);
+        expect(readReceived(requestLogPath, ["session/prompt", "session/cancel"])).toEqual([
+          "session/prompt",
+          "session/cancel",
+        ]);
+
+        // Runtime remains healthy for subsequent prompts.
+        const next = yield* runtime.prompt({ prompt: [{ type: "text", text: "next" }] });
+        expect(next.stopReason).toBe("end_turn");
+      }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+  );
 });

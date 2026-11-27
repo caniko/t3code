@@ -10806,9 +10806,16 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       const restoredSequence = Math.max(...candidateSequences);
                       context.activePromptSequence = restoredSequence;
                       const stashed = context.stashedSupersededSettlements.get(restoredSequence);
-                      for (const key of context.stashedSupersededSettlements.keys()) {
-                        if (key <= restoredSequence) {
-                          context.stashedSupersededSettlements.delete(key);
+                      // Preserve earlier stashed settlements while restoredSequence itself is still
+                      // an unconfirmed steer that may also decline with blockedOnRuntimeRequest.
+                      if (
+                        stashed !== undefined ||
+                        !context.unconfirmedSteerSequences.has(restoredSequence)
+                      ) {
+                        for (const key of context.stashedSupersededSettlements.keys()) {
+                          if (key <= restoredSequence) {
+                            context.stashedSupersededSettlements.delete(key);
+                          }
                         }
                       }
                       yield* Deferred.succeed(settle.steerOutcome, "declined");

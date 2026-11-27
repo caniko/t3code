@@ -2704,6 +2704,137 @@ it.effect.each(["prompt1-callback-first", "steer2-rejection-first"] as const)(
 );
 
 it.effect(
+  "preserves Prompt #1's stashed settlement when chained unconfirmed steers decline outer-first",
+  () =>
+    Effect.gen(function* () {
+      const prompt1Release = yield* Deferred.make<void>();
+      const prompt1CallbackDone = yield* Deferred.make<void>();
+      const steer2Dispatched = yield* Deferred.make<void>();
+      const steer2Release = yield* Deferred.make<void>();
+      const steer3Dispatched = yield* Deferred.make<void>();
+      const steer3Release = yield* Deferred.make<void>();
+      let promptCallbacks = 0;
+
+      const opened = yield* openSessionWithRunningCommand(
+        {},
+        undefined,
+        { agentVersion: "1.5.13", holdsFirstPrompt: false },
+        {
+          testHooks: {
+            afterPromptCallback: () =>
+              Effect.suspend(() => {
+                promptCallbacks += 1;
+                return promptCallbacks === 1
+                  ? Deferred.succeed(prompt1CallbackDone, undefined).pipe(Effect.asVoid)
+                  : Effect.void;
+              }),
+          },
+          prompt: (_runtimeOrdinal, promptOrdinal) => {
+            if (promptOrdinal === 1) {
+              return Deferred.await(prompt1Release).pipe(
+                Effect.as({ stopReason: "end_turn" as const }),
+              );
+            }
+            if (promptOrdinal === 2) {
+              return Deferred.succeed(steer2Dispatched, undefined).pipe(
+                Effect.andThen(Deferred.await(steer2Release)),
+                Effect.andThen(Effect.fail(antigravityBlockedPromptError())),
+              );
+            }
+            if (promptOrdinal === 3) {
+              return Deferred.succeed(steer3Dispatched, undefined).pipe(
+                Effect.andThen(Deferred.await(steer3Release)),
+                Effect.andThen(Effect.fail(antigravityBlockedPromptError())),
+              );
+            }
+            return Effect.succeed({ stopReason: "end_turn" as const });
+          },
+        },
+      );
+
+      yield* opened.startTurn(1, false);
+      const started = (yield* opened.until(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      )).at(-1);
+      assert(started?.type === "provider_turn.updated");
+
+      yield* opened.send({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Prompt #1 completed output." },
+      });
+
+      const steer2Fiber = yield* opened.session
+        .steerTurn({
+          threadId: ThreadId.make("thread-antigravity-wake"),
+          runId: RunId.make("run-antigravity-wake-1"),
+          providerThread: opened.providerThread,
+          providerTurnId: started.providerTurn.id,
+          message: {
+            messageId: MessageId.make("message-antigravity-chained-steer-2"),
+            text: "Chained steer #2",
+            attachments: [],
+            createdBy: "agent",
+            creationSource: "mcp",
+          },
+        })
+        .pipe(Effect.flip, Effect.forkScoped);
+      yield* Deferred.await(steer2Dispatched);
+
+      const steer3Fiber = yield* opened.session
+        .steerTurn({
+          threadId: ThreadId.make("thread-antigravity-wake"),
+          runId: RunId.make("run-antigravity-wake-1"),
+          providerThread: opened.providerThread,
+          providerTurnId: started.providerTurn.id,
+          message: {
+            messageId: MessageId.make("message-antigravity-chained-steer-3"),
+            text: "Chained steer #3",
+            attachments: [],
+            createdBy: "agent",
+            creationSource: "mcp",
+          },
+        })
+        .pipe(Effect.flip, Effect.forkScoped);
+      yield* Deferred.await(steer3Dispatched);
+
+      // Prompt #1 completes and stashes its settlement while Steer #2 and Steer #3 are unconfirmed.
+      yield* Deferred.succeed(prompt1Release, undefined);
+      yield* Deferred.await(prompt1CallbackDone);
+
+      // Outer Steer #3 declines first, restoring ownership to unconfirmed Steer #2.
+      yield* Deferred.succeed(steer3Release, undefined);
+      const declined3 = yield* Fiber.join(steer3Fiber);
+      assert.instanceOf(declined3, ProviderAdapter.ProviderAdapterSteerDeclinedError);
+
+      // Inner Steer #2 then declines; Prompt #1's stashed settlement must still be intact.
+      yield* Deferred.succeed(steer2Release, undefined);
+      const declined2 = yield* Fiber.join(steer2Fiber);
+      assert.instanceOf(declined2, ProviderAdapter.ProviderAdapterSteerDeclinedError);
+
+      const events = yield* opened.throughTerminal;
+      const terminal = events.at(-1);
+      assert(terminal?.type === "turn.terminal" && terminal.status === "completed");
+      assert.isTrue(
+        events.some(
+          (event) =>
+            event.type === "turn_item.updated" &&
+            event.turnItem.type === "assistant_message" &&
+            event.turnItem.text.includes("Prompt #1 completed output."),
+        ),
+        "Turn 1 must settle with Prompt #1's stashed result",
+      );
+      assert.equal(opened.runtimes(), 1);
+
+      // Subsequent turn runs on the same healthy runtime.
+      yield* opened.startTurn(2, false);
+      const next = (yield* opened.throughTerminal).at(-1);
+      assert(next?.type === "turn.terminal" && next.status === "completed");
+      assert.equal(opened.runtimes(), 1);
+    }).pipe(Effect.provide(layerSession)),
+);
+
+it.effect(
   "restores activePromptSequence and turn state without hanging Turn 1 when forkFollowPrompt fails during steer",
   () =>
     Effect.gen(function* () {

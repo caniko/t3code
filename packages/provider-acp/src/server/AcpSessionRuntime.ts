@@ -2693,29 +2693,30 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
     } satisfies EffectAcpSchema.CancelNotification;
     const waitForPrompt = options.cancelBehavior === "wait-for-prompt";
     const interruptPrompt = !waitForPrompt && options.interruptPromptOnCancel !== false;
-    if (prompts.length > 0) {
-      const queuedFlags = yield* Effect.forEach(
-        prompts,
-        (prompt) =>
-          Effect.gen(function* () {
-            if (
-              interruptPrompt ||
-              Option.isNone(
-                yield* awaitPromptQueued(prompt).pipe(
-                  Effect.timeoutOption(options.cancelTimeout ?? defaultCancelTimeout),
-                ),
-              )
-            ) {
-              // The sender must finish before we check admission, or it can enqueue after cancel.
-              yield* Fiber.interrupt(prompt.fiber);
-            }
-            return yield* Deferred.isDone(prompt.queued);
-          }),
-        { concurrency: "unbounded" },
-      );
-      if (!queuedFlags.some(Boolean)) {
-        return;
-      }
+    const promptStates =
+      prompts.length === 0
+        ? []
+        : yield* Effect.forEach(
+            prompts,
+            (prompt) =>
+              Effect.gen(function* () {
+                if (
+                  interruptPrompt ||
+                  Option.isNone(
+                    yield* awaitPromptQueued(prompt).pipe(
+                      Effect.timeoutOption(options.cancelTimeout ?? defaultCancelTimeout),
+                    ),
+                  )
+                ) {
+                  // The sender must finish before we check admission, or it can enqueue after cancel.
+                  yield* Fiber.interrupt(prompt.fiber);
+                }
+                return { prompt, queued: yield* Deferred.isDone(prompt.queued) };
+              }),
+            { concurrency: "unbounded" },
+          );
+    if (promptStates.length > 0 && !promptStates.some((state) => state.queued)) {
+      return;
     }
     if (interruptPrompt) {
       // Write cancel before a replacement prompt can reach the agent.
@@ -2724,15 +2725,17 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
     }
 
     yield* acp.agent.cancel(cancelPayload);
-    if (!waitForPrompt || prompts.length === 0) {
+    if (!waitForPrompt || promptStates.length === 0) {
       return;
     }
     const completed = yield* Effect.gen(function* () {
       const results = yield* Effect.forEach(
-        prompts,
-        (prompt) =>
+        promptStates,
+        ({ prompt, queued }) =>
           Effect.gen(function* () {
-            const result = yield* Fiber.await(prompt.fiber);
+            // Only collect exits from prompts that actually reached the wire; unqueued prompts
+            // were either interrupted by cancel above or failed pre-queue and must not fail/self-interrupt cancel.
+            const result = queued ? yield* Fiber.await(prompt.fiber) : undefined;
             yield* Deferred.await(prompt.completed);
             return result;
           }),
@@ -2753,8 +2756,11 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
       yield* retireRuntime(error);
       return yield* error;
     }
-    const failed = completed.value.find(Exit.isFailure);
-    if (failed !== undefined && Exit.isFailure(failed)) {
+    const failed = completed.value.find(
+      (result): result is Exit.Failure<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError> =>
+        result !== undefined && Exit.isFailure(result),
+    );
+    if (failed !== undefined) {
       return yield* Effect.failCause(failed.cause);
     }
   });
