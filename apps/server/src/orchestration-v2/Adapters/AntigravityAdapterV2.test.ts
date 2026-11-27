@@ -1551,6 +1551,11 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
   options?: {
     readonly profileDirectory?: string;
     readonly initialToolCalls?: ReadonlyArray<EffectAcpSchema.SessionUpdate>;
+    readonly runtimeMode?: "approval-required";
+    readonly prompt?: (
+      runtimeOrdinal: number,
+      promptOrdinal: number,
+    ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
   },
 ) {
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -1562,6 +1567,9 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
   type RuntimeService = AcpSessionRuntime.AcpSessionRuntime["Service"];
   let sessionUpdate: Parameters<RuntimeService["handleSessionUpdate"]>[0] | undefined;
   let requestPermission: Parameters<RuntimeService["handleRequestPermission"]>[0] | undefined;
+  let elicit: Parameters<RuntimeService["handleElicitation"]>[0] | undefined;
+  let acknowledgeResponse: AntigravityAdapterV2RuntimeInput["onOutgoingResponse"];
+  let runtimes = 0;
   const send = (update: EffectAcpSchema.SessionUpdate) =>
     sessionUpdate === undefined
       ? Effect.die("the adapter must handle session updates")
@@ -1593,6 +1601,9 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
     selfInvocation,
     continuationRequests: { offer: (request) => Effect.sync(() => void offers.push(request)) },
     makeRuntime: (input) => {
+      const runtimeOrdinal = ++runtimes;
+      let promptOrdinal = 0;
+      acknowledgeResponse = input.onOutgoingResponse;
       terminate = input.onTermination;
       return makeAntigravityAcpRuntime({
         ...input,
@@ -1621,11 +1632,18 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
             Effect.sync(() => {
               requestPermission = handler;
             }).pipe(Effect.andThen(runtime.handleRequestPermission(handler))),
+          handleElicitation: (handler) =>
+            Effect.sync(() => {
+              elicit = handler;
+            }).pipe(Effect.andThen(runtime.handleElicitation(handler))),
           prompt: (payload, promptOptions) =>
             Effect.gen(function* () {
               prompts.push({ prompt: payload.prompt, released: promptOptions?.released });
               if (promptOptions?.dispatched !== undefined) {
                 yield* Deferred.succeed(promptOptions.dispatched, undefined);
+              }
+              if (options?.prompt !== undefined) {
+                return yield* options.prompt(runtimeOrdinal, ++promptOrdinal);
               }
               if (prompts.length > 1) {
                 yield* Deferred.succeed(steered, undefined);
@@ -1689,7 +1707,7 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
           },
         });
   const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
-    runtimeMode: "full-access",
+    runtimeMode: options?.runtimeMode ?? "full-access",
     interactionMode: "default",
     cwd: process.cwd(),
   });
@@ -1730,7 +1748,7 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
         title: "Antigravity wake",
         providerInstanceId: instanceId,
         modelSelection,
-        runtimeMode: "full-access",
+        runtimeMode: runtimePolicy.runtimeMode,
         interactionMode: "default",
         branch: null,
         worktreePath: process.cwd(),
@@ -1786,7 +1804,12 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
       requestPermission === undefined
         ? Effect.die("the adapter must handle permission requests")
         : requestPermission(...args),
+    elicit: (...args: Parameters<NonNullable<typeof elicit>>) =>
+      elicit?.(...args) ?? Effect.die("the adapter must handle elicitation"),
     cancels: () => cancels,
+    runtimes: () => runtimes,
+    acknowledgeResponse: (requestId: string) =>
+      acknowledgeResponse?.(requestId) ?? Effect.die("missing response acknowledgement callback"),
     prompts,
     steerStarted: Deferred.await(steered),
     releaseSteer: Deferred.succeed(releaseSteer, undefined),
@@ -1799,6 +1822,175 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
     closeRuntime: Effect.suspend(() => stop),
   };
 });
+
+const antigravityBlockedPromptError = () =>
+  new EffectAcpErrors.AcpRequestError({
+    code: -32603,
+    errorMessage:
+      "Can't add this prompt to session mock-session-1: the running prompt is waiting for a permission or question answer; answer it or send session/cancel, then send this prompt again",
+  });
+
+it.effect.each(["user_input", "approval"] as const)(
+  "declines steering while a live %s request awaits an answer",
+  (kind) =>
+    Effect.gen(function* () {
+      const release = yield* Deferred.make<void>();
+      const opened = yield* openSessionWithRunningCommand(
+        {},
+        undefined,
+        { agentVersion: "1.5.13", holdsFirstPrompt: false },
+        {
+          runtimeMode: "approval-required",
+          prompt: (_runtime, ordinal) =>
+            ordinal === 1
+              ? Deferred.await(release).pipe(Effect.as({ stopReason: "end_turn" as const }))
+              : Deferred.isDone(release).pipe(
+                  Effect.flatMap((answered) =>
+                    answered
+                      ? Effect.succeed({ stopReason: "end_turn" as const })
+                      : Effect.fail(antigravityBlockedPromptError()),
+                  ),
+                ),
+        },
+      );
+      yield* opened.startTurn(1, false);
+      yield* opened.until(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      );
+      const request = yield* (
+        kind === "approval"
+          ? opened
+              .requestPermission(
+                {
+                  sessionId: "mock-session-1",
+                  toolCall: { toolCallId: "cmd_1", kind: "execute", title: "Run a command?" },
+                  options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+                },
+                { requestId: "pending-request", method: "session/request_permission" },
+              )
+              .pipe(Effect.map((result) => result.outcome.outcome === "selected"))
+          : opened
+              .elicit(
+                {
+                  sessionId: "mock-session-1",
+                  mode: "form",
+                  message: "Need one answer",
+                  requestedSchema: {
+                    type: "object",
+                    properties: { port: { type: "string", title: "Which port?" } },
+                    required: ["port"],
+                  },
+                },
+                { requestId: "pending-request", method: "elicitation/create" },
+              )
+              .pipe(Effect.map((result) => result.action === "accept"))
+      ).pipe(Effect.forkScoped);
+      const pending = (yield* opened.until(
+        (event) =>
+          event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+      )).at(-1);
+      assert(pending?.type === "runtime_request.updated");
+      const { runtimeRequest } = pending;
+      assert.equal(runtimeRequest.kind, kind === "approval" ? "command" : kind);
+      assert(runtimeRequest.providerTurnId !== null);
+      const steer = yield* opened.session
+        .steerTurn({
+          threadId: ThreadId.make("thread-antigravity-wake"),
+          runId: RunId.make("run-antigravity-wake-1"),
+          providerThread: opened.providerThread,
+          providerTurnId: runtimeRequest.providerTurnId,
+          message: {
+            messageId: MessageId.make("message-antigravity-blocked-steer"),
+            text: "Child finished",
+            attachments: [],
+            createdBy: "agent",
+            creationSource: "mcp",
+          },
+        })
+        .pipe(Effect.flip);
+      assert.instanceOf(steer, ProviderAdapter.ProviderAdapterSteerDeclinedError);
+      assert.lengthOf(opened.prompts, 1);
+      assert.equal(opened.cancels(), 0);
+      const response = yield* opened.session
+        .respondToRuntimeRequest({
+          requestId: runtimeRequest.id,
+          ...(runtimeRequest.kind === "user_input"
+            ? { answers: { port: "3000" } }
+            : { decision: "accept" }),
+        })
+        .pipe(Effect.forkScoped);
+      assert.isTrue(yield* Fiber.join(request));
+      yield* opened.acknowledgeResponse("pending-request");
+      yield* Fiber.join(response);
+      yield* Deferred.succeed(release, undefined);
+      const terminal = (yield* opened.throughTerminal).at(-1);
+      assert(terminal?.type === "turn.terminal" && terminal.status === "completed");
+
+      yield* opened.startTurn(2, false);
+      const next = (yield* opened.throughTerminal).at(-1);
+      assert(next?.type === "turn.terminal" && next.status === "completed");
+      assert.equal(opened.runtimes(), 1);
+    }).pipe(Effect.provide(layerSession)),
+);
+
+it.effect.each(["steer", "start"] as const)(
+  "replaces a wedged runtime after a rejected %s prompt",
+  (source) =>
+    Effect.gen(function* () {
+      const promptStarted = yield* Deferred.make<void>();
+      const opened = yield* openSessionWithRunningCommand(
+        {},
+        undefined,
+        { agentVersion: "1.5.13", holdsFirstPrompt: false },
+        {
+          prompt: (runtime, ordinal) =>
+            runtime > 1
+              ? Effect.succeed({ stopReason: "end_turn" as const })
+              : source === "steer" && ordinal === 1
+                ? Deferred.succeed(promptStarted, undefined).pipe(Effect.andThen(Effect.never))
+                : Effect.fail(
+                    source === "start"
+                      ? antigravityBlockedPromptError()
+                      : new EffectAcpErrors.AcpRequestError({
+                          code: -32603,
+                          errorMessage: "Cannot accept the steer",
+                        }),
+                  ),
+        },
+      );
+      yield* opened.startTurn(1, false);
+      if (source === "steer") {
+        yield* Deferred.await(promptStarted);
+        const started = (yield* opened.until((event) => event.type === "provider_turn.updated")).at(
+          -1,
+        );
+        assert(started?.type === "provider_turn.updated");
+        yield* opened.session
+          .steerTurn({
+            threadId: ThreadId.make("thread-antigravity-wake"),
+            runId: RunId.make("run-antigravity-wake-1"),
+            providerThread: opened.providerThread,
+            providerTurnId: started.providerTurn.id,
+            message: {
+              messageId: MessageId.make("message-antigravity-rejected-steer"),
+              text: "Child finished",
+              attachments: [],
+              createdBy: "agent",
+              creationSource: "mcp",
+            },
+          })
+          .pipe(Effect.flip);
+      }
+      const failed = (yield* opened.throughTerminal).at(-1);
+      assert(failed?.type === "turn.terminal" && failed.status === "failed");
+
+      yield* opened.startTurn(2, false);
+      const next = (yield* opened.throughTerminal).at(-1);
+      assert(next?.type === "turn.terminal" && next.status === "completed");
+      assert.equal(opened.runtimes(), 2);
+    }).pipe(Effect.provide(layerSession)),
+);
 
 describe("AntigravityAdapterV2 work after the prompt ends", () => {
   // agy sets `IsDaemon` on a command it does not wait for. When it exits, the agent replies

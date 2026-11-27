@@ -132,6 +132,7 @@ import {
   flattenSelectChoices,
 } from "./sessionConfig.ts";
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
+import { isPromptBlockedOnRuntimeRequest } from "./promptError.ts";
 import {
   t3AcpPromptWithInstructions,
   type T3AcpInstructionState,
@@ -1881,6 +1882,7 @@ interface ActiveAcpTurn {
   foregroundIdle: Deferred.Deferred<void>;
   /** Counts the turn's prompts; only the latest one settles the turn. */
   promptSequence: number;
+  promptsInFlight: number;
   /** The turn already resent a prompt after a resumable outcome failure. */
   outcomeResumed: boolean;
   /** Clock millis just before `session/prompt` was handed to the runtime. */
@@ -2829,6 +2831,16 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           >(),
         );
         const pendingRuntimeRequests = yield* Ref.make(new Map<string, PendingRuntimeRequest>());
+        const hasPendingRuntimeRequest = (context: ActiveAcpTurn) =>
+          Ref.get(pendingRuntimeRequests).pipe(
+            Effect.map((requests) =>
+              requests
+                .values()
+                .some(
+                  ({ runtimeRequest }) => runtimeRequest.providerTurnId === context.providerTurnId,
+                ),
+            ),
+          );
         const emitNativeResponseLifecycle =
           options.testHooks?.onNativeResponseLifecycle ?? (() => Effect.void);
         const nextElicitationOrdinal = yield* Ref.make(0);
@@ -10316,7 +10328,16 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               context.appContextOffered = settle.appContext.before;
             }
           };
-          return prompt(superseded).pipe(
+          return Effect.acquireUseRelease(
+            Effect.sync(() => {
+              context.promptsInFlight += 1;
+            }),
+            () => prompt(superseded),
+            () =>
+              Effect.sync(() => {
+                context.promptsInFlight -= 1;
+              }),
+          ).pipe(
             // Settle the wire before the completion callback's permit so a settled-soft
             // Stop sees the native return. Capture usage only before finalize: a late
             // response must not flip a settled turn.
@@ -10522,10 +10543,16 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   const failure = Cause.squash(cause);
                   const closedRuntimeError = yield* noteClosedRuntimeFailure(cause);
                   if (closedRuntimeError !== undefined) yield* failNativeChildren();
+                  // A failed steer can leave the superseded prompt running on the agent.
+                  const orphanedPrompt =
+                    context.promptsInFlight > 0 ||
+                    (sequence > 1 && (yield* hasPendingRuntimeRequest(context)));
                   // A resumed prompt stands in for an outcome failure, which always restarts.
                   if (
                     !interrupted &&
-                    (context.outcomeResumed ||
+                    (orphanedPrompt ||
+                      (Result.isSuccess(error) && isPromptBlockedOnRuntimeRequest(error.success)) ||
+                      context.outcomeResumed ||
                       flavor.restartRuntimeAfterPromptError?.(failure) === true)
                   ) {
                     yield* Ref.set(runtimeRestartRequired, true);
@@ -10762,6 +10789,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               promptDispatched,
               foregroundIdle: yield* Deferred.make<void>(),
               promptSequence: 0,
+              promptsInFlight: 0,
               outcomeResumed: false,
               promptSentAt: null,
               promptStarted,
@@ -11075,6 +11103,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 generation,
                 Effect.gen(function* () {
                   if (context.finalized || context.interrupted) return false;
+                  if (yield* hasPendingRuntimeRequest(context)) {
+                    return yield* new ProviderAdapter.ProviderAdapterSteerDeclinedError({
+                      driver,
+                      providerThreadId: context.input.providerThread.id,
+                      providerTurnId: context.providerTurnId,
+                    });
+                  }
                   const compactionMarker = (yield* Ref.get(compactionMarkers)).get(
                     context.nativeThreadId,
                   );
@@ -11589,7 +11624,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             (effect, turnInput) =>
               effect.pipe(
                 Effect.mapError((cause) =>
-                  cause._tag === "ProviderAdapterSteerRunUnsupportedError"
+                  cause._tag === "ProviderAdapterSteerRunUnsupportedError" ||
+                  cause._tag === "ProviderAdapterSteerDeclinedError"
                     ? cause
                     : new ProviderAdapter.ProviderAdapterSteerRunError({
                         driver,
