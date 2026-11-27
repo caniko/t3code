@@ -1561,7 +1561,11 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
     readonly initialToolCalls?: ReadonlyArray<EffectAcpSchema.SessionUpdate>;
     readonly runtimeMode?: "approval-required";
     readonly useRealPrompt?: boolean;
+    readonly useRealCancel?: boolean;
+    readonly cancelTimeout?: Duration.Input;
     readonly mockEnv?: (runtimeOrdinal: number) => Record<string, string>;
+    readonly testHooks?: Parameters<typeof makeAcpAdapterV2>[0]["testHooks"];
+    readonly flavorOverrides?: Partial<Parameters<typeof makeAcpAdapterV2>[0]["flavor"]>;
     readonly prompt?: (
       runtimeOrdinal: number,
       promptOrdinal: number,
@@ -1632,6 +1636,7 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
         yield* Scope.addFinalizer(scope, Deferred.succeed(closed, undefined).pipe(Effect.asVoid));
         const runtime = yield* makeAntigravityAcpRuntime({
           ...input,
+          ...(options?.cancelTimeout === undefined ? {} : { cancelTimeout: options.cancelTimeout }),
           childProcessSpawner,
           spawn: {
             command: process.execPath,
@@ -1646,9 +1651,14 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
         }).pipe(Effect.provideService(SecureRandom.SecureRandom, crypto));
         return {
           ...runtime,
-          cancel: Effect.sync(() => {
-            cancels += 1;
-          }),
+          cancel:
+            options?.useRealCancel === true
+              ? Effect.sync(() => {
+                  cancels += 1;
+                }).pipe(Effect.andThen(runtime.cancel))
+              : Effect.sync(() => {
+                  cancels += 1;
+                }),
           handleSessionUpdate: (handler) =>
             Effect.sync(() => {
               sessionUpdate = handler;
@@ -1726,19 +1736,23 @@ const openSessionWithRunningCommand = Effect.fn("openSessionWithRunningCommand")
       ? yield* makeAntigravityAdapterV2(adapterOptions)
       : yield* makeAcpAdapterV2({
           instanceId,
-          flavor: makeAntigravityAcpAdapterFlavor({
-            ...adapterOptions,
-            random: crypto,
-            fileSystem: yield* FileSystem.FileSystem,
-            path,
-            host: yield* ProviderHost.ProviderHost,
-          }),
+          flavor: {
+            ...makeAntigravityAcpAdapterFlavor({
+              ...adapterOptions,
+              random: crypto,
+              fileSystem: yield* FileSystem.FileSystem,
+              path,
+              host: yield* ProviderHost.ProviderHost,
+            }),
+            ...(options.flavorOverrides ?? {}),
+          },
           selfInvocation,
           ...(adapterOptions.continuationRequests === undefined
             ? {}
             : { continuationRequests: adapterOptions.continuationRequests }),
           testHooks: {
             onDeferredFinalizeScheduled: (debounce) => Queue.offer(scheduledFinalizes, debounce),
+            ...(options.testHooks ?? {}),
           },
         });
   const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
@@ -2550,6 +2564,380 @@ it.effect(
           "queued follow-up run must deliver the declined steer message after Turn 1 completes",
         );
       }).pipe(Effect.provide(layer));
+    }).pipe(Effect.provide(layerSession)),
+);
+
+it.effect.each(["prompt1-callback-first", "steer2-rejection-first"] as const)(
+  "settles Turn 1 cleanly and resolves promptWireSettled when Prompt #1 completes around a raced blocked steer (%s)",
+  (ordering) =>
+    Effect.gen(function* () {
+      const prompt1Release = yield* Deferred.make<void>();
+      const steer2Dispatched = yield* Deferred.make<void>();
+      const steer2Release = yield* Deferred.make<void>();
+      const prompt1CallbackDone = yield* Deferred.make<void>();
+      const prompt1WireSettled = yield* Deferred.make<void>();
+      const releasePrompt1Callback = yield* Deferred.make<void>();
+      const heldForPendingReply = yield* Deferred.make<void>();
+      let pendingReply = true;
+      let wireSettleCount = 0;
+
+      const opened = yield* openSessionWithRunningCommand(
+        {},
+        undefined,
+        { agentVersion: "1.5.13", holdsFirstPrompt: false },
+        {
+          flavorOverrides: {
+            promptInactivityTimeout: "80 millis",
+            hasPendingReply: () => Effect.succeed(pendingReply),
+          },
+          testHooks: {
+            afterPromptWireSettled: () =>
+              Effect.gen(function* () {
+                wireSettleCount += 1;
+                if (wireSettleCount === 1) {
+                  yield* Deferred.succeed(prompt1WireSettled, undefined);
+                  if (ordering === "steer2-rejection-first") {
+                    yield* Deferred.await(releasePrompt1Callback);
+                  }
+                }
+              }),
+            afterPromptCallback: () =>
+              Deferred.succeed(prompt1CallbackDone, undefined).pipe(Effect.asVoid),
+            afterPromptSettledWithBackgroundWork: () =>
+              Deferred.succeed(heldForPendingReply, undefined).pipe(Effect.asVoid),
+          },
+          prompt: (_runtimeOrdinal, promptOrdinal) => {
+            if (promptOrdinal === 1) {
+              return Deferred.await(prompt1Release).pipe(
+                Effect.as({ stopReason: "end_turn" as const }),
+              );
+            }
+            if (promptOrdinal === 2) {
+              return Deferred.succeed(steer2Dispatched, undefined).pipe(
+                Effect.andThen(Deferred.await(steer2Release)),
+                Effect.andThen(Effect.fail(antigravityBlockedPromptError())),
+              );
+            }
+            return Effect.succeed({ stopReason: "end_turn" as const });
+          },
+        },
+      );
+
+      yield* opened.startTurn(1, false);
+      const started = (yield* opened.until(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      )).at(-1);
+      assert(started?.type === "provider_turn.updated");
+
+      const racedAppContext = [{ key: "raced_ctx_issue1", text: "must survive race" }] as const;
+      const steerFiber = yield* opened.session
+        .steerTurn({
+          threadId: ThreadId.make("thread-antigravity-wake"),
+          runId: RunId.make("run-antigravity-wake-1"),
+          providerThread: opened.providerThread,
+          providerTurnId: started.providerTurn.id,
+          appContext: racedAppContext,
+          message: {
+            messageId: MessageId.make("message-antigravity-race-issue1"),
+            text: "Steer racing Prompt #1 wire completion",
+            attachments: [],
+            createdBy: "agent",
+            creationSource: "mcp",
+          },
+        })
+        .pipe(Effect.flip, Effect.forkScoped);
+
+      // Steer #2 is now in flight (activePromptSequence === 2, inFlightPromptSequences === {1, 2}).
+      yield* Deferred.await(steer2Dispatched);
+
+      // Prompt #1 finishes on the wire while superseded by Steer #2.
+      yield* Deferred.succeed(prompt1Release, undefined);
+      if (ordering === "prompt1-callback-first") {
+        // Wait for Prompt #1's callback to run and stash its completion BEFORE Steer #2 rejects.
+        yield* Deferred.await(prompt1CallbackDone);
+        yield* Deferred.succeed(steer2Release, undefined);
+      } else {
+        // Prompt #1 settled on wire (skipping Effect.tap promptWireSettled), paused before callback.
+        yield* Deferred.await(prompt1WireSettled);
+        yield* Deferred.succeed(steer2Release, undefined);
+        const declined = yield* Fiber.join(steerFiber);
+        assert.instanceOf(declined, ProviderAdapter.ProviderAdapterSteerDeclinedError);
+        yield* Deferred.succeed(releasePrompt1Callback, undefined);
+      }
+
+      if (ordering === "prompt1-callback-first") {
+        const declined = yield* Fiber.join(steerFiber);
+        assert.instanceOf(declined, ProviderAdapter.ProviderAdapterSteerDeclinedError);
+      }
+
+      // Prompt #1 settled into pendingReply hold. Advance past promptInactivityTimeout (80ms):
+      // if promptWireSettled was left unresolved on restored ownership, the watchdog would
+      // fail Turn 1 and kill the runtime here.
+      yield* Deferred.await(heldForPendingReply);
+      yield* TestClock.adjust("150 millis");
+      assert.equal(opened.runtimes(), 1);
+
+      // Release pendingReply and let deferred finalize complete Turn 1 cleanly.
+      pendingReply = false;
+      yield* opened.send(opened.usage);
+      const debounce = yield* Queue.take(opened.scheduledFinalizes);
+      yield* TestClock.adjust(debounce);
+
+      const terminal = (yield* opened.throughTerminal).at(-1);
+      assert(terminal?.type === "turn.terminal" && terminal.status === "completed");
+      assert.equal(opened.runtimes(), 1);
+
+      // Follow-up turn succeeds on the SAME healthy runtime with the rolled-back appContext.
+      yield* opened.startTurn(2, false, racedAppContext);
+      const next = (yield* opened.throughTerminal).at(-1);
+      assert(next?.type === "turn.terminal" && next.status === "completed");
+      assert.equal(opened.runtimes(), 1);
+      const turn2Prompt = opened.prompts.at(-1)?.prompt ?? [];
+      assert.isTrue(
+        turn2Prompt.some(
+          (block) => block.type === "text" && block.text.includes("must survive race"),
+        ),
+        "rolled-back appContext from the declined steer must be delivered on Turn 2",
+      );
+    }).pipe(Effect.provide(layerSession)),
+);
+
+it.effect(
+  "restores activePromptSequence and turn state without hanging Turn 1 when forkFollowPrompt fails during steer",
+  () =>
+    Effect.gen(function* () {
+      const releasePrompt1 = yield* Deferred.make<void>();
+      const opened = yield* openSessionWithRunningCommand(
+        {},
+        undefined,
+        { agentVersion: "1.5.13", holdsFirstPrompt: false },
+        {
+          testHooks: {
+            beforeForkFollowPrompt: (sequence) =>
+              sequence === 2 ? Effect.die("simulated forkFollowPrompt failure") : Effect.void,
+          },
+          prompt: (_runtimeOrdinal, promptOrdinal) =>
+            promptOrdinal === 1
+              ? Deferred.await(releasePrompt1).pipe(Effect.as({ stopReason: "end_turn" as const }))
+              : Effect.succeed({ stopReason: "end_turn" as const }),
+        },
+      );
+
+      yield* opened.startTurn(1, false);
+      const started = (yield* opened.until(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      )).at(-1);
+      assert(started?.type === "provider_turn.updated");
+
+      const steerExit = yield* opened.session
+        .steerTurn({
+          threadId: ThreadId.make("thread-antigravity-wake"),
+          runId: RunId.make("run-antigravity-wake-1"),
+          providerThread: opened.providerThread,
+          providerTurnId: started.providerTurn.id,
+          appContext: [{ key: "failed_fork_ctx", text: "must roll back" }],
+          message: {
+            messageId: MessageId.make("message-antigravity-failed-fork"),
+            text: "Steer whose forkFollowPrompt fails",
+            attachments: [],
+            createdBy: "user",
+            creationSource: "web",
+          },
+        })
+        .pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(steerExit));
+      assert.lengthOf(opened.prompts, 1);
+
+      // Prompt #1 must NOT be permanently superseded: completing it finishes Turn 1 cleanly.
+      yield* Deferred.succeed(releasePrompt1, undefined);
+      const terminal = (yield* opened.throughTerminal).at(-1);
+      assert(terminal?.type === "turn.terminal" && terminal.status === "completed");
+      assert.equal(opened.runtimes(), 1);
+    }).pipe(Effect.provide(layerSession)),
+);
+
+it.effect(
+  "commits steer fork and foregroundIdle handoff atomically when steerTurn is interrupted mid-commit",
+  () =>
+    Effect.gen(function* () {
+      const hookReached = yield* Deferred.make<void>();
+      const interruptIssued = yield* Deferred.make<void>();
+      const opened = yield* openSessionWithRunningCommand(
+        {},
+        undefined,
+        { agentVersion: "1.5.13", holdsFirstPrompt: false },
+        {
+          runtimeMode: "approval-required",
+          useRealPrompt: true,
+          mockEnv: () => ({ T3_ACP_STEER_BEHAVIOR: "raced-blocked-steer-permission" }),
+          testHooks: {
+            afterSteerForkBeforeRelease: () =>
+              Deferred.succeed(hookReached, undefined).pipe(
+                Effect.andThen(Deferred.await(interruptIssued)),
+              ),
+          },
+        },
+      );
+
+      yield* opened.startTurn(1, false);
+      const started = (yield* opened.until(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      )).at(-1);
+      assert(started?.type === "provider_turn.updated");
+      yield* opened.until(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "assistant_message" &&
+          event.turnItem.text.includes("Working on turn 1..."),
+      );
+
+      const steerFiber = yield* opened.session
+        .steerTurn({
+          threadId: ThreadId.make("thread-antigravity-wake"),
+          runId: RunId.make("run-antigravity-wake-1"),
+          providerThread: opened.providerThread,
+          providerTurnId: started.providerTurn.id,
+          message: {
+            messageId: MessageId.make("message-antigravity-interrupted-commit"),
+            text: "Steer interrupted between fork and release",
+            attachments: [],
+            createdBy: "agent",
+            creationSource: "mcp",
+          },
+        })
+        .pipe(Effect.forkScoped);
+
+      // Trigger interruption while steerWithPrompt is right between forkFollowPrompt and
+      // Deferred.succeed(previousForegroundIdle, undefined). Because the commit section is
+      // uninterruptible, previousForegroundIdle MUST still be resolved so Prompt #2 reaches
+      // the runtime, declines, restores Prompt #1, and Turn 1 finishes instead of hanging.
+      yield* Deferred.await(hookReached);
+      yield* Fiber.interrupt(steerFiber).pipe(Effect.forkScoped);
+      yield* Deferred.succeed(interruptIssued, undefined);
+      const steerExit = yield* Fiber.await(steerFiber);
+      assert.isTrue(Exit.isFailure(steerExit));
+
+      const pending = (yield* opened.until(
+        (event) =>
+          event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending",
+      )).at(-1);
+      assert(pending?.type === "runtime_request.updated");
+      yield* opened.session.respondToRuntimeRequest({
+        requestId: pending.runtimeRequest.id,
+        decision: "accept",
+      });
+
+      const terminal = (yield* opened.throughTerminal).at(-1);
+      assert(terminal?.type === "turn.terminal" && terminal.status === "completed");
+      assert.equal(opened.runtimes(), 1);
+    }).pipe(Effect.provide(layerSession)),
+);
+
+it.live.each(["completes-on-cancel", "retires-on-cancel-timeout"] as const)(
+  "preserves AcpSessionRuntime wait-for-prompt cancel behavior after a raced blocked steer declines (%s)",
+  (mode) =>
+    Effect.gen(function* () {
+      const opened = yield* openSessionWithRunningCommand(
+        {},
+        undefined,
+        { agentVersion: "1.5.13", holdsFirstPrompt: false },
+        {
+          useRealPrompt: true,
+          useRealCancel: true,
+          cancelTimeout: "180 millis",
+          mockEnv: (runtimeOrdinal) =>
+            runtimeOrdinal === 1
+              ? {
+                  T3_ACP_STEER_BEHAVIOR:
+                    mode === "completes-on-cancel"
+                      ? "raced-blocked-steer-cancel-wait"
+                      : "raced-blocked-steer-cancel-hang",
+                }
+              : {},
+        },
+      );
+
+      yield* opened.startTurn(1, false);
+      const started = (yield* opened.until(
+        (event) =>
+          event.type === "provider_turn.updated" && event.providerTurn.status === "running",
+      )).at(-1);
+      assert(started?.type === "provider_turn.updated");
+      yield* opened.until(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "assistant_message" &&
+          event.turnItem.text.includes("Working on turn 1..."),
+      );
+
+      // Raced steer releases Prompt #1 from activePromptRef into releasedPromptsRef,
+      // then fails with blockedOnRuntimeRequest (clearing activePromptRef to None).
+      const declined = yield* opened.session
+        .steerTurn({
+          threadId: ThreadId.make("thread-antigravity-wake"),
+          runId: RunId.make("run-antigravity-wake-1"),
+          providerThread: opened.providerThread,
+          providerTurnId: started.providerTurn.id,
+          message: {
+            messageId: MessageId.make("message-antigravity-cancel-after-declined-steer"),
+            text: "Raced steer before stop",
+            attachments: [],
+            createdBy: "agent",
+            creationSource: "mcp",
+          },
+        })
+        .pipe(Effect.flip);
+      assert.instanceOf(declined, ProviderAdapter.ProviderAdapterSteerDeclinedError);
+      assert.equal(opened.runtimes(), 1);
+
+      if (mode === "completes-on-cancel") {
+        // Real runtime.cancel under wait-for-prompt MUST wait for Prompt #1's cancelled
+        // response and drain its final assistant chunk instead of returning immediately.
+        yield* opened.session.interruptTurn({
+          providerThread: opened.providerThread,
+          providerTurnId: started.providerTurn.id,
+        });
+        const events = yield* opened.throughTerminal;
+        const terminal = events.at(-1);
+        assert(terminal?.type === "turn.terminal" && terminal.status === "interrupted");
+        assert.isTrue(
+          events.some(
+            (event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "assistant_message" &&
+              event.turnItem.text.includes("Cancelling turn 1..."),
+          ),
+          "wait-for-prompt cancel must await Prompt #1 and drain its cancellation updates",
+        );
+        assert.equal(opened.runtimes(), 1);
+
+        // Runtime stays healthy for Turn 2.
+        yield* opened.startTurn(2, false);
+        const next = (yield* opened.throughTerminal).at(-1);
+        assert(next?.type === "turn.terminal" && next.status === "completed");
+        assert.equal(opened.runtimes(), 1);
+      } else {
+        // Prompt #1 ignores session/cancel; wait-for-prompt cancel MUST time out and
+        // retire the hung runtime rather than returning early and leaking the process.
+        const interruptExit = yield* opened.session
+          .interruptTurn({
+            providerThread: opened.providerThread,
+            providerTurnId: started.providerTurn.id,
+          })
+          .pipe(Effect.exit);
+        assert.isTrue(Exit.isFailure(interruptExit));
+        const terminal = (yield* opened.throughTerminal).at(-1);
+        assert(terminal?.type === "turn.terminal" && terminal.status === "interrupted");
+
+        // The retired hung runtime must be replaced on Turn 2.
+        yield* opened.startTurn(2, false);
+        const next = (yield* opened.throughTerminal).at(-1);
+        assert(next?.type === "turn.terminal" && next.status === "completed");
+        assert.equal(opened.runtimes(), 2);
+      }
     }).pipe(Effect.provide(layerSession)),
 );
 

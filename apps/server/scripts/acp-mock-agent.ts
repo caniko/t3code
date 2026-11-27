@@ -2371,6 +2371,10 @@ function runV1SteerBehaviorAgent(behavior: string): void {
   const steerRejected = new Promise<void>((resolve) => {
     resolveSteerRejected = resolve;
   });
+  let resolveCancelReceived: (() => void) | undefined;
+  const cancelReceived = new Promise<void>((resolve) => {
+    resolveCancelReceived = resolve;
+  });
 
   const writeMessage = (message: unknown): void => {
     process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -2488,6 +2492,45 @@ function runV1SteerBehaviorAgent(behavior: string): void {
         } else {
           writeError(id, -32603, blockedDetail);
         }
+        return;
+      }
+      sendUpdate(targetSessionId, {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Finished turn 2." },
+      });
+      writeResult(id, { stopReason: "end_turn" });
+      return;
+    }
+    if (
+      behavior === "raced-blocked-steer-cancel-wait" ||
+      behavior === "raced-blocked-steer-cancel-hang"
+    ) {
+      if (ordinal === 1) {
+        sendUpdate(targetSessionId, {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Working on turn 1..." },
+        });
+        await steerRejected;
+        await cancelReceived;
+        if (behavior === "raced-blocked-steer-cancel-hang") {
+          // Intentionally never respond to session/cancel so wait-for-prompt cancel must time out and retire.
+          return;
+        }
+        await Effect.runPromise(Effect.sleep("80 millis"));
+        sendUpdate(targetSessionId, {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Cancelling turn 1..." },
+        });
+        writeResult(id, { stopReason: "cancelled" });
+        return;
+      }
+      if (ordinal === 2) {
+        resolveSteerRejected?.();
+        writeError(
+          id,
+          -32603,
+          `Can't add this prompt to session ${targetSessionId}: the running prompt is waiting for a permission or question answer; answer it or send session/cancel, then send this prompt again`,
+        );
         return;
       }
       sendUpdate(targetSessionId, {
@@ -2634,6 +2677,9 @@ function runV1SteerBehaviorAgent(behavior: string): void {
       }
       case "session/close":
         writeResult(id, {});
+        return;
+      case "session/cancel":
+        resolveCancelReceived?.();
         return;
       case "session/prompt":
         void handlePrompt(id, params);
