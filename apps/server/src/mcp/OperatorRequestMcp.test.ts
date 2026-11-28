@@ -7,13 +7,22 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { McpSchema, McpServer } from "effect/ai";
 
 import * as OperatorRequests from "../operatorRequests/OperatorRequests.ts";
+import {
+  DispatchModeLimit,
+  exceededDispatchModeLimit,
+} from "../orchestration-v2/DispatchModeLimit.ts";
+import { OrchestratorDispatchError } from "../orchestration-v2/Orchestrator.ts";
 import { ThreadManagementService } from "../orchestration-v2/ThreadManagementService.ts";
 import { layerInProcessMcpServer, layerOperatorRequestToolkit } from "./McpHttpServer.ts";
 import { McpInvocationContext, type McpInvocationScope } from "./McpInvocationContext.ts";
@@ -59,6 +68,10 @@ const caller = {
     providerSessionId: "caller",
   },
 };
+const RequestCreated = Context.Reference<Deferred.Deferred<void> | undefined>(
+  "test/OperatorRequestMcp/RequestCreated",
+  { defaultValue: () => undefined },
+);
 
 const call = (name: string, args: Record<string, unknown>, scope: McpInvocationScope = operator) =>
   McpServer.McpServer.pipe(
@@ -78,7 +91,7 @@ const layerTest = layerOperatorRequestToolkit.pipe(
         }),
     }),
   ),
-  Layer.provide(
+  Layer.provideMerge(
     Layer.effect(
       OperatorRequests.OperatorRequests,
       Effect.gen(function* () {
@@ -91,6 +104,7 @@ const layerTest = layerOperatorRequestToolkit.pipe(
           stateDir: yield* fs.makeTempDirectoryScoped(),
           desktop: { getUid: () => 1000 },
           projection: {
+            getThread: () => Effect.succeed({}),
             listOperatorRequests: (input) =>
               Effect.sync(() =>
                 [...cards.values()].filter(
@@ -107,9 +121,23 @@ const layerTest = layerOperatorRequestToolkit.pipe(
           },
           orchestrator: {
             dispatch: (command) =>
-              Effect.sync(() => {
+              Effect.gen(function* () {
                 if (command.type !== "operator_request.record")
                   throw new Error("Unexpected command.");
+                const limit = yield* DispatchModeLimit;
+                const modes = { runtimeMode: "full-access", interactionMode: "default" } as const;
+                const mode =
+                  limit === undefined ? undefined : exceededDispatchModeLimit(limit, modes);
+                if (mode !== undefined) {
+                  if (limit?.refused !== undefined) {
+                    yield* Ref.set(limit.refused, { threadId: command.threadId, ...modes, mode });
+                  }
+                  return yield* new OrchestratorDispatchError({
+                    commandId: command.commandId,
+                    commandType: command.type,
+                    cause: "Above caller limit",
+                  });
+                }
                 const { request } = command;
                 const now = DateTime.makeUnsafe(request.updatedAt);
                 const terminal = isOperatorRequestTerminalStatus(request.status);
@@ -131,6 +159,8 @@ const layerTest = layerOperatorRequestToolkit.pipe(
                   completedAt: terminal ? now : null,
                   updatedAt: now,
                 });
+                const created = yield* RequestCreated;
+                if (created !== undefined) yield* Deferred.succeed(created, undefined);
                 return { sequence: cards.size, storedEvents: [] };
               }),
           },
@@ -248,6 +278,47 @@ it.live("allows read-only lookups but reserves decisions for non-linked writable
   }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("keeps the operator preview URL in the turn item but out of every MCP reply", () =>
+  Effect.gen(function* () {
+    const previewUrl = "http://127.0.0.1:8123/request?token=operator-only";
+    const cliCommand = "vagrant request status";
+    const input = { ...create, surfaces: { previewUrl, cliCommand } };
+    const id = { threadId: ownThread, externalId: input.externalId };
+    const operatorScope = { ...operator, principal: "alice" };
+    const created = yield* call("t3_operator_request", input, caller);
+    const requests = yield* OperatorRequests.OperatorRequests;
+    expect((yield* requests.status(id)).surfaces?.previewUrl).toBe(previewUrl);
+    expect(created.structuredContent).toMatchObject({
+      ...id,
+      requestId: expect.any(String),
+      status: "pending",
+      surfaces: { cliCommand },
+    });
+    const listed = yield* call("t3_operator_request_list", { pending: true }, caller);
+    expect(listed.structuredContent).toEqual({ requests: [created.structuredContent] });
+    const resolved = yield* call(
+      "t3_operator_request_resolve",
+      { ...id, status: "submitted", decidedVia: "inline" },
+      operatorScope,
+    );
+    const status = yield* call("t3_operator_request_status", id, operatorScope);
+    expect(status.structuredContent).toMatchObject({
+      ...id,
+      requestId: expect.any(String),
+      status: "submitted",
+      receipt: { decidedVia: "inline", status: "submitted" },
+    });
+    const other = { ...id, externalId: "report-2" };
+    yield* call("t3_operator_request", { ...input, ...other }, caller);
+    const cancelled = yield* call("t3_operator_request_cancel", other, operatorScope);
+    expect(resolved.structuredContent).toMatchObject({ status: "submitted" });
+    expect(cancelled.structuredContent).toMatchObject({ status: "cancelled" });
+    for (const reply of [created, listed, resolved, status, cancelled]) {
+      expect(JSON.stringify(reply)).not.toMatch(/previewUrl|operator-only/);
+    }
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.live("defaults to the calling thread and fences a principal credential to owned requests", () =>
   Effect.gen(function* () {
     const alice = { ...operator, principal: "alice" };
@@ -255,14 +326,18 @@ it.live("defaults to the calling thread and fences a principal credential to own
     const id = { externalId: create.externalId };
     expect((yield* call("t3_operator_request", create, caller)).structuredContent).toMatchObject({
       threadId: ownThread,
+      runId: Testkit.liveThreadShell(ownThread).activeRunId,
       status: "pending",
     });
+    expect(
+      (yield* call("t3_operator_request", { ...create, threadId: otherThread }, caller)).isError,
+    ).toBe(true);
     expect(
       (yield* call("t3_operator_request", { ...create, threadId: otherThread }, alice)).isError,
     ).toBe(true);
     expect((yield* call("t3_operator_request_status", id, bob)).isError).toBe(true);
     expect((yield* call("t3_operator_request_cancel", id, bob)).isError).toBe(true);
-    const decision = { ...id, status: "submitted", decidedVia: "cli", wakeThread: false };
+    const decision = { ...id, status: "submitted", decidedVia: "cli", answers: { approved: true } };
     expect((yield* call("t3_operator_request_resolve", decision, caller)).isError).toBe(true);
     expect((yield* call("t3_operator_request_status", id, alice)).structuredContent).toMatchObject({
       status: "pending",
@@ -270,10 +345,30 @@ it.live("defaults to the calling thread and fences a principal credential to own
     expect((yield* call("t3_operator_request_list", {}, alice)).structuredContent).toMatchObject({
       requests: [{ threadId: ownThread }],
     });
+    const narrowed = {
+      ...alice,
+      client: {
+        ...alice.client,
+        narrowedTo: { runtimeMode: "approval-required", interactionMode: "plan" },
+      },
+    } satisfies McpInvocationScope;
+    const denied = yield* call("t3_operator_request_resolve", decision, narrowed);
+    expect(denied.isError).toBe(true);
+    expect(JSON.stringify(denied.content)).toContain("above this caller");
     expect(
       (yield* call("t3_operator_request_resolve", decision, alice)).structuredContent,
     ).toMatchObject({
       status: "submitted",
+    });
+    for (const scope of [alice, caller]) {
+      expect(
+        (yield* call("t3_operator_request_status", id, scope)).structuredContent,
+      ).toMatchObject({
+        privateReceipt: { answers: { approved: true } },
+      });
+    }
+    expect((yield* call("t3_operator_request_list", {}, alice)).structuredContent).toMatchObject({
+      requests: [expect.not.objectContaining({ privateReceipt: expect.anything() })],
     });
     const explicit = { threadId: ownThread, externalId: "principal-created" };
     expect(
@@ -286,6 +381,38 @@ it.live("defaults to the calling thread and fences a principal credential to own
       (yield* call("t3_operator_request_cancel", explicit, alice)).structuredContent,
     ).toMatchObject({
       status: "cancelled",
+    });
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.live("includes the private receipt in a synchronous agent response", () =>
+  Effect.gen(function* () {
+    const created = yield* Deferred.make<void>();
+    const waiting = yield* call(
+      "t3_operator_request",
+      { ...create, waitPolicy: { mode: "sync" } },
+      caller,
+    ).pipe(Effect.provideService(RequestCreated, created), Effect.forkChild);
+    yield* Deferred.await(created);
+    const resolved = yield* call(
+      "t3_operator_request_resolve",
+      {
+        threadId: ownThread,
+        externalId: create.externalId,
+        status: "submitted",
+        decidedVia: "inline",
+        answers: { accepted: true },
+        artifacts: [{ label: "Report", path: "/report" }],
+      },
+      { ...operator, principal: "alice" },
+    );
+    expect(resolved.structuredContent).not.toHaveProperty("privateReceipt");
+    expect((yield* Fiber.join(waiting)).structuredContent).toMatchObject({
+      status: "submitted",
+      privateReceipt: {
+        answers: { accepted: true },
+        artifacts: [{ label: "Report", path: "/report" }],
+      },
     });
   }).pipe(Effect.provide(layerTest)),
 );

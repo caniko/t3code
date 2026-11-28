@@ -3,15 +3,17 @@ import {
   OperatorRequestCreateInput,
   OperatorRequestDecidedVia,
   OperatorRequestListPendingInput,
-  OperatorRequestListPendingResult,
   OperatorRequestRecord,
+  OperatorRequestReceipt,
   OperatorRequestResolveInput,
   OperatorRequestStatusInput,
+  OperatorRequestSurfaces,
   OrchestratorMcpFailure,
   TrimmedNonEmptyString,
 } from "@t3tools/contracts";
 import { Tool, Toolkit } from "effect/ai";
 import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
 
 import { McpInvocationContext } from "../../McpInvocationContext.ts";
 import { ThreadManagementService } from "../../../orchestration-v2/ThreadManagementService.ts";
@@ -57,22 +59,33 @@ export const OperatorRequestCancelParameters = Schema.Struct({
   reason: OperatorRequestCancelInput.fields.reason,
 });
 
+const mcpRecord = Schema.Struct({
+  ...OperatorRequestRecord.fields,
+  // The preview URL carries the operator's write-capable bearer token.
+  surfaces: Schema.optional(OperatorRequestSurfaces.mapFields(Struct.omit(["previewUrl"]))),
+});
 const shared = {
-  success: OperatorRequestRecord,
+  success: mcpRecord,
   failure: OrchestratorMcpFailure,
   failureMode: "return" as const,
   dependencies: [McpInvocationContext, ThreadManagementService],
 };
+const withPrivateReceipt = Schema.Struct({
+  ...mcpRecord.fields,
+  privateReceipt: Schema.optional(OperatorRequestReceipt),
+});
 
 export const OperatorRequestToolkit = Toolkit.make(
   Tool.make("t3_operator_request", {
     ...shared,
+    success: withPrivateReceipt,
     description:
       "Ask the operator for input. Defaults to this thread and async; sync can demote on timeout.",
     parameters: OperatorRequestCreateParameters,
   }).annotate(Tool.Destructive, false),
   Tool.make("t3_operator_request_status", {
     ...shared,
+    success: withPrivateReceipt,
     description: "Read an operator request by requestId or externalId.",
     parameters: OperatorRequestStatusParameters,
   }).annotate(Tool.Readonly, true),
@@ -80,7 +93,7 @@ export const OperatorRequestToolkit = Toolkit.make(
     ...shared,
     description: "List operator requests. Set pending to exclude terminal requests.",
     parameters: OperatorRequestListParameters,
-    success: OperatorRequestListPendingResult,
+    success: Schema.Struct({ requests: Schema.Array(mcpRecord) }),
   }).annotate(Tool.Readonly, true),
   Tool.make("t3_operator_request_resolve", {
     ...shared,

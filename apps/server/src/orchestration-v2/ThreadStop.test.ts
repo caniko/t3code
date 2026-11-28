@@ -85,10 +85,14 @@ it.effect("a pending operator request closes on Stop without a wake or a later a
     const threadId = ThreadId.make("thread:stop-operator-request");
     const turnItemId = TurnItemId.make("item:stop-operator-request");
     yield* createWatchingThread(threadId, 42);
+    yield* send(threadId, "Start work", "start_immediately");
+    const [run] = (yield* orchestrator.getThreadProjection(threadId)).runs;
+    assert.isDefined(run);
     const now = DateTime.formatIso(yield* DateTime.now);
     const request = {
       threadId,
       turnItemId,
+      runId: run!.id,
       requestId: "stop-operator-request",
       kind: "custom",
       privilege: "user",
@@ -108,6 +112,10 @@ it.effect("a pending operator request closes on Stop without a wake or a later a
     assert.equal(
       (yield* projection.listOperatorRequests({ threadId }))[0]?.request.status,
       "pending",
+    );
+    assert.equal(
+      (yield* projection.listOperatorRequests({ threadId }))[0]?.request.nodeId,
+      run!.rootNodeId ?? undefined,
     );
     const otherThreadId = ThreadId.make("thread:operator-request-id-collision");
     yield* createWatchingThread(otherThreadId, 43);
@@ -130,6 +138,20 @@ it.effect("a pending operator request closes on Stop without a wake or a later a
     const closed = (yield* projection.listOperatorRequests({ threadId, includeTerminal: true }))[0];
     assert.equal(closed?.request.status, "cancelled");
     assert.isFalse(stopped.storedEvents.some(({ event }) => event.type === "message.updated"));
+    const lateItem = TurnItemId.make("item:late-after-stop");
+    const late = yield* orchestrator
+      .dispatch({
+        type: "operator_request.record",
+        commandId: CommandId.make("record:late-after-stop"),
+        threadId,
+        turnItemId: lateItem,
+        request: { ...request, turnItemId: lateItem, requestId: "late-after-stop" },
+      })
+      .pipe(Effect.flip);
+    assert.equal(late._tag, "OrchestratorDispatchError");
+    if (late._tag === "OrchestratorDispatchError") {
+      assert.equal(late.cause, "Operator request target is not active.");
+    }
     const retry = yield* orchestrator.dispatch({
       type: "operator_request.record",
       commandId: CommandId.make("late-answer:stop-operator-request"),

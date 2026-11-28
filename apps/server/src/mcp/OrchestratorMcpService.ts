@@ -105,6 +105,7 @@ import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import { userFacingDispatchErrorMessage } from "../orchestration-v2/UserFacingErrors.ts";
+import { projectOperatorTurnItemForWire } from "../orchestration-v2/WireProjection.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
@@ -3034,7 +3035,10 @@ const make = Effect.gen(function* () {
           ...(input.itemId === undefined ? {} : { itemId: input.itemId }),
         })
         .pipe(Effect.mapError(threadManagementFailure));
-      const page = timeline.items;
+      const page = timeline.items.map((row) => {
+        const item = projectOperatorTurnItemForWire(row.item);
+        return item === row.item ? row : { ...row, item };
+      });
       const messageIdsByThread = new Map<ThreadId, Array<MessageId>>();
       for (const row of page) {
         if (row.item.type !== "user_message" && row.item.type !== "assistant_message") continue;

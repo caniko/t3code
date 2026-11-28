@@ -1,7 +1,7 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it } from "@effect/vitest";
-import { type PreviewEvent, ThreadId } from "@t3tools/contracts";
+import { AuthSessionId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
@@ -12,10 +12,6 @@ import * as PreviewManager from "./Manager.ts";
 
 const DRAIN_LIMIT = 100;
 
-interface EventCollector {
-  readonly drain: Effect.Effect<ReadonlyArray<PreviewEvent>>;
-}
-
 /** The shared live layer retains state between tests; counts need unique thread ids. */
 let nextThreadId = 0;
 const freshThreadId = () => ThreadId.make(`thread-${++nextThreadId}`);
@@ -24,10 +20,7 @@ const freshThreadId = () => ThreadId.make(`thread-${++nextThreadId}`);
 const collectEvents = Effect.gen(function* () {
   const manager = yield* PreviewManager.PreviewManager;
   const subscription = yield* manager.subscribeEvents;
-  const collector: EventCollector = {
-    drain: PubSub.takeUpTo(subscription, DRAIN_LIMIT),
-  };
-  return collector;
+  return { drain: PubSub.takeUpTo(subscription, DRAIN_LIMIT) };
 }).pipe(Effect.withSpan("preview.test.collectEvents"));
 
 const layer = PreviewManager.layer.pipe(
@@ -56,6 +49,41 @@ it.layer(layer)("PreviewManager", (it) => {
       if (events[0]?.type === "opened") {
         expect(events[0].tabId).toBe(snapshot.tabId);
       }
+    }),
+  );
+
+  it.effect("keeps private tabs scoped to the opening session across navigation and close", () =>
+    Effect.gen(function* () {
+      const threadId = freshThreadId();
+      const owner = AuthSessionId.make("operator");
+      const reader = AuthSessionId.make("reader");
+      const manager = yield* PreviewManager.PreviewManager;
+      const collector = yield* collectEvents;
+      const url = "http://127.0.0.1:5173/review?token=operator";
+      const { tabId } = yield* manager.open({ threadId, url, privateTo: owner });
+      yield* manager.reportStatus({
+        threadId,
+        tabId,
+        navStatus: { _tag: "Success", url, title: "Review" },
+        canGoBack: false,
+        canGoForward: false,
+      });
+      expect(yield* manager.canView(threadId, tabId, reader)).toBe("denied");
+      expect((yield* manager.list({ threadId }, reader)).sessions).toEqual([]);
+      expect((yield* manager.list({ threadId }, null)).sessions).toEqual([]);
+      yield* manager.close({ threadId, tabId }, reader);
+      expect((yield* manager.list({ threadId }, owner)).sessions).toHaveLength(1);
+      const popup = yield* manager.open({ threadId, url, openerTabId: tabId });
+      expect(popup.private).toBe(true);
+      expect((yield* manager.list({ threadId }, reader)).sessions).toEqual([]);
+      yield* manager.close({ threadId }, owner);
+      expect((yield* collector.drain).map(({ type, privateTo }) => [type, privateTo])).toEqual([
+        ["opened", owner],
+        ["navigated", owner],
+        ["opened", owner],
+        ["closed", owner],
+        ["closed", owner],
+      ]);
     }),
   );
 

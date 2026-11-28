@@ -37,6 +37,21 @@ const record = {
   createdAt: "2026-01-01T00:00:00Z",
   updatedAt: "2026-01-01T00:00:00Z",
 };
+const terminalRecord = {
+  ...record,
+  externalId: "external-1",
+  status: "submitted",
+  receipt: { status: "submitted", decidedVia: "inline", decidedAt: record.updatedAt },
+};
+const statusWithPrivateReceipt = {
+  ...terminalRecord,
+  surfaces: { cliCommand: "t3 operator-request status --request-id req-1" },
+  privateReceipt: {
+    ...terminalRecord.receipt,
+    answers: { approved: true },
+    note: "Reviewed",
+  },
+};
 
 const run = (args: string[], stdin?: string) =>
   Effect.gen(function* () {
@@ -92,13 +107,23 @@ it.live("round-trips all five subcommands over authenticated HTTP with JSON-only
         return;
       }
       const structuredContent =
-        name === "t3_operator_request_list"
-          ? { requests: [record] }
-          : name === "t3_operator_request_resolve"
-            ? { ...record, status: "submitted" }
-            : name === "t3_operator_request_cancel"
-              ? { ...record, status: "cancelled" }
-              : record;
+        name === "t3_operator_request" && args.waitPolicy !== undefined
+          ? statusWithPrivateReceipt
+          : name === "t3_operator_request_list"
+            ? { requests: [record] }
+            : name === "t3_operator_request_status" && args.requestId === "req-1"
+              ? {
+                  ...statusWithPrivateReceipt,
+                  surfaces: {
+                    ...statusWithPrivateReceipt.surfaces,
+                    previewUrl: "https://example.test/preview?token=fixture",
+                  },
+                }
+              : name === "t3_operator_request_status" || name === "t3_operator_request_resolve"
+                ? terminalRecord
+                : name === "t3_operator_request_cancel"
+                  ? { ...record, status: "cancelled" }
+                  : record;
       reply({ result: { structuredContent } });
     });
     const directory = yield* Effect.acquireRelease(
@@ -133,12 +158,21 @@ it.live("round-trips all five subcommands over authenticated HTTP with JSON-only
     const cases = [
       { args: ["create", "--json", "-"], stdin: JSON.stringify(createInput), output: record },
       { args: ["create", "--json", JSON.stringify(createInput)], output: record },
-      { args: ["status", "--external-id", "external-1"], output: record },
+      {
+        args: [
+          "create",
+          "--json",
+          JSON.stringify({ ...createInput, waitPolicy: { mode: "sync" } }),
+        ],
+        output: statusWithPrivateReceipt,
+      },
+      { args: ["status", "--external-id", "external-1"], output: terminalRecord },
+      { args: ["status", "--request-id", "req-1"], output: statusWithPrivateReceipt },
       {
         args: ["list", "--pending", "--thread", "thread-1", "--kind", "ops"],
         output: { requests: [record] },
       },
-      { args: ["resolve", "--json", path], output: { ...record, status: "submitted" } },
+      { args: ["resolve", "--json", path], output: terminalRecord },
       {
         args: ["cancel", "--request-id", "req-1", "--thread", "thread-1", "--reason", "Superseded"],
         output: { ...record, status: "cancelled" },
@@ -154,7 +188,9 @@ it.live("round-trips all five subcommands over authenticated HTTP with JSON-only
       [
         ["", createInput],
         ["", createInput],
+        ["", { ...createInput, waitPolicy: { mode: "sync" } }],
         ["_status", { externalId: "external-1" }],
+        ["_status", { requestId: "req-1" }],
         ["_list", { pending: true, threadId: "thread-1", kind: "ops" }],
         ["_resolve", resolve],
         ["_cancel", cancel],

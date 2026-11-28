@@ -1,7 +1,6 @@
 import * as Schema from "effect/Schema";
 import { GitPreparePullRequestThreadInput, GitRunStackedActionInput } from "./git.ts";
 import {
-  AuthAccessReadScope,
   AuthAccessWriteScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
@@ -73,10 +72,11 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.peerLinksUnlink]: AuthAccessWriteScope,
   // A link lets every agent here reach the other environment: Settings' bar.
   [WS_METHODS.peerLinksAnswerRequest]: AuthAccessWriteScope,
-  [WS_METHODS.operatorRequestsAnswer]: AuthAccessWriteScope,
-  [WS_METHODS.operatorRequestsListPending]: AuthAccessReadScope,
-  [WS_METHODS.operatorRequestsLaunchDesktop]: AuthAccessWriteScope,
-  [WS_METHODS.operatorRequestsCancel]: AuthAccessWriteScope,
+  [WS_METHODS.operatorRequestsAnswer]: AuthOrchestrationOperateScope,
+  [WS_METHODS.operatorRequestsListPending]: AuthOrchestrationReadScope,
+  [WS_METHODS.operatorRequestsLaunchDesktop]: AuthOrchestrationOperateScope,
+  [WS_METHODS.operatorRequestsCancel]: AuthOrchestrationOperateScope,
+  [WS_METHODS.operatorRequestsGetPreviewUrl]: AuthOrchestrationOperateScope,
 } as const;
 export type ClientGuardedRpcTag = keyof typeof CLIENT_GUARDED_RPC_SCOPES;
 

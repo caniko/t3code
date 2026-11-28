@@ -14,6 +14,7 @@ import { OperatorRequestsInbox } from "./OperatorRequestsInbox";
 const mocks = vi.hoisted(() => ({
   answer: vi.fn(),
   cancel: vi.fn(),
+  getPreviewUrl: vi.fn(),
   openPreview: vi.fn(),
   closePreview: vi.fn(),
   refresh: vi.fn(),
@@ -55,6 +56,7 @@ vi.mock("~/state/operatorRequests", async () => {
       answer: { label: "answer", permissionAtom },
       launchDesktop: { label: "launch", permissionAtom },
       cancel: { label: "cancel", permissionAtom },
+      getPreviewUrl: { label: "getPreviewUrl", permissionAtom },
     },
     usePendingOperatorRequests: () => ({
       entries: mocks.entries,
@@ -65,7 +67,12 @@ vi.mock("~/state/operatorRequests", async () => {
   };
 });
 vi.mock("~/state/use-atom-command", () => ({
-  useAtomCommand: ({ label }: { label: "answer" | "cancel" | "closePreview" }) => mocks[label],
+  useAtomCommand: ({ label }: { label: "answer" | "cancel" | "closePreview" | "getPreviewUrl" }) =>
+    mocks[label],
+}));
+vi.mock("~/state/entities", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/state/entities")>()),
+  readEnvironmentSupportsServerBrowser: () => true,
 }));
 vi.mock("~/state/preview", async () => {
   const { Atom } = await import("effect/reactivity");
@@ -139,8 +146,9 @@ it("routes inline resolution and cancellation to each request's own environment"
 it("hosts and closes a threadless request's preview in the inbox", async () => {
   setup();
   const url = "http://127.0.0.1:4321/review?token=test";
+  mocks.getPreviewUrl.mockResolvedValue(AsyncResult.success(url));
   mocks.entries = [
-    { environmentId: remote, request: { ...agenix, surfaces: { previewUrl: url } } },
+    { environmentId: remote, request: { ...agenix, surfaces: { previewAvailable: true } } },
   ];
   await using screen = await render(<OperatorRequestsInbox />);
   await screen.getByRole("button", { name: "Open Interactive Preview" }).click();

@@ -2,6 +2,7 @@ import type {
   CheckpointId,
   MessageId,
   NodeId,
+  OperatorRequestRecord,
   OrchestrationV2Checkpoint,
   OrchestrationV2DomainEvent,
   OrchestrationV2ContextHandoff,
@@ -14,6 +15,7 @@ import {
   dedupeSubagentBodies,
   dedupeTurnItemBodies,
 } from "@t3tools/shared/orchestrationV2DedupedBodies";
+import { resolveT3McpToolId } from "@t3tools/shared/t3McpToolPresentation";
 import {
   compactDynamicToolOutput,
   omitToolOutputImageData,
@@ -106,6 +108,7 @@ type CheckpointFiles = Pick<OrchestrationV2Checkpoint, "files" | "filesTotal">;
 
 // Same input, same output object: snapshot compaction relies on shared item identity.
 const cappedCheckpointFiles = new WeakMap<object, object>();
+const wireOperatorItems = new WeakMap<OrchestrationV2TurnItem, OrchestrationV2TurnItem>();
 
 function capCheckpointFiles<T extends CheckpointFiles>(value: T): T {
   if (value.files.length <= MAX_WIRE_CHECKPOINT_FILES || value.filesTotal !== undefined) {
@@ -129,13 +132,13 @@ function capCheckpointFiles<T extends CheckpointFiles>(value: T): T {
 }
 
 /** Idempotent; bounded snapshots that skip `projectThreadProjectionForWire` still need it. */
-export function capProjectionCheckpointFilesForWire(
+export function projectBoundedProjectionForWire(
   projection: OrchestrationV2ThreadProjection,
 ): OrchestrationV2ThreadProjection {
   const checkpoints = projection.checkpoints.map(capCheckpointFiles);
-  const turnItems = projection.turnItems.map(capCheckpointItemFiles);
+  const turnItems = projection.turnItems.map(projectBoundedTurnItemForWire);
   const visibleTurnItems = projection.visibleTurnItems.map((row) => {
-    const item = capCheckpointItemFiles(row.item);
+    const item = projectBoundedTurnItemForWire(row.item);
     return item === row.item ? row : { ...row, item };
   });
   const unchanged = (next: ReadonlyArray<unknown>, previous: ReadonlyArray<unknown>) =>
@@ -147,11 +150,82 @@ export function capProjectionCheckpointFilesForWire(
     : { ...projection, checkpoints, turnItems, visibleTurnItems };
 }
 
-function capCheckpointItemFiles(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
-  return item.type === "checkpoint" ? capCheckpointFiles(item) : item;
+function projectBoundedTurnItemForWire(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
+  return item.type === "checkpoint"
+    ? capCheckpointFiles(item)
+    : projectOperatorTurnItemForWire(item);
+}
+
+const OPERATOR_REQUEST_TOOL_IDS = new Set([
+  "t3_operator_request",
+  "t3_operator_request_status",
+  "t3_operator_request_list",
+  "t3_operator_request_resolve",
+  "t3_operator_request_cancel",
+]);
+
+function resolveCanonical(candidate: string): string | null {
+  let toolId = resolveT3McpToolId(candidate);
+  if (toolId === null && /_t3[-_]code$/i.test(candidate)) {
+    toolId = resolveT3McpToolId(candidate.replace(/_t3[-_]code$/i, ""));
+  }
+  return toolId !== null && OPERATOR_REQUEST_TOOL_IDS.has(toolId) ? toolId : null;
+}
+
+function matchOperatorRequestTool(raw: string | null | undefined): string | null {
+  const trimmed = raw?.trim();
+  if (!trimmed) return null;
+  const toolId = resolveCanonical(trimmed);
+  if (toolId !== null) return toolId;
+  // A namespace colon has no whitespace or argument delimiter after it.
+  const head = /^([^\s({]+?)(?:\s*[({]|:(?=[\s({]))/.exec(trimmed)?.[1];
+  return head === undefined ? null : resolveCanonical(head);
+}
+
+export function redactOperatorRequestToolItem(
+  item: OrchestrationV2TurnItem,
+): OrchestrationV2TurnItem {
+  if (item.type !== "dynamic_tool") return item;
+  const toolName = matchOperatorRequestTool(item.toolName) ?? matchOperatorRequestTool(item.title);
+  if (toolName === null) return item;
+  if (
+    item.toolName === toolName &&
+    item.title === null &&
+    item.input === null &&
+    item.output === undefined &&
+    item.viewedImagePath === undefined &&
+    item.outputOmitted === undefined
+  )
+    return item;
+  // Providers can wrap or stringify these payloads; never persist their private bodies.
+  const { output: _output, outputOmitted: _omitted, viewedImagePath: _image, ...metadata } = item;
+  return { ...metadata, toolName, title: null, input: null };
+}
+
+export function projectOperatorRequestForWire(
+  request: OperatorRequestRecord,
+): OperatorRequestRecord {
+  const surfaces = request.surfaces;
+  if (surfaces?.previewUrl === undefined) return request;
+  const { previewUrl: _previewUrl, ...publicSurfaces } = surfaces;
+  return { ...request, surfaces: { ...publicSurfaces, previewAvailable: true } };
+}
+
+export function projectOperatorTurnItemForWire(
+  item: OrchestrationV2TurnItem,
+): OrchestrationV2TurnItem {
+  if (item.type !== "operator_request") return redactOperatorRequestToolItem(item);
+  const cached = wireOperatorItems.get(item);
+  if (cached !== undefined) return cached;
+  const request = projectOperatorRequestForWire(item.request);
+  if (request === item.request) return item;
+  const projected = { ...item, request };
+  wireOperatorItems.set(item, projected);
+  return projected;
 }
 
 export function projectTurnItemForWire(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
+  item = projectOperatorTurnItemForWire(item);
   switch (item.type) {
     case "checkpoint":
       return capCheckpointFiles(item);
@@ -239,6 +313,7 @@ function boundToolOutput(output: unknown): unknown {
 }
 
 export function projectTurnItemForDetail(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
+  item = redactOperatorRequestToolItem(item);
   switch (item.type) {
     case "command_execution":
       return {
@@ -273,6 +348,7 @@ export function projectTurnItemForDetail(item: OrchestrationV2TurnItem): Orchest
           ? { newStr: truncateDetail(item.newStr, MAX_ON_DEMAND_BYTES) }
           : {}),
       };
+    case "operator_request":
     case "handoff":
       return projectTurnItemForWire(item);
     default:

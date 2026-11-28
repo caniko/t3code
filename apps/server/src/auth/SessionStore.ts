@@ -64,6 +64,7 @@ export interface VerifiedSession {
 }
 
 export interface VerifiedWebSocketTicket extends VerifiedSession {
+  readonly mediaProofKeyThumbprint?: string;
   readonly audience?: AuthWebSocketTicketUse;
 }
 
@@ -393,6 +394,7 @@ export class SessionStore extends Context.Service<
         readonly ttl?: Duration.Duration;
         readonly audience?: AuthWebSocketTicketUse;
         readonly proofKeyThumbprint?: string;
+        readonly mediaProofKeyThumbprint?: string;
       },
     ) => Effect.Effect<
       {
@@ -451,6 +453,7 @@ const WebSocketClaims = Schema.Struct({
   sid: AuthSessionId,
   aud: Schema.optionalKey(AuthWebSocketTicketUse),
   jkt: Schema.optionalKey(Schema.String),
+  mediaJkt: Schema.optionalKey(Schema.String),
   iat: Schema.Number,
   exp: Schema.Number,
 });
@@ -862,6 +865,7 @@ const make = Effect.gen(function* () {
       sid: sessionId,
       ...(input?.audience ? { aud: input.audience } : {}),
       ...(input?.proofKeyThumbprint ? { jkt: input.proofKeyThumbprint } : {}),
+      ...(input?.mediaProofKeyThumbprint ? { mediaJkt: input.mediaProofKeyThumbprint } : {}),
       iat: issuedAt.epochMilliseconds,
       exp: expiresAt.epochMilliseconds,
     };
@@ -956,6 +960,7 @@ const make = Effect.gen(function* () {
       scopes: row.value.scopes,
       ...(claims.aud ? { audience: claims.aud } : {}),
       ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
+      ...(claims.mediaJkt ? { mediaProofKeyThumbprint: claims.mediaJkt } : {}),
     } satisfies VerifiedWebSocketTicket;
   });
 

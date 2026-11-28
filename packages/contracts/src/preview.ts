@@ -159,6 +159,7 @@ export const PreviewSessionSnapshot = Schema.Struct({
   zoomFactor: Schema.optional(PreviewZoomFactor),
   /** Fixed at open; Electron cannot change a webview partition after attach without losing page state. */
   profileId: Schema.optional(BrowserProfileId),
+  private: Schema.optional(Schema.Literal(true)),
   runtime: Schema.optional(PreviewRuntime),
   /** The server runs this tab in headless Chromium, so the desktop streams it like other clients. */
   headless: Schema.optional(Schema.Boolean),
@@ -176,6 +177,7 @@ export const PreviewOpenInput = Schema.Struct({
   profileId: Schema.optional(BrowserProfileId),
   runtime: Schema.optional(PreviewRuntime),
   reveal: Schema.optional(Schema.Boolean),
+  private: Schema.optional(Schema.Literal(true)),
 });
 export type PreviewOpenInput = typeof PreviewOpenInput.Type;
 

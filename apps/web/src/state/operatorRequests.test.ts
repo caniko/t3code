@@ -1,8 +1,17 @@
-import { EnvironmentId } from "@t3tools/contracts";
+import { AuthOrchestrationReadScope, EnvironmentId } from "@t3tools/contracts";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { expect, it, vi } from "vite-plus/test";
 
-import { operatorRequestEnvironment, pendingOperatorRequestsAtom } from "./operatorRequests";
+import {
+  operatorRequestEnvironment,
+  pendingOperatorRequestsAtom,
+  usePendingOperatorRequestCount,
+  usePendingOperatorRequests,
+} from "./operatorRequests";
+import { useEnvironments } from "./environments";
+import { useEnvironmentsWithScope } from "./session";
 
 vi.mock("../connection/runtime", () => ({ connectionAtomRuntime: {} }));
 vi.mock("./environments", () => ({ useEnvironments: vi.fn() }));
@@ -10,6 +19,30 @@ vi.mock("./session", () => ({ useEnvironmentsWithScope: vi.fn() }));
 vi.mock("@t3tools/client-runtime/state/operator-requests", () => ({
   createOperatorRequestEnvironmentAtoms: () => ({ listPending: vi.fn() }),
 }));
+
+it("checks orchestration-read permission for both the inbox and the count", () => {
+  const connected = {
+    environmentId: EnvironmentId.make("connected"),
+    connection: { phase: "connected" },
+  };
+  const offline = {
+    environmentId: EnvironmentId.make("offline"),
+    connection: { phase: "disconnected" },
+  };
+  vi.mocked(useEnvironments).mockReturnValue({
+    environments: [connected, offline],
+  } as ReturnType<typeof useEnvironments>);
+  vi.mocked(useEnvironmentsWithScope).mockClear().mockReturnValue(new Set());
+  function InboxAndCount() {
+    const { entries } = usePendingOperatorRequests();
+    return `${entries.length}/${usePendingOperatorRequestCount()}`;
+  }
+  expect(renderToStaticMarkup(createElement(InboxAndCount))).toBe("0/0");
+  expect(vi.mocked(useEnvironmentsWithScope).mock.calls).toEqual([
+    [[connected], AuthOrchestrationReadScope],
+    [[connected], AuthOrchestrationReadScope],
+  ]);
+});
 
 it("refreshes mounted server queries for threadless requests and stops after disposal", () => {
   const local = EnvironmentId.make("local");

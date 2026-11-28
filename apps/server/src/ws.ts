@@ -92,6 +92,7 @@ import {
   ProjectMutationError,
   ProviderUploadFeedbackError,
   ProviderSetupError,
+  PreviewSessionLookupError,
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
   type ServerConfig as ClientServerConfig,
@@ -178,6 +179,7 @@ import {
 import {
   makeLiveBodyDeduper,
   projectDomainEventForWire,
+  projectOperatorRequestForWire,
   projectThreadProjectionForWire,
 } from "./orchestration-v2/WireProjection.ts";
 import { dedupeSnapshotBodies } from "@t3tools/shared/orchestrationV2DedupedBodies";
@@ -1368,6 +1370,7 @@ export const layerWsRpc = (
   Layer.effectContext(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
+      const previewOwner = PreviewManager.previewOwner(currentSession);
       const principal = principalOfSubject(currentSession.subject);
       const sql = yield* SqlClient.SqlClient;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
@@ -2032,6 +2035,19 @@ export const layerWsRpc = (
         ownerPrincipal: principal,
         allowThread: (threadId: ThreadId) => threadAllowed(threadId, action),
       });
+      const withVisiblePreview = <A, E>(
+        { threadId, tabId }: { readonly threadId: string; readonly tabId: string },
+        effect: Effect.Effect<A, E>,
+      ) =>
+        previewManager
+          .canView(threadId, tabId, previewOwner)
+          .pipe(
+            Effect.flatMap((access): Effect.Effect<A, E | PreviewSessionLookupError> =>
+              access === "allowed"
+                ? effect
+                : Effect.fail(new PreviewSessionLookupError({ threadId, tabId })),
+            ),
+          );
       const scopeSearchResult = Effect.fn("ws.scopeSearchResult")(function* <
         R extends {
           readonly matches: ReadonlyArray<{ readonly threadId: ThreadId }>;
@@ -2823,11 +2839,21 @@ export const layerWsRpc = (
             Effect.andThen(peerLinkRequests.answer(input)),
           ),
         [WS_METHODS.operatorRequestsListPending]: (input) =>
-          operatorRequests.listPending(input, operatorRequestScope("read")),
+          operatorRequests.listPending(input, operatorRequestScope("read")).pipe(
+            Effect.map(({ requests }) => ({
+              requests: requests.map(projectOperatorRequestForWire),
+            })),
+          ),
         [WS_METHODS.operatorRequestsAnswer]: (input) =>
-          operatorRequests.answer(input, operatorRequestScope("write")),
+          operatorRequests
+            .answer(input, operatorRequestScope("write"))
+            .pipe(Effect.map(projectOperatorRequestForWire)),
         [WS_METHODS.operatorRequestsCancel]: (input) =>
-          operatorRequests.cancel(input, operatorRequestScope("write")),
+          operatorRequests
+            .cancel(input, operatorRequestScope("write"))
+            .pipe(Effect.map(projectOperatorRequestForWire)),
+        [WS_METHODS.operatorRequestsGetPreviewUrl]: (input) =>
+          operatorRequests.getPreviewUrl(input, operatorRequestScope("write")),
         [WS_METHODS.operatorRequestsLaunchDesktop]: (input) =>
           operatorRequests.launchDesktop(input, operatorRequestScope("write")),
         [WS_METHODS.serverUpdateSettings]:
@@ -3353,15 +3379,28 @@ export const layerWsRpc = (
               (unsubscribe) => Effect.sync(unsubscribe),
             ),
           ),
-        [WS_METHODS.previewOpen]: (input) => previewManager.open(input),
-        [WS_METHODS.previewResize]: (input) => previewManager.resize(input),
-        [WS_METHODS.previewAdjust]: (input) => previewManager.adjust(input),
-        [WS_METHODS.previewClose]: (input) => previewManager.close(input),
-        [WS_METHODS.previewList]: (input) => previewManager.list(input),
+        [WS_METHODS.previewOpen]: (input) =>
+          previewManager.open({
+            ...input,
+            ...(input.private === true ? { privateTo: previewOwner } : {}),
+          }),
+        [WS_METHODS.previewResize]: (input) =>
+          withVisiblePreview(input, previewManager.resize(input)),
+        [WS_METHODS.previewAdjust]: (input) =>
+          withVisiblePreview(input, previewManager.adjust(input)),
+        [WS_METHODS.previewClose]: (input) => previewManager.close(input, previewOwner),
+        [WS_METHODS.previewList]: (input) => previewManager.list(input, previewOwner),
         [WS_METHODS.previewClearProfile]: (input) => serverBrowser.clearProfile(input.profileId),
         [WS_METHODS.previewReportProfiles]: (input) => reportProfiles(input),
-        [WS_METHODS.previewReportStatus]: (input) => previewManager.reportStatus(input),
-        [WS_METHODS.subscribePreviewEvents]: (_input) => previewManager.events,
+        [WS_METHODS.previewReportStatus]: (input) =>
+          withVisiblePreview(input, previewManager.reportStatus(input)),
+        [WS_METHODS.subscribePreviewEvents]: (_input) =>
+          previewManager.events.pipe(
+            Stream.filter(
+              (event) => event.privateTo === undefined || event.privateTo === previewOwner,
+            ),
+            Stream.map(({ privateTo: _privateTo, ...event }) => event),
+          ),
         [WS_METHODS.deviceConfigure]: (input) => deviceService.configure(input),
         [WS_METHODS.deviceTestHost]: (input) => deviceService.testHost(input),
         [WS_METHODS.deviceEasAccount]: (input) => deviceService.easAccount(input),

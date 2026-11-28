@@ -25,6 +25,7 @@ interface OpenPreviewSessionInput<E> {
   viewport?: PreviewViewportSetting;
   profileId?: string;
   runtime?: PreviewRuntime;
+  private?: true;
 }
 
 export async function openPreviewSession<E>(
@@ -46,6 +47,7 @@ export async function openPreviewSession<E>(
       viewport: input.viewport ?? defaults.viewport,
       profileId: input.profileId ?? defaults.profileId,
       ...(runtime === undefined || runtime === "desktop" ? {} : { runtime }),
+      ...(input.private === true ? { private: true } : {}),
     },
   });
   if (result._tag === "Failure") {
@@ -53,7 +55,7 @@ export async function openPreviewSession<E>(
   }
   const snapshot = result.value;
   applyPreviewServerSnapshot(input.threadRef, snapshot);
-  if (input.url !== undefined) {
+  if (input.url !== undefined && input.private !== true) {
     rememberPreviewUrl(
       input.threadRef,
       snapshot.navStatus._tag === "Idle" ? input.url : snapshot.navStatus.url,

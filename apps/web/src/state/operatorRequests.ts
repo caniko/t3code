@@ -1,7 +1,7 @@
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { createOperatorRequestEnvironmentAtoms } from "@t3tools/client-runtime/state/operator-requests";
 import {
-  AuthAccessReadScope,
+  AuthOrchestrationReadScope,
   type EnvironmentId,
   type OperatorRequestRecord,
 } from "@t3tools/contracts";
@@ -54,7 +54,7 @@ const pendingEntries = Atom.family((key: string) =>
 function useReadableEnvironmentKey() {
   const { environments } = useEnvironments();
   const connected = environments.filter(({ connection }) => connection.phase === "connected");
-  const readable = useEnvironmentsWithScope(connected, AuthAccessReadScope);
+  const readable = useEnvironmentsWithScope(connected, AuthOrchestrationReadScope);
   return environmentIdsKey(
     connected
       .filter(({ environmentId }) => readable.has(environmentId))

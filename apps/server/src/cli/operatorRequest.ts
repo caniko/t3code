@@ -15,6 +15,7 @@ import {
   OperatorRequestListParameters,
   OperatorRequestResolveParameters,
   OperatorRequestStatusParameters,
+  OperatorRequestToolkit,
 } from "../mcp/toolkits/operatorRequest/tools.ts";
 import { projectLocationFlags } from "./config.ts";
 import {
@@ -107,7 +108,14 @@ const reportErrors = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
 const createCommand = Command.make("create", { ...projectLocationFlags, json: jsonFlag }).pipe(
   Command.withHandler((flags) =>
     readJson(flags.json, OperatorRequestCreateParameters).pipe(
-      Effect.flatMap((input) => call(flags, "t3_operator_request", input, OperatorRequestRecord)),
+      Effect.flatMap((input) =>
+        call(
+          flags,
+          "t3_operator_request",
+          input,
+          OperatorRequestToolkit.tools.t3_operator_request.successSchema,
+        ),
+      ),
       reportErrors,
     ),
   ),
@@ -140,7 +148,12 @@ const statusCommand = Command.make("status", { ...projectLocationFlags, ...looku
     decodeOptions(OperatorRequestStatusParameters, lookupOptions(flags)).pipe(
       Effect.flatMap(requireLookup),
       Effect.flatMap((input) =>
-        call(flags, "t3_operator_request_status", input, OperatorRequestRecord),
+        call(
+          flags,
+          "t3_operator_request_status",
+          input,
+          OperatorRequestToolkit.tools.t3_operator_request_status.successSchema,
+        ),
       ),
       reportErrors,
     ),

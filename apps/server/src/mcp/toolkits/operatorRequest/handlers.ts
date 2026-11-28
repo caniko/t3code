@@ -1,6 +1,8 @@
 import {
+  DEFAULT_PRINCIPAL_ID,
   OrchestratorMcpFailure,
   type OperatorRequestError,
+  type OperatorRequestRecord,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -63,6 +65,31 @@ export const layer = Access.toLayer(
   OperatorRequestToolkit,
   Effect.gen(function* () {
     const requests = yield* OperatorRequests;
+    const withPrivateReceipt = Effect.fn("mcp.operatorRequest.withPrivateReceipt")(function* (
+      record: OperatorRequestRecord,
+      caller: Caller,
+    ) {
+      if (caller.scope.client?.linked === true || record.receipt === undefined) return record;
+      if (record.threadId !== undefined) {
+        const thread =
+          caller.caller?.id === record.threadId
+            ? caller.caller
+            : yield* caller.threads
+                .getThreadShell(record.threadId)
+                .pipe(Effect.mapError(unavailable));
+        if (
+          thread === null ||
+          thread.deletedAt !== null ||
+          (thread.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID) !== callerPrincipal(caller) ||
+          (caller.scope.thread !== undefined && caller.scope.thread.threadId !== record.threadId)
+        )
+          return record;
+      }
+      const privateReceipt = yield* requests
+        .readPrivateReceipt(record)
+        .pipe(Effect.mapError(requestFailure));
+      return privateReceipt === undefined ? record : { ...record, privateReceipt };
+    });
     const lookup = Effect.fn("mcp.operatorRequest.lookup")(function* (
       input: typeof OperatorRequestStatusParameters.Type,
       caller: Caller,
@@ -82,6 +109,16 @@ export const layer = Access.toLayer(
           Effect.gen(function* () {
             const { summary, prompt, ...request } = input;
             const threadId = request.threadId ?? caller.scope.thread?.threadId;
+            const runId = caller.caller?.activeRunId;
+            if (
+              caller.scope.thread !== undefined &&
+              (threadId !== caller.scope.thread.threadId || runId == null)
+            ) {
+              return yield* new OrchestratorMcpFailure({
+                code: "parent_not_active",
+                message: "Agents can create operator requests only in their own active thread run.",
+              });
+            }
             if (!(yield* visible(caller, threadId, "write"))) {
               return yield* new OrchestratorMcpFailure({
                 code: "capability_denied",
@@ -93,16 +130,26 @@ export const layer = Access.toLayer(
                 {
                   ...request,
                   ...(threadId === undefined ? {} : { threadId }),
+                  ...(runId == null ? {} : { runId }),
                   reason: prompt ? `${summary}\n\n${prompt}` : summary,
                 },
                 requestScope(caller, "write"),
               )
-              .pipe(Effect.mapError(requestFailure));
+              .pipe(
+                Effect.mapError(requestFailure),
+                Effect.flatMap((record) => withPrivateReceipt(record, caller)),
+              );
           }),
       ),
       t3_operator_request_status: Access.reads(
         (input: typeof OperatorRequestStatusParameters.Type) =>
-          readCaller().pipe(Effect.flatMap((caller) => lookup(input, caller, "read"))),
+          readCaller().pipe(
+            Effect.flatMap((caller) =>
+              lookup(input, caller, "read").pipe(
+                Effect.flatMap((record) => withPrivateReceipt(record, caller)),
+              ),
+            ),
+          ),
       ),
       t3_operator_request_list: Access.reads((input: typeof OperatorRequestListParameters.Type) =>
         Effect.gen(function* () {
@@ -125,21 +172,21 @@ export const layer = Access.toLayer(
       ),
       t3_operator_request_resolve: Access.decidesOperatorRequest(
         (input: typeof OperatorRequestResolveParameters.Type, caller) =>
-          Effect.gen(function* () {
-            const { requestId, threadId } = yield* lookup(input, caller, "write");
-            return yield* requests
-              .resolve({ ...input, requestId, threadId }, requestScope(caller, "write"))
-              .pipe(Effect.mapError(requestFailure));
-          }),
+          requests
+            .resolve(
+              { ...input, threadId: input.threadId ?? caller.scope.thread?.threadId },
+              requestScope(caller, "write"),
+            )
+            .pipe(Effect.mapError(requestFailure)),
       ),
       t3_operator_request_cancel: Access.decidesOperatorRequest(
         (input: typeof OperatorRequestCancelParameters.Type, caller) =>
-          Effect.gen(function* () {
-            const { requestId, threadId } = yield* lookup(input, caller, "write");
-            return yield* requests
-              .cancel({ ...input, requestId, threadId }, requestScope(caller, "write"))
-              .pipe(Effect.mapError(requestFailure));
-          }),
+          requests
+            .cancel(
+              { ...input, threadId: input.threadId ?? caller.scope.thread?.threadId },
+              requestScope(caller, "write"),
+            )
+            .pipe(Effect.mapError(requestFailure)),
       ),
     };
   }),

@@ -67,6 +67,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.operatorRequestsListPending]: "operatorRequests",
   [WS_METHODS.operatorRequestsLaunchDesktop]: "operatorRequests",
   [WS_METHODS.operatorRequestsCancel]: "operatorRequests",
+  [WS_METHODS.operatorRequestsGetPreviewUrl]: "operatorRequests",
   [WS_METHODS.sessionAccessList]: "orchestration",
   [WS_METHODS.sessionAccessThreadShares]: "orchestration",
   [WS_METHODS.sessionAccessMutate]: "orchestration",

@@ -8,8 +8,9 @@ import {
   type PreviewSessionSnapshot,
 } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
+import { AsyncResult } from "effect/reactivity";
 
-import { act, fakeTimers, render } from "../../test/render";
+import { act, fakeTimers, render, stubGlobal } from "../../test/render";
 
 const mocks = vi.hoisted(() => ({
   getClientSettings: vi.fn<() => Promise<ClientSettings | null>>(),
@@ -18,9 +19,14 @@ const mocks = vi.hoisted(() => ({
   closeTab: vi.fn<DesktopPreviewBridge["closeTab"]>(),
   registerWebview: vi.fn<DesktopPreviewBridge["registerWebview"]>(),
   getPreviewConfig: vi.fn<DesktopPreviewBridge["getPreviewConfig"]>(),
+  runAtomCommand: vi.fn(),
 }));
 
 vi.mock(import("~/env"), async (original) => ({ ...(await original()), isElectron: true }));
+vi.mock(import("@t3tools/client-runtime/state/runtime"), async (original) => ({
+  ...(await original()),
+  runAtomCommand: mocks.runAtomCommand,
+}));
 
 vi.mock(import("~/state/session"), async (original) => ({
   ...(await original()),
@@ -55,9 +61,14 @@ import {
   __resetClientSettingsPersistenceForTests,
   ensureClientSettingsHydrated,
 } from "~/hooks/useSettings";
-import { reconcilePreviewServerSessions, resetPreviewStateForTests } from "~/previewStateStore";
+import {
+  readThreadPreviewState,
+  reconcilePreviewServerSessions,
+  resetPreviewStateForTests,
+} from "~/previewStateStore";
 import { AppAtomRegistryProvider } from "~/rpc/atomRegistry";
-import { ElectronBrowserHost } from "./ElectronBrowserHost";
+import { ElectronBrowserHost, startElectronBrowserHost } from "./ElectronBrowserHost";
+import { previewRuntimeTabId } from "./previewRuntimeTabId";
 
 const threadRef = scopeThreadRef(
   EnvironmentId.make("host-webview-order"),
@@ -114,6 +125,45 @@ async function renderHost() {
 }
 
 describe("ElectronBrowserHost", () => {
+  it("opens a private child tab without recording its URL", async () => {
+    using _state = setup();
+    const url = "https://example.com/private-child";
+    const parent = { ...snapshot("tab_1", "2026-01-01T00:00:01.000Z"), private: true } as const;
+    const child = {
+      ...snapshot("tab_2", "2026-01-01T00:00:02.000Z"),
+      navStatus: { _tag: "Success", url, title: "Child" },
+      private: true,
+    } satisfies PreviewSessionSnapshot;
+    reconcilePreviewServerSessions(threadRef, {
+      sessions: [parent],
+      serverEpoch: "server-a",
+      revision: 1,
+    });
+    mocks.runAtomCommand.mockReset().mockResolvedValue(AsyncResult.success(child));
+    const onOpenLink = vi.fn<DesktopPreviewBridge["onOpenLink"]>(() => () => {});
+    using _bridge = stubGlobal("desktopBridge", {
+      preview: {
+        onOpenLink,
+        setAnnotationTheme: async () => {},
+        onPointerEvent: () => () => {},
+      },
+    });
+    using _listeners = { [Symbol.dispose]: startElectronBrowserHost() };
+    onOpenLink.mock.calls[0]![0]({
+      tabId: previewRuntimeTabId(threadRef, "server-a", parent.tabId),
+      url,
+      background: true,
+    });
+    await vi.waitFor(() =>
+      expect(readThreadPreviewState(threadRef).sessions[child.tabId]).toEqual(child),
+    );
+    expect(mocks.runAtomCommand).toHaveBeenCalledWith(expect.anything(), expect.anything(), {
+      environmentId: threadRef.environmentId,
+      input: expect.objectContaining({ threadId: threadRef.threadId, url, private: true }),
+    });
+    expect(readThreadPreviewState(threadRef).recentlySeenUrls).not.toContain(url);
+  });
+
   it("never moves a tab's webview when the server reorders tabs by last update", async () => {
     using _state = setup();
     reconcilePreviewServerSessions(threadRef, {

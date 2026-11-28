@@ -16,10 +16,11 @@ import {
   type OperatorRequestLaunchDesktopResult,
   type OperatorRequestListPendingInput,
   type OperatorRequestListPendingResult,
-  type OperatorRequestReceipt,
+  OperatorRequestReceipt,
   type OperatorRequestReceiptMetadata,
   type OperatorRequestResolveInput,
   type OperatorRequestStatusInput,
+  type OrchestrationV2AppThread,
   type OrchestrationV2InternalCommand,
   type ThreadId,
   TurnItemId,
@@ -41,8 +42,13 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeNet from "node:net";
 import * as NodePath from "node:path";
 import { ServerConfig } from "../config.ts";
+import { DispatchModeLimit } from "../orchestration-v2/DispatchModeLimit.ts";
 import { OrchestratorV2 } from "../orchestration-v2/Orchestrator.ts";
-import { ProjectionStoreV2 } from "../orchestration-v2/ProjectionStore.ts";
+import {
+  ProjectionStoreV2,
+  type ProjectionStoreV2Error,
+} from "../orchestration-v2/ProjectionStore.ts";
+import { PrincipalExecution } from "../runner/PrincipalExecution.ts";
 
 type RecordCommand = Extract<OrchestrationV2InternalCommand, { type: "operator_request.record" }>;
 type RequestEffect<A> = Effect.Effect<A, OperatorRequestError>;
@@ -72,6 +78,13 @@ type OperatorRequestService = {
     input: OperatorRequestStatusInput,
     scope?: RequestScope,
   ) => RequestEffect<OperatorRequestRecord>;
+  readonly readPrivateReceipt: (
+    record: OperatorRequestRecord,
+  ) => RequestEffect<OperatorRequestReceipt | undefined>;
+  readonly getPreviewUrl: (
+    input: OperatorRequestStatusInput,
+    scope: RequestScope,
+  ) => RequestEffect<string | null>;
   readonly listPending: (
     input?: OperatorRequestListPendingInput,
     scope?: RequestScope,
@@ -100,12 +113,18 @@ const storeFailure = () =>
 const alreadyTerminal = () => failure("already_terminal", "Operator request is already terminal.");
 const errno = (cause: unknown) => (cause as NodeJS.ErrnoException | undefined)?.code;
 const safeId = (id: string) => /^[A-Za-z0-9._:-]{1,128}$/.test(id) && id !== "." && id !== "..";
-const decodeStandalone = Schema.decodeUnknownSync(
+const standaloneJson = Schema.fromJsonString(
   Schema.Struct({ ...OperatorRequestRecord.fields, ownerPrincipal: Schema.optional(PrincipalId) }),
 );
+const decodeStandalone = Schema.decodeUnknownSync(standaloneJson);
+const encodeStandalone = Schema.encodeSync(standaloneJson);
 const standaloneOwner = (scope?: RequestScope) =>
   scope?.ownerPrincipal === undefined ? DEFAULT_PRINCIPAL_ID : scope.ownerPrincipal;
 const decodeCreate = Schema.decodeUnknownSync(OperatorRequestCreateInput);
+const receiptJson = Schema.fromJsonString(OperatorRequestReceipt);
+const decodeReceipt = Schema.decodeUnknownSync(receiptJson);
+const encodeReceipt = Schema.encodeSync(receiptJson);
+const MAX_PRIVATE_RECEIPT_BYTES = 64 * 1024;
 
 function validPreviewUrl(value: string): boolean {
   if (!/^http:\/\/127\.0\.0\.1:[0-9]{1,5}\//.test(value) || /[\s\\]/.test(value)) return false;
@@ -123,12 +142,12 @@ function validPreviewUrl(value: string): boolean {
   }
 }
 
-async function writePrivateJson(path: string, value: unknown): Promise<void> {
+async function writePrivateFile(path: string, data: string): Promise<void> {
   await NodeFSP.mkdir(NodePath.dirname(path), { recursive: true, mode: 0o700 });
   const directory = await NodeFSP.mkdtemp(NodePath.join(NodePath.dirname(path), ".write-"));
   const temporary = NodePath.join(directory, "record.json");
   try {
-    await NodeFSP.writeFile(temporary, JSON.stringify(value), { flag: "wx", mode: 0o600 });
+    await NodeFSP.writeFile(temporary, data, { flag: "wx", mode: 0o600 });
     await NodeFSP.rename(temporary, path);
   } finally {
     await NodeFSP.rm(directory, { recursive: true, force: true });
@@ -208,13 +227,18 @@ function spawnVagrant(requestId: string): Promise<void> {
 
 export const make = Effect.fn("OperatorRequests.make")(function* (options: {
   readonly stateDir: string;
-  readonly projection: Pick<ProjectionStoreV2["Service"], "listOperatorRequests">;
+  readonly projection: Pick<ProjectionStoreV2["Service"], "listOperatorRequests"> & {
+    readonly getThread: (
+      threadId: ThreadId,
+    ) => Effect.Effect<Pick<OrchestrationV2AppThread, "ownerPrincipal">, ProjectionStoreV2Error>;
+  };
   readonly orchestrator: Pick<OrchestratorV2["Service"], "dispatch"> &
     Partial<Pick<OrchestratorV2["Service"], "streamStoredEventsFrom">>;
   readonly desktop?: OperatorRequestDesktopRuntime;
 }) {
   const { projection, orchestrator, desktop } = options;
   const random = yield* SecureRandom.SecureRandom;
+  const execution = yield* PrincipalExecution;
   const getUid = desktop?.getUid ?? (() => process.getuid?.());
   const storage = NodePath.join(options.stateDir, "operator-requests");
   const recordsDir = NodePath.join(storage, "records");
@@ -222,7 +246,13 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
     string,
     { record: OperatorRequestRecord; ownerPrincipal: PrincipalId }
   >();
-  const waiters = new Map<string, Deferred.Deferred<OperatorRequestRecord>>();
+  const waiters = new Map<
+    string,
+    {
+      result: Deferred.Deferred<OperatorRequestRecord>;
+      fallback?: Effect.Effect<unknown, OperatorRequestError>;
+    }
+  >();
   const locks = yield* KeyedLock.make<string>();
   const creationLock = yield* Semaphore.make(1);
   const io = <A>(action: () => Promise<A>) =>
@@ -237,9 +267,7 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
       files
         .filter((name) => name.endsWith(".json"))
         .map(async (name) =>
-          decodeStandalone(
-            JSON.parse(await NodeFSP.readFile(NodePath.join(recordsDir, name), "utf8")),
-          ),
+          decodeStandalone(await NodeFSP.readFile(NodePath.join(recordsDir, name), "utf8")),
         ),
     );
   })) {
@@ -302,6 +330,8 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
     record: OperatorRequestRecord,
     wake?: RecordCommand["wake"],
     owner?: PrincipalId,
+    wakeOnly?: true,
+    cleanupRejectedReceipt: Effect.Effect<void> = Effect.void,
   ) {
     if (record.threadId !== undefined && record.turnItemId !== undefined) {
       const { sequence } = yield* orchestrator
@@ -314,8 +344,12 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
           turnItemId: record.turnItemId,
           request: record,
           ...(wake === undefined ? {} : { wake }),
+          ...(wakeOnly === undefined ? {} : { wakeOnly }),
         })
-        .pipe(Effect.mapError(storeFailure));
+        .pipe(
+          Effect.onError(() => cleanupRejectedReceipt),
+          Effect.mapError(storeFailure),
+        );
       return {
         record: yield* find({ threadId: record.threadId, turnItemId: record.turnItemId }),
         sequence,
@@ -324,11 +358,11 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
     const ownerPrincipal =
       standalone.get(record.requestId)?.ownerPrincipal ?? owner ?? DEFAULT_PRINCIPAL_ID;
     yield* io(() =>
-      writePrivateJson(NodePath.join(recordsDir, `${record.requestId}.json`), {
-        ...record,
-        ownerPrincipal,
-      }),
-    );
+      writePrivateFile(
+        NodePath.join(recordsDir, `${record.requestId}.json`),
+        encodeStandalone({ ...record, ownerPrincipal }),
+      ),
+    ).pipe(Effect.onError(() => cleanupRejectedReceipt));
     standalone.set(record.requestId, { record, ownerPrincipal });
     return { record, sequence: undefined };
   });
@@ -344,7 +378,7 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
       receipt: { status: "expired", decidedAt, decidedVia: "external" },
     });
     const waiter = waiters.get(record.requestId);
-    if (waiter !== undefined) yield* Deferred.succeed(waiter, saved);
+    if (waiter !== undefined) yield* Deferred.succeed(waiter.result, saved);
     return saved;
   });
 
@@ -367,6 +401,44 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
     (input, scope) => find(input, scope).pipe(Effect.flatMap((record) => refresh(record, scope))),
   );
 
+  const getPreviewUrl: OperatorRequestService["getPreviewUrl"] = Effect.fn(
+    "OperatorRequests.getPreviewUrl",
+  )(function* (input, scope) {
+    const record = yield* status(input, scope);
+    if (isOperatorRequestTerminalStatus(record.status)) return yield* alreadyTerminal();
+    const url = record.surfaces?.previewUrl;
+    return url !== undefined && validPreviewUrl(url) ? url : null;
+  });
+
+  const privateReceiptPath = (requestId: string) =>
+    NodePath.join(storage, "receipts", `${requestId}.json`);
+
+  const readPrivateReceipt: OperatorRequestService["readPrivateReceipt"] = Effect.fn(
+    "OperatorRequests.readPrivateReceipt",
+  )(function* (record) {
+    const metadata = record.receipt;
+    if (!safeId(record.requestId) || metadata === undefined) return undefined;
+    const path = privateReceiptPath(record.requestId);
+    return yield* io(async () => {
+      const file = await NodeFSP.open(path, "r").catch((cause: unknown) => {
+        if (errno(cause) !== "ENOENT") throw cause;
+      });
+      if (file === undefined) return undefined;
+      try {
+        const stat = await file.stat();
+        if (!stat.isFile() || stat.size > MAX_PRIVATE_RECEIPT_BYTES) return undefined;
+        const receipt = decodeReceipt(await file.readFile("utf8"));
+        return receipt.decidedAt === metadata.decidedAt &&
+          receipt.receiptPath === metadata.receiptPath &&
+          receipt.status === metadata.status
+          ? receipt
+          : undefined;
+      } finally {
+        await file.close();
+      }
+    });
+  });
+
   const decide = Effect.fn("OperatorRequests.decide")(function* (
     record: OperatorRequestRecord,
     input: OperatorRequestResolveInput,
@@ -375,8 +447,8 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
       return yield* failure("root_forbidden", "User operator requests cannot run as root.");
     }
     const decidedAt = DateTime.formatIso(yield* DateTime.now);
-    const receiptPath =
-      input.receiptPath ?? NodePath.join(storage, "receipts", `${record.requestId}.json`);
+    const localReceiptPath = privateReceiptPath(record.requestId);
+    const receiptPath = input.receiptPath ?? localReceiptPath;
     // Only bounded, explicitly named metadata enters the journal or RPC results.
     const receipt: OperatorRequestReceiptMetadata = {
       status: input.status,
@@ -395,25 +467,29 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
             })),
           }),
     };
-    if (input.receiptPath === undefined) {
+    const writeLocalReceipt =
+      input.receiptPath === undefined ||
+      input.answers !== undefined ||
+      input.note !== undefined ||
+      input.artifacts !== undefined;
+    if (writeLocalReceipt) {
       const full: OperatorRequestReceipt = {
         ...receipt,
-        ...Object.fromEntries(
-          Object.entries({
-            summary: input.summary,
-            actionId: input.actionId,
-            artifacts: input.artifacts,
-            answers: input.answers,
-            note: input.note,
-          }).filter(([, value]) => value !== undefined),
-        ),
+        ...(input.answers === undefined ? {} : { answers: input.answers }),
+        ...(input.note === undefined ? {} : { note: input.note }),
       };
-      yield* io(() => writePrivateJson(receiptPath, full));
+      const data = yield* Effect.try({
+        try: () => encodeReceipt(full),
+        catch: () => failure("invalid_request", "Private operator receipt must be JSON."),
+      });
+      if (Buffer.byteLength(data) > MAX_PRIVATE_RECEIPT_BYTES)
+        return yield* failure("invalid_request", "Private operator receipt exceeds 64 KiB.");
+      yield* io(() => writePrivateFile(localReceiptPath, data));
     }
     const summary = `Operator request ${record.requestId} was ${input.status}.`;
     const waiter = waiters.get(record.requestId);
     const wake: RecordCommand["wake"] =
-      input.status === "expired" || input.wakeThread === false || waiter !== undefined
+      input.status === "expired" || input.wakeThread === false || record.threadId === undefined
         ? undefined
         : {
             messageId: MessageId.make(`message:operator-request:${record.requestId}`),
@@ -426,16 +502,29 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
           };
     const { record: saved } = yield* persist(
       { ...record, status: input.status, updatedAt: decidedAt, receipt },
-      wake,
+      waiter === undefined ? wake : undefined,
+      undefined,
+      undefined,
+      writeLocalReceipt
+        ? io(() => NodeFSP.rm(localReceiptPath, { force: true })).pipe(Effect.ignore)
+        : Effect.void,
     );
-    if (waiter !== undefined) yield* Deferred.succeed(waiter, saved);
     if (
       saved.receipt?.receiptPath !== receipt.receiptPath ||
       saved.receipt?.decidedAt !== decidedAt
     ) {
-      if (input.receiptPath === undefined)
-        yield* io(() => NodeFSP.rm(receiptPath, { force: true })).pipe(Effect.ignore);
+      if (writeLocalReceipt)
+        yield* io(() => NodeFSP.rm(localReceiptPath, { force: true })).pipe(Effect.ignore);
       return yield* alreadyTerminal();
+    }
+    if (waiter !== undefined) {
+      if (wake !== undefined) {
+        const limit = yield* DispatchModeLimit;
+        waiter.fallback = persist(saved, wake, undefined, true).pipe(
+          Effect.provideService(DispatchModeLimit, limit),
+        );
+      }
+      yield* Deferred.succeed(waiter.result, saved);
     }
     return saved;
   });
@@ -504,6 +593,34 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
                   : { externalId: validated.externalId }),
                 includeTerminal: true,
               };
+              if (validated.externalId !== undefined) {
+                const threadOwner = (threadId: ThreadId) =>
+                  projection.getThread(threadId).pipe(
+                    Effect.map((thread) => thread.ownerPrincipal ?? DEFAULT_PRINCIPAL_ID),
+                    Effect.mapError(storeFailure),
+                  );
+                const conflict =
+                  validated.threadId === undefined
+                    ? owner !== null &&
+                      Option.isSome(
+                        yield* Effect.findFirst(
+                          yield* projection
+                            .listOperatorRequests(lookup)
+                            .pipe(Effect.mapError(storeFailure)),
+                          (item) =>
+                            threadOwner(item.threadId).pipe(
+                              Effect.map((principal) => principal === owner),
+                            ),
+                        ),
+                      )
+                    : matchingStandalone(lookup, yield* threadOwner(validated.threadId)).length !==
+                      0;
+                if (conflict)
+                  return yield* failure(
+                    "invalid_request",
+                    "Operator request identifier is in use.",
+                  );
+              }
               const [existing] =
                 validated.threadId === undefined
                   ? matchingStandalone(lookup, owner)
@@ -542,7 +659,7 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
               const waitPolicy = validated.waitPolicy ?? { mode: "async" };
               const waiter =
                 waitPolicy.mode === "sync"
-                  ? yield* Deferred.make<OperatorRequestRecord>()
+                  ? { result: yield* Deferred.make<OperatorRequestRecord>() }
                   : undefined;
               if (waiter !== undefined) waiters.set(requestId, waiter);
               const saved = yield* persist(
@@ -566,7 +683,7 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
             waiters.delete(requestId);
             return record;
           }
-          const result = Deferred.await(waiter);
+          const result = Deferred.await(waiter.result);
           // A stop/archive closes the card without calling this service; replay from the create receipt.
           const events =
             sequence === undefined || record.threadId === undefined
@@ -599,12 +716,24 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
                     ),
                   ),
                 );
-          return yield* restore(
-            wait.pipe(Effect.timeoutOption(record.waitPolicy.syncTimeoutMs ?? 180_000)),
-          ).pipe(
+          const syncTimeoutMs = record.waitPolicy.syncTimeoutMs ?? 180_000;
+          const timeoutMs =
+            record.expiresAt === undefined
+              ? syncTimeoutMs
+              : Math.min(
+                  syncTimeoutMs,
+                  Math.max(
+                    0,
+                    Date.parse(record.expiresAt) - DateTime.toEpochMillis(yield* DateTime.now),
+                  ),
+                );
+          return yield* restore(wait.pipe(Effect.timeoutOption(timeoutMs))).pipe(
             Effect.flatMap(
               Option.match({
-                onSome: Effect.succeed,
+                onSome: (resolved) => {
+                  waiters.delete(requestId);
+                  return Effect.succeed(resolved);
+                },
                 onNone: () =>
                   locks.withLock(
                     requestId,
@@ -614,7 +743,10 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
                           { requestId, threadId: record.threadId },
                           scope,
                         ).pipe(Effect.flatMap(expire));
-                        if (isOperatorRequestTerminalStatus(current.status)) return current;
+                        if (isOperatorRequestTerminalStatus(current.status)) {
+                          waiters.delete(requestId);
+                          return current;
+                        }
                         if (record.waitPolicy.onTimeout === "cancel") {
                           return yield* decide(current, { status: "cancelled", wakeThread: false });
                         }
@@ -631,7 +763,26 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
                   ),
               }),
             ),
-            Effect.ensuring(Effect.sync(() => waiters.delete(requestId))),
+            Effect.ensuring(
+              locks.withLock(
+                requestId,
+                Effect.suspend(() => {
+                  const abandoned = waiters.get(requestId);
+                  waiters.delete(requestId);
+                  return (
+                    abandoned?.fallback?.pipe(
+                      Effect.catch((error) =>
+                        Effect.logWarning("Could not wake abandoned operator request", {
+                          requestId,
+                          error,
+                        }),
+                      ),
+                      Effect.asVoid,
+                    ) ?? Effect.void
+                  );
+                }),
+              ),
+            ),
           );
         }),
       );
@@ -641,12 +792,25 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
   const launchDesktop: OperatorRequestService["launchDesktop"] = Effect.fn(
     "OperatorRequests.launchDesktop",
   )(function* (input, scope) {
+    const principalMismatch = failure(
+      "desktop_unavailable",
+      "The request's execution principal does not match the local desktop user.",
+    );
+    if (standaloneOwner(scope) !== DEFAULT_PRINCIPAL_ID) return yield* principalMismatch;
     const uid = getUid();
     if (uid === undefined || uid === 0) {
       return yield* failure("root_forbidden", "Desktop actions require a non-root Unix user.");
     }
     const record = yield* status(input, scope);
     if (isOperatorRequestTerminalStatus(record.status)) return yield* alreadyTerminal();
+    if (record.threadId !== undefined) {
+      const runner = yield* execution
+        .runnerFor(record.threadId)
+        .pipe(Effect.mapError(() => principalMismatch));
+      if (runner !== undefined) return yield* principalMismatch;
+    } else if (standalone.get(record.requestId)?.ownerPrincipal !== DEFAULT_PRINCIPAL_ID) {
+      return yield* principalMismatch;
+    }
     const action = record.surfaces?.desktopAction;
     if (action?.kind !== "vagrant" || !safeId(action.requestId)) {
       return yield* failure("invalid_request", "A valid Vagrant desktop action is required.");
@@ -715,6 +879,8 @@ export const make = Effect.fn("OperatorRequests.make")(function* (options: {
   return OperatorRequests.of({
     create,
     status,
+    readPrivateReceipt,
+    getPreviewUrl,
     resolve,
     answer: resolve,
     cancel,

@@ -115,7 +115,7 @@ describe("operator request contract", () => {
     expect(() => decodeReceipt({ ...receipt, decidedAt: "yesterday" })).toThrow();
   });
 
-  it("registers the four RPCs with their protocol payloads", () => {
+  it("registers the operator request RPCs with their protocol payloads", () => {
     const answer = {
       externalId: "ticket",
       status: "submitted",
@@ -134,6 +134,7 @@ describe("operator request contract", () => {
       WS_METHODS.operatorRequestsCancel,
       WS_METHODS.operatorRequestsLaunchDesktop,
       WS_METHODS.operatorRequestsListPending,
+      WS_METHODS.operatorRequestsGetPreviewUrl,
     ]) {
       expect(WsRpcGroup.requests.has(tag)).toBe(true);
     }

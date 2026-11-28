@@ -9094,6 +9094,39 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ) {
         return yield* reject("Turn item belongs to another request.");
       }
+      const wakeThread = () =>
+        wake === undefined ||
+        projection.thread.archivedAt !== null ||
+        projection.thread.deletedAt !== null
+          ? Effect.void
+          : dispatchMessage(
+              {
+                type: "message.dispatch",
+                commandId: command.commandId,
+                threadId,
+                ...wake,
+                attachments: [],
+                dispatchMode: { type: "queue_after_active" },
+                createdBy: "agent",
+                creationSource: "server",
+              },
+              events,
+              effects,
+            );
+      if (command.wakeOnly === true) {
+        if (
+          existing?.type === "operator_request" &&
+          isOperatorRequestTerminalStatus(existing.request.status) &&
+          existing.request.status !== "expired" &&
+          existing.request.status === command.request.status &&
+          existing.request.receipt !== undefined &&
+          existing.request.receipt.decidedAt === command.request.receipt?.decidedAt &&
+          existing.request.receipt.receiptPath === command.request.receipt?.receiptPath &&
+          (existing.runId === null || !(yield* stopReachedRun(command, threadId, existing.runId)))
+        )
+          yield* wakeThread();
+        return;
+      }
       if (
         existing?.type === "operator_request" &&
         isOperatorRequestTerminalStatus(existing.request.status)
@@ -9145,7 +9178,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         occurredAt: now,
         payload: {
           type: "operator_request",
-          request: { ...request, threadId, turnItemId },
+          request: {
+            ...request,
+            threadId,
+            turnItemId,
+            ...(runId === null ? {} : { runId }),
+            ...(nodeId === null ? {} : { nodeId }),
+          },
           id: turnItemId,
           threadId,
           runId,
@@ -9166,28 +9205,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           updatedAt: now,
         },
       });
-      if (
-        terminal &&
-        request.status !== "expired" &&
-        wake !== undefined &&
-        projection.thread.archivedAt === null &&
-        projection.thread.deletedAt === null
-      ) {
-        yield* dispatchMessage(
-          {
-            type: "message.dispatch",
-            commandId: command.commandId,
-            threadId,
-            ...wake,
-            attachments: [],
-            dispatchMode: { type: "queue_after_active" },
-            createdBy: "agent",
-            creationSource: "server",
-          },
-          events,
-          effects,
-        );
-      }
+      if (terminal && request.status !== "expired") yield* wakeThread();
     },
   );
 

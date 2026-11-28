@@ -60,6 +60,8 @@ export async function openUrlInPreview<E>(input: {
   readonly openPreview: OpenPreviewMutation<E>;
   readonly profileId?: PreviewOpenInput["profileId"];
   readonly background?: boolean;
+  readonly private?: true;
+  readonly runtime?: PreviewOpenInput["runtime"];
 }): Promise<AtomCommandResult<void, E | BrowserSettingsReadError>> {
   // Read before any await: a side chat pane that unmounts meanwhile drops its host mapping.
   const threadRef = rightPanelHostRef(input.threadRef);
@@ -69,7 +71,7 @@ export async function openUrlInPreview<E>(input: {
   if (defaults instanceof BrowserSettingsReadError) {
     return AsyncResult.failure(Cause.fail(defaults));
   }
-  const runtime = previewRuntimeFor(threadRef.environmentId);
+  const runtime = input.runtime ?? previewRuntimeFor(threadRef.environmentId);
   const previousActiveTabId = readThreadPreviewState(threadRef).activeTabId;
   // The server changes the active tab, not panel selection; selection changes come from the user.
   const selectedSurface = () =>
@@ -84,10 +86,11 @@ export async function openUrlInPreview<E>(input: {
       viewport: defaults.viewport,
       profileId: input.profileId ?? defaults.profileId,
       ...(runtime === undefined ? {} : { runtime }),
+      ...(input.private ? { private: true } : {}),
     },
   });
   return mapAtomCommandResult(result, (snapshot) => {
-    rememberPreviewUrl(threadRef, input.url);
+    if (!input.private) rememberPreviewUrl(threadRef, input.url);
     if (input.background) {
       updatePreviewServerSnapshot(threadRef, snapshot);
       // Restore focus unless the user picked a tab while opening this one.

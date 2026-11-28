@@ -43,5 +43,9 @@ export function createOperatorRequestEnvironmentAtoms<R, E>(
       label: "environment-data:operator-requests:launch-desktop",
       tag: WS_METHODS.operatorRequestsLaunchDesktop,
     }),
+    getPreviewUrl: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:operator-requests:get-preview-url",
+      tag: WS_METHODS.operatorRequestsGetPreviewUrl,
+    }),
   };
 }

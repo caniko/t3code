@@ -43,7 +43,11 @@ export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
   }
   if (item.type === "operator_request") {
     return (
-      <OperatorRequestCard environmentId={ctx.activeThreadEnvironmentId} request={item.request} />
+      <OperatorRequestCard
+        environmentId={ctx.activeThreadEnvironmentId}
+        request={item.request}
+        local={visibility === "local"}
+      />
     );
   }
   return (

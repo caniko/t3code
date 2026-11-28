@@ -210,7 +210,7 @@ it("readThread preserves caller access errors and prefers activity-run status ov
   }).pipe(Effect.provide(layer), Effect.runPromise);
 });
 
-it("readThread pages cut-off text without splitting an emoji across pages", async () => {
+it("readThread pages activity text without splitting emojis or exposing operator payloads", async () => {
   const text = "a😀bc";
   const itemId = TurnItemId.make("turn-item-mcp-reasoning");
   const projection = {
@@ -242,17 +242,67 @@ it("readThread pages cut-off text without splitting an emoji across pages", asyn
       updatedAt: now,
     },
   };
+  const readPayload = {
+    toolName: "Read",
+    input: { path: "docs/t3_operator_request.md" },
+    output: "file contents",
+  };
+  const readTitle = "Read docs/t3_operator_request.md";
+  const history = [
+    {
+      ...row,
+      sourceItemId: TurnItemId.make("turn-item-operator-request"),
+      item: {
+        ...row.item,
+        type: "operator_request",
+        title: "Review output",
+        request: {
+          requestId: "request-1",
+          kind: "custom",
+          privilege: "user",
+          title: "Review output",
+          status: "pending",
+          waitPolicy: { mode: "async" },
+          createdAt: DateTime.formatIso(now),
+          updatedAt: DateTime.formatIso(now),
+          reason: "Review the report.",
+          surfaces: { previewUrl: "https://example.test/?token=private-preview" },
+        },
+      },
+    },
+    {
+      ...row,
+      position: 1,
+      sourceItemId: TurnItemId.make("turn-item-operator-tool"),
+      item: {
+        ...row.item,
+        type: "dynamic_tool",
+        title: null,
+        toolName: "t3_operator_request_status_t3-code",
+        input: { previewUrl: "private-preview" },
+        output: { privateReceipt: { note: "private-decision" } },
+      },
+    },
+    {
+      ...row,
+      position: 2,
+      sourceItemId: TurnItemId.make("turn-item-read-docs"),
+      item: { ...row.item, type: "dynamic_tool", title: readTitle, ...readPayload },
+    },
+  ];
 
   const layer = layerOrchestratorService.pipe(
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
-          getTimelinePage: () =>
-            Effect.succeed({
-              items: [row] as unknown as OrchestrationV2ThreadProjection["visibleTurnItems"],
-              totalItems: 1,
+          getTimelinePage: (_threadId, options) => {
+            const items = options.itemId === undefined ? history : [row];
+            return Effect.succeed({
+              items: items as unknown as OrchestrationV2ThreadProjection["visibleTurnItems"],
+              totalItems: items.length,
               hasMore: false,
-            }),
+            });
+          },
           getThreadRecords: () => Effect.succeed(projection),
           getProjectThreadRecords: () => Effect.succeed(projection),
           getThreadShell: () =>
@@ -299,6 +349,23 @@ it("readThread pages cut-off text without splitting an emoji across pages", asyn
         });
       }
     }
+    const activity = yield* service.readThread(makeScope(), {
+      threadId: parentThreadId,
+      view: "activity",
+    });
+    expect(activity.items).toMatchObject([
+      { type: "operator_request", text: "Review the report." },
+      { type: "dynamic_tool", title: null },
+      { type: "dynamic_tool", title: readTitle },
+    ]);
+    expect(JSON.parse(activity.items[1]?.text ?? "null")).toEqual({
+      toolName: "t3_operator_request_status",
+      input: null,
+    });
+    expect(JSON.parse(activity.items[2]?.text ?? "null")).toEqual(readPayload);
+    expect(JSON.stringify(activity)).not.toMatch(
+      /previewUrl|privateReceipt|private-(preview|decision)/,
+    );
   }).pipe(Effect.provide(layer), Effect.runPromise);
 });
 

@@ -16,6 +16,7 @@ import {
   OperatorRequestLaunchDesktopResult,
   OperatorRequestListPendingInput,
   OperatorRequestListPendingResult,
+  OperatorRequestStatusInput,
 } from "./operatorRequest.ts";
 import {
   McpAppCallToolInput,
@@ -534,6 +535,7 @@ export const WS_METHODS = {
   operatorRequestsListPending: "operatorRequests.listPending",
   operatorRequestsLaunchDesktop: "operatorRequests.launchDesktop",
   operatorRequestsCancel: "operatorRequests.cancel",
+  operatorRequestsGetPreviewUrl: "operatorRequests.getPreviewUrl",
   sessionAccessList: "sessionAccess.list",
   sessionAccessThreadShares: "sessionAccess.threadShares",
   sessionAccessMutate: "sessionAccess.mutate",
@@ -867,6 +869,11 @@ export const WsOperatorRequestsLaunchDesktopRpc = Rpc.make(
 export const WsOperatorRequestsCancelRpc = Rpc.make(WS_METHODS.operatorRequestsCancel, {
   payload: OperatorRequestCancelInput,
   success: OperatorRequestCancelResult,
+  error: OperatorRequestRpcError,
+});
+const WsOperatorRequestsGetPreviewUrlRpc = Rpc.make(WS_METHODS.operatorRequestsGetPreviewUrl, {
+  payload: OperatorRequestStatusInput,
+  success: Schema.NullOr(Schema.String),
   error: OperatorRequestRpcError,
 });
 
@@ -2092,6 +2099,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsOperatorRequestsListPendingRpc,
   WsOperatorRequestsLaunchDesktopRpc,
   WsOperatorRequestsCancelRpc,
+  WsOperatorRequestsGetPreviewUrlRpc,
   WsSessionAccessListRpc,
   WsSessionAccessThreadSharesRpc,
   WsSessionAccessMutateRpc,

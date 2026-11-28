@@ -6549,6 +6549,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       sql
         .withTransaction(
           Effect.gen(function* () {
+            const now = DateTime.formatIso(yield* DateTime.now);
             const rows = yield* sql<SettlementThreadRow>`
             SELECT t.thread_id, t.payload_json,
               r.run_id AS latest_run_id,
@@ -6598,8 +6599,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               AND NOT EXISTS (
                 SELECT 1 FROM orchestration_v2_projection_turn_items item
                 WHERE item.thread_id = t.thread_id AND item.type = 'operator_request'
-                  AND item.status IN ('pending', 'running', 'waiting')
                   AND item.status = 'waiting'
+                  AND COALESCE(
+                    julianday(json_extract(item.payload_json, '$.request.expiresAt')) >
+                      julianday(${now}), 1
+                  )
               )
               AND NOT EXISTS (
                 SELECT 1 FROM orchestration_v2_projection_turn_items link

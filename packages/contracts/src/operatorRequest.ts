@@ -197,6 +197,12 @@ export type OperatorRequestCreateInput = typeof OperatorRequestCreateInput.Type;
 export const OperatorRequestRecord = Schema.Struct({
   ...Target,
   ...Description,
+  surfaces: Schema.optional(
+    OperatorRequestSurfaces.mapFields((fields) => ({
+      ...fields,
+      previewAvailable: Schema.optional(Schema.Literal(true)),
+    })),
+  ),
   requestId: TrimmedNonEmptyString,
   waitPolicy: OperatorRequestWaitPolicy,
   status: OperatorRequestStatus,

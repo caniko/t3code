@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   answer: vi.fn(),
   launch: vi.fn(),
   preview: vi.fn(),
+  getPreviewUrl: vi.fn(),
+  supportsServerBrowser: vi.fn(),
   openBrowser: vi.fn(),
 }));
 
@@ -35,11 +37,12 @@ vi.mock("~/state/operatorRequests", async () => {
       answer: { label: "answer", permissionAtom },
       launchDesktop: { label: "launch", permissionAtom },
       cancel: { label: "cancel", permissionAtom },
+      getPreviewUrl: { label: "getPreviewUrl", permissionAtom },
     },
   };
 });
 vi.mock("~/state/use-atom-command", () => ({
-  useAtomCommand: ({ label }: { label: "answer" | "launch" }) => mocks[label],
+  useAtomCommand: ({ label }: { label: "answer" | "launch" | "getPreviewUrl" }) => mocks[label],
 }));
 vi.mock("~/state/primaryEnvironment", async () => {
   const { Atom } = await import("effect/reactivity");
@@ -49,7 +52,13 @@ vi.mock("~/state/preview", async () => {
   const { Atom } = await import("effect/reactivity");
   return { previewEnvironment: { open: { permissionAtom: () => Atom.make(true) } } };
 });
-vi.mock("~/browser/previewRuntime", () => ({ previewRuntimeFor: () => "server" }));
+vi.mock("~/browser/previewRuntime", () => ({
+  previewRuntimeFor: (id: EnvironmentId) => (id === environmentId ? "server" : undefined),
+}));
+vi.mock("~/state/entities", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/state/entities")>()),
+  readEnvironmentSupportsServerBrowser: mocks.supportsServerBrowser,
+}));
 vi.mock("../preview/openPreviewSession", () => ({ openPreviewSession: mocks.preview }));
 vi.mock("~/rightPanelStore", () => ({
   useRightPanelStore: { getState: () => ({ openBrowser: mocks.openBrowser }) },
@@ -60,6 +69,8 @@ function setup() {
   mocks.answer.mockResolvedValue(AsyncResult.success({ ...request, status: "submitted" }));
   mocks.launch.mockResolvedValue(AsyncResult.success({ ok: true }));
   mocks.preview.mockResolvedValue(AsyncResult.success({ tabId: "preview-tab" }));
+  mocks.getPreviewUrl.mockResolvedValue(AsyncResult.success(null));
+  mocks.supportsServerBrowser.mockReturnValue(true);
 }
 
 it("validates required inputs and submits typed defaults and a freeform note", async () => {
@@ -187,6 +198,7 @@ it("allows decline without completing required fields", async () => {
 it("opens the thread preview and copies the CLI command without offering remote desktop launch", async () => {
   setup();
   const url = "http://127.0.0.1:4321/review?token=test";
+  mocks.getPreviewUrl.mockResolvedValue(AsyncResult.success(url));
   const writeText = vi.fn().mockResolvedValue(undefined);
   using _copy = vi.spyOn(navigator.clipboard, "writeText").mockImplementation(writeText);
   await using screen = await render(
@@ -197,7 +209,7 @@ it("opens the thread preview and copies the CLI command without offering remote 
         kind: "agenix",
         privilege: "fido2-user",
         surfaces: {
-          previewUrl: url,
+          previewAvailable: true,
           desktopAction: { kind: "vagrant", requestId: "desktop" },
           cliCommand: "example attend",
         },
@@ -208,14 +220,53 @@ it("opens the thread preview and copies the CLI command without offering remote 
   await expect
     .element(screen.getByRole("button", { name: "Open in Vagrant Desktop" }))
     .not.toBeInTheDocument();
+  expect(mocks.getPreviewUrl).not.toHaveBeenCalled();
   await screen.getByRole("button", { name: "Open Interactive Preview" }).click();
   await vi.waitFor(() =>
     expect(mocks.openBrowser).toHaveBeenCalledWith({ environmentId, threadId }, "preview-tab"),
   );
   expect(mocks.preview).toHaveBeenCalledWith(expect.objectContaining({ url }));
+  expect(mocks.getPreviewUrl).toHaveBeenCalledWith({
+    environmentId,
+    input: { requestId: request.requestId, threadId },
+  });
   await screen.getByRole("button", { name: "Copy", exact: true }).click();
   await expect.element(screen.getByText("Copied", { exact: true })).toBeInTheDocument();
   expect(writeText).toHaveBeenCalledWith("example attend");
+});
+
+it("uses the linked environment's server browser for its loopback preview", async () => {
+  setup();
+  using _desktop = stubGlobal("desktopBridge", {});
+  const remote = EnvironmentId.make("remote");
+  const url = "http://127.0.0.1:4321/review?token=test";
+  mocks.getPreviewUrl.mockResolvedValue(AsyncResult.success(url));
+  mocks.supportsServerBrowser.mockReturnValue(false);
+  await using screen = await render(
+    <OperatorRequestCard
+      environmentId={remote}
+      request={{ ...request, surfaces: { previewAvailable: true } }}
+    />,
+  );
+  const open = screen.getByRole("button", { name: "Open Interactive Preview" });
+  await open.click();
+  await expect
+    .element(
+      screen.getByText("This environment has no server browser for its interactive preview."),
+    )
+    .toBeInTheDocument();
+  expect(mocks.getPreviewUrl).not.toHaveBeenCalled();
+  mocks.supportsServerBrowser.mockReturnValue(true);
+  await open.click();
+  await vi.waitFor(() =>
+    expect(mocks.preview).toHaveBeenCalledWith(
+      expect.objectContaining({
+        url,
+        runtime: "server",
+        threadRef: { environmentId: remote, threadId },
+      }),
+    ),
+  );
 });
 
 it("offers desktop launch only for the local environment and shows the result", async () => {
@@ -237,6 +288,28 @@ it("offers desktop launch only for the local environment and shows the result", 
   await expect
     .element(screen.getByRole("button", { name: "Open in Vagrant Desktop" }))
     .not.toBeInTheDocument();
+});
+
+it("renders inherited fork requests without action controls even when permitted", async () => {
+  setup();
+  using _desktop = stubGlobal("desktopBridge", {});
+  await using screen = await render(
+    <OperatorRequestCard
+      local={false}
+      allowCancel
+      environmentId={environmentId}
+      request={{
+        ...request,
+        surfaces: {
+          inlineForm: { allowFreeformNote: true },
+          previewAvailable: true,
+          desktopAction: { kind: "vagrant", requestId: "desktop" },
+        },
+      }}
+    />,
+  );
+  await expect.element(screen.getByText(request.title)).toBeInTheDocument();
+  await expect.element(screen.getByRole("button")).not.toBeInTheDocument();
 });
 
 it("shows the terminal receipt without editable controls", async () => {

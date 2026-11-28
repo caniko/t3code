@@ -20,6 +20,7 @@ import { useState, type ReactNode } from "react";
 import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
 import { previewRuntimeFor } from "~/browser/previewRuntime";
 import { useRightPanelStore } from "~/rightPanelStore";
+import { readEnvironmentSupportsServerBrowser } from "~/state/entities";
 import { operatorRequestEnvironment } from "~/state/operatorRequests";
 import { previewEnvironment } from "~/state/preview";
 import { primaryEnvironmentIdAtom } from "~/state/primaryEnvironment";
@@ -214,6 +215,7 @@ interface CardProps {
   readonly onPreviewOpened?: (threadRef: ScopedThreadRef) => Promise<void>;
   readonly onInboxPreviewOpened?: (preview: { threadRef: ScopedThreadRef; tabId: string }) => void;
   readonly allowCancel?: boolean;
+  readonly local?: boolean;
 }
 
 export function OperatorRequestCard(props: CardProps) {
@@ -227,6 +229,7 @@ function RequestCard({
   onPreviewOpened,
   onInboxPreviewOpened,
   allowCancel,
+  local = true,
 }: CardProps) {
   const inlineForm = request.surfaces?.inlineForm;
   const [answers, setAnswers] = useState<Record<string, unknown>>(() =>
@@ -245,10 +248,16 @@ function RequestCard({
     operatorRequestEnvironment.launchDesktop.permissionAtom(environmentId),
   );
   const canPreview = useAtomValue(previewEnvironment.open.permissionAtom(environmentId));
+  const canGetPreviewUrl = useAtomValue(
+    operatorRequestEnvironment.getPreviewUrl.permissionAtom(environmentId),
+  );
   const answer = useAtomCommand(operatorRequestEnvironment.answer, { reportFailure: false });
   const cancel = useAtomCommand(operatorRequestEnvironment.cancel, { reportFailure: false });
   const launch = useAtomCommand(operatorRequestEnvironment.launchDesktop, { reportFailure: false });
   const open = useAtomCommand(previewEnvironment.open, { reportFailure: false });
+  const getPreviewUrl = useAtomCommand(operatorRequestEnvironment.getPreviewUrl, {
+    reportFailure: false,
+  });
   const displayed =
     !isOperatorRequestTerminalStatus(request.status) && resolved ? resolved : request;
   const terminal = isOperatorRequestTerminalStatus(displayed.status);
@@ -317,7 +326,7 @@ function RequestCard({
       </header>
       {terminal ? (
         displayed.receipt && <Receipt receipt={displayed.receipt} />
-      ) : (
+      ) : local ? (
         <>
           {inlineForm && (
             <form
@@ -409,25 +418,40 @@ function RequestCard({
             </form>
           )}
           <div className="flex flex-wrap items-center gap-2 empty:hidden">
-            {surfaces?.previewUrl && (
+            {surfaces?.previewAvailable && (
               <Button
                 type="button"
                 size="sm"
                 variant="outline"
-                disabled={!canPreview || (!threadId && !onInboxPreviewOpened) || busy}
+                disabled={
+                  !canPreview || !canGetPreviewUrl || (!threadId && !onInboxPreviewOpened) || busy
+                }
                 onClick={() => {
-                  const { previewUrl } = surfaces;
-                  if (!previewUrl || (!threadId && !onInboxPreviewOpened)) return;
+                  if (!threadId && !onInboxPreviewOpened) return;
                   const threadRef = scopeThreadRef(environmentId, threadId ?? inboxPreviewThreadId);
                   void run(async () => {
+                    const remote = environmentId !== primaryEnvironmentId;
+                    if (remote && !readEnvironmentSupportsServerBrowser(environmentId)) {
+                      throw new Error(
+                        "This environment has no server browser for its interactive preview.",
+                      );
+                    }
+                    const preview = await getPreviewUrl({ environmentId, input: target });
+                    if (preview._tag === "Failure") throw squashAtomCommandFailure(preview);
+                    const previewUrl = preview.value;
+                    if (previewUrl === null)
+                      throw new Error("The interactive preview is no longer available.");
+                    const runtime = remote ? "server" : previewRuntimeFor(environmentId);
                     const url =
-                      previewRuntimeFor(environmentId) === "server"
+                      runtime === "server"
                         ? previewUrl
                         : resolveDiscoveredServerUrl(environmentId, previewUrl);
                     const result = await openPreviewSession({
                       openPreview: open,
                       threadRef,
                       url,
+                      private: true,
+                      ...(runtime === undefined ? {} : { runtime }),
                       // Request URLs carry an attendance token, not a page to reopen later.
                       profileId: INCOGNITO_BROWSER_PROFILE_ID,
                     });
@@ -485,7 +509,7 @@ function RequestCard({
               </Button>
             )}
           </div>
-          {surfaces?.previewUrl && !threadId && !onInboxPreviewOpened && (
+          {surfaces?.previewAvailable && !threadId && !onInboxPreviewOpened && (
             <p className="text-xs text-muted-foreground">The preview needs a linked thread.</p>
           )}
           {cliCommand && (
@@ -521,7 +545,7 @@ function RequestCard({
             </p>
           )}
         </>
-      )}
+      ) : null}
     </article>
   );
 }

@@ -148,8 +148,25 @@ export const decidesOperatorRequest = <P, A, E, R>(
             message: "Deciding an operator request requires a writable operator credential.",
           }),
         )
-      : handle(params, caller),
+      : withDispatchModeLimit(caller, handle(params, caller)),
   );
+
+const withDispatchModeLimit = Effect.fn("mcp.withDispatchModeLimit")(function* <A, E, R>(
+  caller: Caller,
+  effect: Effect.Effect<A, E, R>,
+) {
+  const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
+  return yield* effect.pipe(
+    Effect.provideService(DispatchModeLimit, { ...caller.limits, refused }),
+    Effect.catch((error) =>
+      Effect.flatMap(Ref.get(refused), (refusal) =>
+        Effect.fail<E | OrchestratorMcpFailure>(
+          refusal === undefined ? error : escalationDenied(refusal),
+        ),
+      ),
+    ),
+  );
+});
 
 export const readsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
   declare((params: P) => requireThreadCaller.pipe(Effect.flatMap(() => handle(params))), undefined);
@@ -225,17 +242,7 @@ export const writesThreads = <P, A, E, R>(
           }
         }
         // Modes can rise after this check; the orchestrator rechecks under lock and records refusal before handlers wrap errors.
-        const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
-        return yield* handle(params).pipe(
-          Effect.provideService(DispatchModeLimit, { ...caller.limits, refused }),
-          Effect.catch((error) =>
-            Effect.flatMap(Ref.get(refused), (refusal) =>
-              Effect.fail<E | OrchestratorMcpFailure>(
-                refusal === undefined ? error : escalationDenied(refusal),
-              ),
-            ),
-          ),
-        );
+        return yield* withDispatchModeLimit(caller, handle(params));
       }),
     () => writingCaller,
   );

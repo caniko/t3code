@@ -3597,6 +3597,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
     threadId: ThreadId,
     turnItemId: TurnItemId,
     request: OrchestrationV2OperatorRequestFields.request,
+    wakeOnly: Schema.optional(Schema.Literal(true)),
     wake: Schema.optional(
       Schema.Struct({
         messageId: MessageId,

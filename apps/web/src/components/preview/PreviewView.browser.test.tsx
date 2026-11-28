@@ -32,6 +32,8 @@ const mocks = vi.hoisted(() => ({
   showEmptyState: false,
   loading: false,
   nativeServerTab: false,
+  privateTab: false,
+  moveTarget: null as "desktop" | "server" | null,
   serverEpoch: null as string | null,
   servers: [] as PreviewableServer[],
   recordingTabIds: new Set<string>(),
@@ -116,6 +118,7 @@ vi.mock(import("~/previewStateStore"), async (original) => ({
             threadId: "thread-1",
             tabId: "tab-1",
             runtime: mocks.nativeServerTab ? "server" : "desktop",
+            ...(mocks.privateTab ? { private: true } : {}),
             navStatus: { _tag: "Success", url: "http://example.com/", title: "Example" },
             canGoBack: false,
             canGoForward: false,
@@ -146,6 +149,7 @@ vi.mock(import("./usePreviewSession"), async (original) => ({
 
 vi.mock(import("~/browser/previewRuntime"), async (original) => ({
   ...(await original()),
+  alternatePreviewRuntime: () => mocks.moveTarget,
   useRendersServerTabNatively: () => mocks.nativeServerTab,
 }));
 
@@ -202,6 +206,8 @@ function setup() {
   mocks.showEmptyState = false;
   mocks.loading = false;
   mocks.nativeServerTab = false;
+  mocks.privateTab = false;
+  mocks.moveTarget = null;
   mocks.serverEpoch = null;
   mocks.servers = [];
   mocks.recordingTabIds = new Set();
@@ -215,6 +221,20 @@ function setup() {
 }
 
 describe("PreviewView", () => {
+  it.each([false, true])(
+    "only offers runtime moves for public tabs (private: %s)",
+    async (privateTab) => {
+      setup();
+      mocks.privateTab = privateTab;
+      mocks.moveTarget = "server";
+      await using screen = await render(view());
+      await screen.getByRole("button", { name: "Preview menu" }).click();
+      const move = page.getByRole("menuitem", { name: "Open in WSL's browser" });
+      if (privateTab) await expect.element(move).not.toBeInTheDocument();
+      else await expect.element(move).toBeInTheDocument();
+    },
+  );
+
   it.each(["mailto:alice@example.com", "http://"])(
     "reports rejected address %s without navigating or recording it",
     async (address) => {

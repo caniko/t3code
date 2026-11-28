@@ -22,6 +22,7 @@ import * as Socket from "effect/socket/Socket";
 
 import { authenticateMediaRequest } from "../auth/http.ts";
 import { assetResponseHeaders } from "../http.ts";
+import * as PreviewManager from "./Manager.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
 import { requestUrl } from "../requestUrl.ts";
@@ -52,17 +53,35 @@ const parseMessage = (chunk: Uint8Array | string): unknown => {
 };
 
 // Request middleware owns tracing, including long-lived WebSocket sessions.
-const makeHandler = Effect.fnUntraced(function* (browser: ServerBrowser.ServerBrowser["Service"]) {
+const makeHandler = Effect.fnUntraced(function* (
+  browser: ServerBrowser.ServerBrowser["Service"],
+  manager: PreviewManager.PreviewManager["Service"],
+) {
   const request = yield* HttpServerRequest.HttpServerRequest;
   const url = requestUrl(request);
   if (Option.isNone(url)) return HttpServerResponse.text("Bad Request", { status: 400 });
+  const params = url.value.searchParams;
+  const threadId = params.get("threadId") ?? "";
+  const tabId = params.get("tabId") ?? "";
   if (url.value.pathname === `${PREVIEW_STREAM_ROUTE_PREFIX}/download`) {
-    return yield* serveDownload(browser, url.value.searchParams);
+    const session = yield* authenticateMediaRequest(AuthOrchestrationReadScope);
+    if (
+      (yield* manager.canView(threadId, tabId, PreviewManager.previewOwner(session))) !== "allowed"
+    ) {
+      return HttpServerResponse.text("Not Found", { status: 404 });
+    }
+    return yield* serveDownload(browser, params);
   }
   if (url.value.pathname === `${PREVIEW_STREAM_ROUTE_PREFIX}/upload`) {
-    return request.method === "POST"
-      ? yield* receiveUpload(browser, url.value.searchParams)
-      : HttpServerResponse.text("Method Not Allowed", { status: 405 });
+    if (request.method !== "POST") {
+      return HttpServerResponse.text("Method Not Allowed", { status: 405 });
+    }
+    const session = yield* authenticateMediaRequest(AuthPreviewOperateScope);
+    const access = manager.canView(threadId, tabId, PreviewManager.previewOwner(session));
+    if ((yield* access) !== "allowed") {
+      return HttpServerResponse.text("Not Found", { status: 404 });
+    }
+    return yield* receiveUpload(browser, params, access);
   }
   if (
     url.value.pathname !== `${PREVIEW_STREAM_ROUTE_PREFIX}/ws` ||
@@ -71,37 +90,42 @@ const makeHandler = Effect.fnUntraced(function* (browser: ServerBrowser.ServerBr
     return HttpServerResponse.text("Not Found", { status: 404 });
   }
   const session = yield* authenticateMediaRequest(AuthOrchestrationReadScope);
-  const params = url.value.searchParams;
   const canOperate =
     session.scopes.includes(AuthPreviewOperateScope) && params.get("interactive") !== "false";
-  const threadId = params.get("threadId") ?? "";
-  const tabId = params.get("tabId") ?? "";
   if (threadId.length === 0 || tabId.length === 0) {
     return HttpServerResponse.text("Not Found", { status: 404 });
   }
+  const access = yield* manager.canView(threadId, tabId, PreviewManager.previewOwner(session));
+  if (access === "denied") return HttpServerResponse.text("Not Found", { status: 404 });
   return yield* Effect.scoped(
     Effect.gen(function* () {
-      const attached = yield* browser
-        .attachViewer({
-          threadId,
-          tabId,
-          canOperate,
-          maxWidth: intParam(params, "maxWidth", 1280, 7680),
-          maxHeight: intParam(params, "maxHeight", 800, 4320),
-          quality: intParam(params, "quality", DEFAULT_QUALITY, 100),
-        })
-        .pipe(
-          Effect.map((viewer) => ({ _tag: "attached" as const, viewer })),
-          Effect.catchTags({
-            ServerBrowserTabNotFoundError: () => Effect.succeed({ _tag: "gone" as const }),
-            ServerBrowserLaunchError: (error) => {
-              const setup = hostSetup(error.cause);
-              return setup === undefined
-                ? Effect.fail(error)
-                : Effect.succeed({ _tag: "hostSetup" as const, reason: encodeHostSetup(setup) });
-            },
-          }),
-        );
+      const attached =
+        access === "missing"
+          ? { _tag: "gone" as const }
+          : yield* browser
+              .attachViewer({
+                threadId,
+                tabId,
+                canOperate,
+                maxWidth: intParam(params, "maxWidth", 1280, 7680),
+                maxHeight: intParam(params, "maxHeight", 800, 4320),
+                quality: intParam(params, "quality", DEFAULT_QUALITY, 100),
+              })
+              .pipe(
+                Effect.map((viewer) => ({ _tag: "attached" as const, viewer })),
+                Effect.catchTags({
+                  ServerBrowserTabNotFoundError: () => Effect.succeed({ _tag: "gone" as const }),
+                  ServerBrowserLaunchError: (error) => {
+                    const setup = hostSetup(error.cause);
+                    return setup === undefined
+                      ? Effect.fail(error)
+                      : Effect.succeed({
+                          _tag: "hostSetup" as const,
+                          reason: encodeHostSetup(setup),
+                        });
+                  },
+                }),
+              );
       const incoming = NodeHttpServerRequest.toIncomingMessage(request);
       // JPEGs are already compressed. Disabling deflate also keeps all
       // pending writes in the socket buffer we bound below, not a zlib queue.
@@ -226,7 +250,6 @@ const serveDownload = Effect.fnUntraced(function* (
   browser: ServerBrowser.ServerBrowser["Service"],
   params: URLSearchParams,
 ) {
-  yield* authenticateMediaRequest(AuthOrchestrationReadScope);
   const download = yield* browser.openDownload({
     threadId: params.get("threadId") ?? "",
     tabId: params.get("tabId") ?? "",
@@ -246,8 +269,11 @@ const UPLOAD_MAX_FILES = 20;
 
 // The request span already covers this upload route.
 const receiveUpload = Effect.fnUntraced(
-  function* (browser: ServerBrowser.ServerBrowser["Service"], params: URLSearchParams) {
-    yield* authenticateMediaRequest(AuthPreviewOperateScope);
+  function* (
+    browser: ServerBrowser.ServerBrowser["Service"],
+    params: URLSearchParams,
+    access: ReturnType<PreviewManager.PreviewManager["Service"]["canView"]>,
+  ) {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const fs = yield* FileSystem.FileSystem;
     const parts = yield* request.multipart.pipe(
@@ -272,6 +298,9 @@ const receiveUpload = Effect.fnUntraced(
           })),
         ),
     );
+    if ((yield* access) !== "allowed") {
+      return HttpServerResponse.text("Not Found", { status: 404 });
+    }
     const answered = yield* browser.answerFileChooser({
       threadId: params.get("threadId") ?? "",
       tabId: params.get("tabId") ?? "",
@@ -282,16 +311,17 @@ const receiveUpload = Effect.fnUntraced(
       ? HttpServerResponse.empty({ status: 204 })
       : HttpServerResponse.text("The page's file picker is no longer open.", { status: 409 });
   },
-  (effect, _browser, _params) => effect.pipe(Effect.scoped),
+  (effect) => effect.pipe(Effect.scoped),
 );
 
 export const routeLayer = HttpRouter.use((router) =>
   Effect.gen(function* () {
     const browser = yield* ServerBrowser.ServerBrowser;
+    const manager = yield* PreviewManager.PreviewManager;
     const platform = yield* Effect.context<
       HttpPlatform.HttpPlatform | FileSystem.FileSystem | Path.Path
     >();
-    const handler = makeHandler(browser).pipe(Effect.provideContext(platform));
+    const handler = makeHandler(browser, manager).pipe(Effect.provideContext(platform));
     yield* router.add("GET", `${PREVIEW_STREAM_ROUTE_PREFIX}/*`, handler);
     yield* router.add("POST", `${PREVIEW_STREAM_ROUTE_PREFIX}/upload`, handler);
   }),

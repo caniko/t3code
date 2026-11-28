@@ -75,6 +75,13 @@ const thread = Schema.decodeSync(OrchestrationV2AppThread)({
   lastVisitedAt: null,
   deletedAt: null,
 });
+const readDocs = {
+  type: "dynamic_tool",
+  title: "Read docs/t3_operator_request.md",
+  toolName: "Read",
+  input: { path: "docs/t3_operator_request.md" },
+  output: "file contents",
+};
 const items = Schema.decodeUnknownSync(Schema.Array(OrchestrationV2TurnItem))(
   Array.from({ length: 200 }, (_, position) => ({
     id: `item-${position}`,
@@ -86,11 +93,39 @@ const items = Schema.decodeUnknownSync(Schema.Array(OrchestrationV2TurnItem))(
     nativeItemRef: null,
     parentItemId: null,
     ordinal: position,
-    type: "command_execution",
     status: "completed",
-    title: "Read notes",
-    input: "cat notes.md",
-    output: position === 0 ? output : "Done",
+    ...(position === 198
+      ? {
+          type: "operator_request",
+          title: "Review output",
+          request: {
+            requestId: "request-1",
+            kind: "custom",
+            privilege: "user",
+            title: "Review output",
+            status: "pending",
+            waitPolicy: { mode: "async" },
+            createdAt: DateTime.formatIso(now),
+            updatedAt: DateTime.formatIso(now),
+            surfaces: { previewUrl: "https://example.test/?token=private-preview" },
+          },
+        }
+      : position === 199
+        ? {
+            type: "dynamic_tool",
+            title: null,
+            toolName: "t3_operator_request_status_t3-code",
+            input: { requestId: "private-request-id" },
+            output: { privateReceipt: { note: "private-decision" } },
+          }
+        : position === 197
+          ? readDocs
+          : {
+              type: "command_execution",
+              title: "Read notes",
+              input: "cat notes.md",
+              output: position === 0 ? output : "Done",
+            }),
     startedAt: now,
     completedAt: now,
     updatedAt: now,
@@ -152,7 +187,9 @@ const serveOrchestrationHttp = (allowed: () => boolean, subject = "test") =>
       ),
       Layer.provide(Layer.succeedContext(services)),
       Layer.provide(Layer.mock(ProjectEnrichmentService)({})),
-      Layer.provide(Layer.mock(SessionAccess.SessionAccess)({ grantsFor: () => Effect.succeed(new Map()) })),
+      Layer.provide(
+        Layer.mock(SessionAccess.SessionAccess)({ grantsFor: () => Effect.succeed(new Map()) }),
+      ),
       Layer.provide(HttpPlatform.layer),
       Layer.provide(Etag.layerWeak),
       Layer.provide(NodeServices.layer),
@@ -192,11 +229,25 @@ it.effect("exports full history with size, scope, and missing-thread checks", ()
 
     const response = yield* read(thread.id);
     expect(response.status).toBe(200);
-    const transcript = yield* decodeTranscript(yield* Effect.promise(() => response.json()));
+    const body: unknown = yield* Effect.promise(() => response.json());
+    const transcript = yield* decodeTranscript(body);
     expect(transcript.items).toHaveLength(200);
     expect(transcript.items[0]?.item).toMatchObject({ output });
     expect(transcript.items[0]?.visibility).toBe("local");
     expect(transcript.items[199]?.position).toBe(199);
+    expect(transcript.items[197]?.item).toMatchObject(readDocs);
+    expect(transcript.items[198]?.item).toMatchObject({
+      type: "operator_request",
+      request: { surfaces: { previewAvailable: true } },
+    });
+    expect(transcript.items[199]?.item).toMatchObject({
+      type: "dynamic_tool",
+      toolName: "t3_operator_request_status",
+      input: null,
+    });
+    expect(JSON.stringify(body)).not.toMatch(
+      /previewUrl|privateReceipt|private-preview|private-decision|private-request-id/,
+    );
 
     const emptyOutputRows = transcript.items.map((row, position) =>
       position === 0 ? { ...row, item: { ...row.item, output: "" } } : row,
