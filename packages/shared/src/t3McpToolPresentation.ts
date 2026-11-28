@@ -74,12 +74,12 @@ export interface T3McpToolDefinition {
   readonly displayName: string;
   readonly labels: readonly [action: string, running: string, completed: string, detail: string];
   readonly icon: "t3-code" | "browser" | "device" | "pull-request";
-  readonly summaryAction: T3McpToolSummaryAction;
+  readonly summaryAction: T3McpToolSummaryAction | null;
 }
 
 function tool(
   labels: T3McpToolDefinition["labels"],
-  summaryAction: T3McpToolSummaryAction,
+  summaryAction: T3McpToolSummaryAction | null,
   icon: T3McpToolDefinition["icon"] = "t3-code",
   displayName = `${labels[0]} ${labels[3]}`,
 ): T3McpToolDefinition {
@@ -162,6 +162,20 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
     "schedule-delete",
   ),
   request_secret: tool(["Ask for", "Asking for", "Asked for", "a secret"], "secret-request"),
+  t3_operator_request: tool(["Create", "Creating", "Created", "an operator request"], null),
+  t3_operator_request_status: tool(
+    ["Check", "Checking", "Checked", "operator request status"],
+    null,
+  ),
+  t3_operator_request_list: tool(["List", "Listing", "Listed", "operator requests"], null),
+  t3_operator_request_resolve: tool(
+    ["Resolve", "Resolving", "Resolved", "an operator request"],
+    null,
+  ),
+  t3_operator_request_cancel: tool(
+    ["Cancel", "Canceling", "Canceled", "an operator request"],
+    null,
+  ),
   create_threads: tool(["Create", "Creating", "Created", "T3 threads"], "thread-create"),
   t3_thread_start: tool(["Start", "Starting", "Started", "a T3 thread"], "thread-create"),
   t3_thread_list: tool(["List", "Listing", "Listed", "T3 threads"], "thread-list"),

@@ -40,7 +40,7 @@ import {
 import { BackgroundThreadAnnouncer } from "./BackgroundThreadAnnouncer";
 import { HistorySwipeNavigation } from "./HistorySwipeNavigation";
 import ThreadSidebar from "./Sidebar";
-import { SidebarBrandWidthProbe } from "./sidebar/SidebarChrome";
+import { SidebarBrandWidthProbe, SidebarOperatorRequestsEntry } from "./sidebar/SidebarChrome";
 import { isAppModalPage } from "./sidebar/mainAppLocation";
 import type { SidebarRouteReveal } from "./sidebar/routeReveal";
 import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
@@ -315,6 +315,7 @@ function registerAppShellCommands(router: AnyRouter, shellElement: Element): () 
 function SidebarControl() {
   const router = useRouter();
   const usagePageOpen = useLocation({ select: (location) => location.pathname === "/usage" });
+  const modalOpen = useLocation({ select: (location) => isAppModalPage(location.pathname) });
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const { toggleSidebar, isMobile, mobileSheetMounted } = useSidebar();
   const isSidebarVisible = useSidebarVisibility();
@@ -397,6 +398,7 @@ function SidebarControl() {
           Toggle main sidebar{shortcutLabel ? ` (${shortcutLabel})` : ""}
         </TooltipPopup>
       </Tooltip>
+      {!isSidebarVisible && !modalOpen && <SidebarOperatorRequestsEntry collapsed />}
     </div>
   );
 }
@@ -439,13 +441,15 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const sidebarProviderStyle = {
     "--sidebar-width": `${clampThreadSidebarWidth(sidebarWidth, sidebarMinimumWidth, sidebarMaximumWidth)}px`,
     "--panel-animation-duration": `${panelAnimationDurationMs}ms`,
+    "--workspace-titlebar-content-left":
+      "calc(var(--workspace-controls-left) + var(--workspace-titlebar-control-size) + var(--workspace-titlebar-control-gap) + var(--operator-requests-control-width, 0px))",
     ...windowControlsInsetStyle,
   } as CSSProperties;
 
   return (
     <PanelAnimationSuppressionProvider value={panelAnimationsSuppressed}>
       <SidebarProvider
-        className="h-dvh! min-h-0!"
+        className="h-dvh! min-h-0! [&:has([data-operator-requests-collapsed])]:[--operator-requests-control-width:calc(var(--workspace-titlebar-control-size)+0.25rem)]"
         data-panel-animations={routePanelAnimationsActive ? "true" : "false"}
         defaultOpen
         style={sidebarProviderStyle}

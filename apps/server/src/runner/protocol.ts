@@ -42,7 +42,7 @@ export type RunnerFrame =
   | { readonly t: "out"; readonly s: "stdout" | "stderr"; readonly d: string }
   | { readonly t: "exit"; readonly code: number | null; readonly signal: string | null };
 
-export const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
 /** Server-side variables the user's own login environment must keep control of. */
 const PROTECTED_ENV_KEYS = new Set([

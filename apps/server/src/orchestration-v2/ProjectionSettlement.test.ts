@@ -17,6 +17,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -27,6 +28,55 @@ const now = DateTime.makeUnsafe("2026-09-04T12:00:00Z");
 const old = DateTime.subtract(now, { days: 10 });
 const providerInstanceId = ProviderInstanceId.make("codex");
 const modelSelection = { instanceId: providerInstanceId, model: "test-model" };
+
+it.effect("an async operator card only blocks settlement before its deadline", () =>
+  Effect.gen(function* () {
+    const store = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = yield* createThread("operator-expiry");
+    const id = TurnItemId.make("item:settlement-operator");
+    const timestamp = DateTime.formatIso(old);
+    yield* store.apply({
+      id: EventId.make("event:settlement-operator"),
+      type: "turn-item.updated",
+      threadId,
+      occurredAt: old,
+      payload: {
+        id,
+        threadId,
+        type: "operator_request",
+        status: "waiting",
+        runId: null,
+        nodeId: null,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1,
+        title: "Review",
+        startedAt: old,
+        updatedAt: old,
+        completedAt: null,
+        request: {
+          requestId: "settlement-operator",
+          kind: "custom",
+          privilege: "user",
+          title: "Review",
+          status: "pending",
+          waitPolicy: { mode: "async" },
+          createdAt: timestamp,
+          updatedAt: timestamp,
+          expiresAt: "2026-09-04T14:00:00+02:00",
+        },
+      },
+    });
+    yield* TestClock.setTime(DateTime.toEpochMillis(now) - 1);
+    assert.deepEqual(yield* store.getSettlementCandidates(threadId), []);
+    yield* TestClock.adjust(1);
+    const [candidate] = yield* store.getSettlementCandidates(threadId);
+    assert.equal(candidate?.id, threadId);
+    assert.isTrue(isAutoSettlementCandidate(candidate!, DateTime.toEpochMillis(now)));
+  }).pipe(Effect.provide(layerSql)),
+);
 
 const createThread = Effect.fn(function* (
   name: string,

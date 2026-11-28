@@ -232,15 +232,20 @@ export function PreviewView({
     if (isServerTab && serverSurfaceRef.current) {
       if (serverInputDisabled) return false;
       serverSurfaceRef.current.navigate(resolvedUrl);
-      rememberPreviewUrl(threadRef, resolvedUrl);
+      if (!snapshot?.private) rememberPreviewUrl(threadRef, resolvedUrl);
       return true;
     }
     if (runtimeTabId && previewBridge) {
       await previewBridge.navigate(runtimeTabId, resolvedUrl);
-      rememberPreviewUrl(threadRef, resolvedUrl);
+      if (!snapshot?.private) rememberPreviewUrl(threadRef, resolvedUrl);
       return true;
     }
-    const result = await openPreviewSession({ openPreview: open, threadRef, url: resolvedUrl });
+    const result = await openPreviewSession({
+      openPreview: open,
+      threadRef,
+      url: resolvedUrl,
+      ...(snapshot?.private ? { private: true } : {}),
+    });
     if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
       const error = squashAtomCommandFailure(result);
       if (error instanceof BrowserSettingsReadError) {
@@ -257,7 +262,7 @@ export function PreviewView({
   const handleSubmitUrl = async (next: string) => {
     try {
       const resolved = resolveAddressBarInput(next, resolveSearchUrlTemplate(getClientSettings()));
-      if (await navigateToResolvedUrl(resolved)) {
+      if ((await navigateToResolvedUrl(resolved)) && !snapshot?.private) {
         recordVisitForThread(threadRef, resolved);
       }
     } catch (error) {
@@ -279,7 +284,7 @@ export function PreviewView({
         isServerTab || !previewBridge
           ? normalizePreviewUrl(next)
           : resolveDiscoveredServerUrl(threadRef.environmentId, next);
-      if (await navigateToResolvedUrl(resolved)) {
+      if ((await navigateToResolvedUrl(resolved)) && !snapshot?.private) {
         recordVisitForThread(threadRef, next);
       }
     } catch (error) {
@@ -381,12 +386,14 @@ export function PreviewView({
     void localApi.shell.openExternal(url).catch(() => undefined);
   };
 
-  const moveTarget = alternatePreviewRuntime(
-    threadRef.environmentId,
-    primaryEnvironmentId,
-    serverBrowser,
-    snapshot,
-  );
+  const moveTarget = snapshot?.private
+    ? null
+    : alternatePreviewRuntime(
+        threadRef.environmentId,
+        primaryEnvironmentId,
+        serverBrowser,
+        snapshot,
+      );
   const moveLabel =
     moveTarget === "server" ? `Open in ${environmentLabel}'s browser` : "Open on this computer";
   const handleMoveTab = async () => {

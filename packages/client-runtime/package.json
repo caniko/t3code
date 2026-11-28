@@ -283,6 +283,10 @@
       "types": "./src/state/server.ts",
       "default": "./src/state/server.ts"
     },
+    "./state/operator-requests": {
+      "types": "./src/state/operatorRequests.ts",
+      "default": "./src/state/operatorRequests.ts"
+    },
     "./state/outdatedServerUpdate": {
       "types": "./src/state/outdatedServerUpdate.ts",
       "default": "./src/state/outdatedServerUpdate.ts"

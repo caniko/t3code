@@ -78,6 +78,155 @@ const pullRequest = (number: number) => ({
   number,
 });
 
+it.effect("a pending operator request closes on Stop without a wake or a later answer", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projection = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:stop-operator-request");
+    const turnItemId = TurnItemId.make("item:stop-operator-request");
+    yield* createWatchingThread(threadId, 42);
+    yield* send(threadId, "Start work", "start_immediately");
+    const [run] = (yield* orchestrator.getThreadProjection(threadId)).runs;
+    assert.isDefined(run);
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const request = {
+      threadId,
+      turnItemId,
+      runId: run!.id,
+      requestId: "stop-operator-request",
+      kind: "custom",
+      privilege: "user",
+      title: "Confirm the next step",
+      waitPolicy: { mode: "async" },
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+    } as const;
+    yield* orchestrator.dispatch({
+      type: "operator_request.record",
+      commandId: CommandId.make("record:stop-operator-request"),
+      threadId,
+      turnItemId,
+      request,
+    });
+    assert.equal(
+      (yield* projection.listOperatorRequests({ threadId }))[0]?.request.status,
+      "pending",
+    );
+    assert.equal(
+      (yield* projection.listOperatorRequests({ threadId }))[0]?.request.nodeId,
+      run!.rootNodeId ?? undefined,
+    );
+    const otherThreadId = ThreadId.make("thread:operator-request-id-collision");
+    yield* createWatchingThread(otherThreadId, 43);
+    const collision = yield* orchestrator
+      .dispatch({
+        type: "operator_request.record",
+        commandId: CommandId.make("record:operator-request-id-collision"),
+        threadId: otherThreadId,
+        turnItemId,
+        request: { ...request, threadId: otherThreadId, requestId: "other-request" },
+      })
+      .pipe(Effect.flip);
+    assert.equal(collision._tag, "OrchestratorDispatchError");
+    assert.deepEqual(yield* projection.listOperatorRequests({ threadId: otherThreadId }), []);
+    const stopped = yield* orchestrator.dispatch({
+      type: "thread.stop",
+      commandId: CommandId.make("stop:operator-request"),
+      threadId,
+    });
+    const closed = (yield* projection.listOperatorRequests({ threadId, includeTerminal: true }))[0];
+    assert.equal(closed?.request.status, "cancelled");
+    assert.isFalse(stopped.storedEvents.some(({ event }) => event.type === "message.updated"));
+    const lateItem = TurnItemId.make("item:late-after-stop");
+    const late = yield* orchestrator
+      .dispatch({
+        type: "operator_request.record",
+        commandId: CommandId.make("record:late-after-stop"),
+        threadId,
+        turnItemId: lateItem,
+        request: { ...request, turnItemId: lateItem, requestId: "late-after-stop" },
+      })
+      .pipe(Effect.flip);
+    assert.equal(late._tag, "OrchestratorDispatchError");
+    if (late._tag === "OrchestratorDispatchError") {
+      assert.equal(late.cause, "Operator request target is not active.");
+    }
+    const retry = yield* orchestrator.dispatch({
+      type: "operator_request.record",
+      commandId: CommandId.make("late-answer:stop-operator-request"),
+      threadId,
+      turnItemId,
+      request: { ...request, status: "submitted" },
+      wake: {
+        messageId: MessageId.make("message:late-operator-answer"),
+        text: "Late answer",
+        notification: {
+          source: { kind: "background_task" },
+          outcome: "completed",
+          summary: "Late answer",
+        },
+      },
+    });
+    assert.deepEqual(retry.storedEvents, []);
+    assert.deepEqual(
+      (yield* projection.listOperatorRequests({ threadId, includeTerminal: true }))[0],
+      closed,
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("an operator decision crossing its deadline commits expiry without a wake", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projection = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:overdue-operator-request");
+    const turnItemId = TurnItemId.make("item:overdue-operator-request");
+    yield* createWatchingThread(threadId, 44);
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const request = {
+      requestId: "overdue-operator-request",
+      kind: "custom",
+      privilege: "user",
+      title: "Confirm the next step",
+      waitPolicy: { mode: "async" },
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+      expiresAt: now,
+      metadata: { source: "thread-stop-fixture" },
+    } as const;
+    const command = { type: "operator_request.record", threadId, turnItemId } as const;
+    yield* orchestrator.dispatch({
+      ...command,
+      commandId: CommandId.make("record:overdue-operator-request"),
+      request,
+    });
+    const decided = yield* orchestrator.dispatch({
+      ...command,
+      commandId: CommandId.make("answer:overdue-operator-request"),
+      request: { ...request, status: "submitted" },
+      wake: {
+        messageId: MessageId.make("message:overdue-operator-answer"),
+        text: "Late answer",
+        notification: {
+          source: { kind: "background_task" },
+          outcome: "completed",
+          summary: "Late answer",
+        },
+      },
+    });
+    const [card] = yield* projection.listOperatorRequests({ threadId, includeTerminal: true });
+    assert.equal(card?.request.status, "expired");
+    assert.equal(card?.request.expiresAt, request.expiresAt);
+    assert.deepEqual(card?.request.metadata, request.metadata);
+    assert.deepEqual(
+      decided.storedEvents.map(({ event }) => event.type),
+      ["turn-item.updated"],
+    );
+  }).pipe(Effect.provide(layerTest)),
+);
+
 const createWatchingThread = (threadId: ThreadId, number: number) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;

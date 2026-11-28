@@ -118,7 +118,7 @@ const realpathOrNull = (value: string) => {
 };
 
 /** Resolves symlinks before comparing, so a link inside the home cannot lead out of it. */
-export const resolveAllowedCwd = (
+const resolveAllowedCwd = (
   cwd: string | undefined,
   home: string,
   allowedRoots: ReadonlyArray<string>,
@@ -135,7 +135,7 @@ export const resolveAllowedCwd = (
   return real;
 };
 
-export const assertAllowedEnv = (env: Readonly<Record<string, unknown>>) => {
+const assertAllowedEnv = (env: Readonly<Record<string, unknown>>) => {
   for (const [key, value] of Object.entries(env)) {
     if (typeof value !== "string")
       throw new Error(`Environment value for ${key} must be a string.`);

@@ -23,6 +23,7 @@ import {
 import { GuestBubbleTint, GuestMessageName } from "./guestMessageStyle";
 import { ThreadGuestPendingMessage, useThreadGuestShare } from "./ThreadGuestShareBar";
 import { LinkRequestCard } from "./LinkRequestCard";
+import { OperatorRequestCard } from "./OperatorRequestCard";
 import { SecretRequestCard } from "./SecretRequestCard";
 import { AppActivityIndicator } from "../../components/ui/AppActivityIndicator";
 import {
@@ -1818,6 +1819,20 @@ function renderFeedEntry(
         surfaceColor={props.screenColor}
       />
     );
+  }
+
+  if (entry.type === "activity-group" && entry.activities.length === 1) {
+    const row = entry.activities[0]!.projectedItem;
+    if (row.item.type === "operator_request") {
+      return (
+        <OperatorRequestCard
+          key={`${props.environmentId}:${row.item.id}`}
+          environmentId={props.environmentId}
+          request={row.item.request}
+          local={row.visibility === "local"}
+        />
+      );
+    }
   }
 
   if (entry.type === "activity-group" && isSecretRequestActivityGroup(entry)) {

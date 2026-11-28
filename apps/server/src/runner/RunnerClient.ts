@@ -1,11 +1,11 @@
 // @effect-diagnostics nodeBuiltinImport:off -- the client speaks raw unix sockets.
 import * as NodeNet from "node:net";
-import { EventEmitter } from "node:events";
-import { PassThrough, Readable, Writable } from "node:stream";
-import { StringDecoder } from "node:string_decoder";
+import * as NodeEvents from "node:events";
+import * as NodeStream from "node:stream";
+import * as NodeStringDecoder from "node:string_decoder";
 
 import * as NodeSink from "@effect/platform-node-shared/NodeSink";
-import * as NodeStream from "@effect/platform-node-shared/NodeStream";
+import * as EffectNodeStream from "@effect/platform-node-shared/NodeStream";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
@@ -32,9 +32,9 @@ export interface RunnerExit {
 
 export interface RunnerProcess {
   readonly pid: number;
-  readonly stdin: Writable;
-  readonly stdout: Readable;
-  readonly stderr: Readable;
+  readonly stdin: NodeStream.Writable;
+  readonly stdout: NodeStream.Readable;
+  readonly stderr: NodeStream.Readable;
   readonly exit: Promise<RunnerExit>;
   readonly kill: (signal: string) => void;
   readonly resize: (cols: number, rows: number) => void;
@@ -47,8 +47,8 @@ const LOST: RunnerExit = { code: null, signal: "SIGKILL" };
 const openRunnerConnection = (socketPath: string, request: SpawnProcessFrame | SpawnPtyFrame) =>
   new Promise<RunnerProcess>((resolve, reject) => {
     const socket = NodeNet.connect(socketPath);
-    const stdout = new PassThrough();
-    const stderr = new PassThrough();
+    const stdout = new NodeStream.PassThrough();
+    const stderr = new NodeStream.PassThrough();
     let settled = false;
     let resolveExit!: (exit: RunnerExit) => void;
     const exit = new Promise<RunnerExit>((r) => (resolveExit = r));
@@ -57,7 +57,7 @@ const openRunnerConnection = (socketPath: string, request: SpawnProcessFrame | S
       stdout.end();
       stderr.end();
     };
-    const stdin = new Writable({
+    const stdin = new NodeStream.Writable({
       write: (chunk: Buffer, _encoding, callback) => {
         sendFrame(socket, { t: "stdin", d: chunk.toString("base64") }, () => callback());
       },
@@ -120,7 +120,7 @@ export interface RunnerEndpoint {
   readonly serverEnv: Readonly<Record<string, string | undefined>>;
 }
 
-export const openRunnerProcess = (
+const openRunnerProcess = (
   endpoint: RunnerEndpoint,
   input: {
     readonly command: string;
@@ -216,11 +216,11 @@ export const makeRunnerSpawner = (endpoint: RunnerEndpoint) =>
           NodeSink.fromWritable({ evaluate: () => proc.stdin, onError, endOnDone: true }),
         ).pipe(Effect.ignore, Effect.forkScoped);
       }
-      const stdout = NodeStream.fromReadable<Uint8Array, PlatformError.PlatformError>({
+      const stdout = EffectNodeStream.fromReadable<Uint8Array, PlatformError.PlatformError>({
         evaluate: () => proc.stdout,
         onError,
       });
-      const stderr = NodeStream.fromReadable<Uint8Array, PlatformError.PlatformError>({
+      const stderr = EffectNodeStream.fromReadable<Uint8Array, PlatformError.PlatformError>({
         evaluate: () => proc.stderr,
         onError,
       });
@@ -267,7 +267,7 @@ export const makeRunnerSpawner = (endpoint: RunnerEndpoint) =>
   );
 
 class RunnerPtyProcess implements PtyAdapter.PtyProcess {
-  private readonly decoder = new StringDecoder("utf8");
+  private readonly decoder = new NodeStringDecoder.StringDecoder("utf8");
   private readonly dataListeners = new Set<(data: string) => void>();
   private exitEvent: PtyAdapter.PtyExitEvent | undefined;
   private readonly exitListeners = new Set<(event: PtyAdapter.PtyExitEvent) => void>();
@@ -354,9 +354,9 @@ export const spawnClaudeViaRunner = (
   options: ClaudeSpawnOptionsLike,
   onStderr?: (chunk: string) => void,
 ) => {
-  const emitter = new EventEmitter();
-  const stdin = new PassThrough();
-  const stdout = new PassThrough();
+  const emitter = new NodeEvents.EventEmitter();
+  const stdin = new NodeStream.PassThrough();
+  const stdout = new NodeStream.PassThrough();
   let proc: RunnerProcess | undefined;
   let killRequested: string | undefined;
   const handle = Object.assign(emitter, {

@@ -1957,6 +1957,43 @@ it.effect("a stalled desktop viewer still gets its size, control and reconnect",
   ).pipe(Effect.provide(layer)),
 );
 
+it.live("keeps private tabs out of automation status and target lookup", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const browser = yield* ServerBrowser.ServerBrowser;
+      const broker = yield* Broker.PreviewAutomationBroker;
+      const manager = yield* Manager.PreviewManager;
+      const threadId = scope.thread.threadId;
+      yield* Effect.yieldNow;
+      const privateTab = yield* manager.open({
+        threadId,
+        url: "http://localhost:5173/attendance?token=private-preview-test-token",
+        runtime: "server",
+        privateTo: "operator",
+      });
+      const privateTabId = PreviewTabId.make(privateTab.tabId);
+      yield* browser.attachViewer(viewerInput(privateTabId, true));
+      const status = () =>
+        broker.invoke<PreviewAutomationStatus>({ scope, operation: "status", input: {} });
+      expect(yield* status()).toMatchObject({ available: false, tabId: null, url: null });
+
+      const publicTab = yield* manager.open({ threadId, runtime: "server" });
+      yield* browser.attachViewer(viewerInput(PreviewTabId.make(publicTab.tabId), false));
+      const visible = yield* status();
+      expect(visible.tabId).toBe(publicTab.tabId);
+      expect(visible.tabs?.map((tab) => tab.tabId)).toEqual([publicTab.tabId]);
+      expect(JSON.stringify(visible)).not.toContain("private-preview-test-token");
+      for (const operation of ["status", "snapshot", "open"] as const) {
+        const denied = yield* broker
+          .invoke<void>({ scope, tabId: privateTabId, operation, input: {} })
+          .pipe(Effect.flip);
+        expect(denied._tag).toBe("PreviewAutomationTabNotFoundError");
+        expect(denied.message).not.toContain("private-preview-test-token");
+      }
+    }),
+  ).pipe(Effect.provide(layer)),
+);
+
 it.live("agents read a human's tab with no arguments and act on it only while nobody drives", () =>
   Effect.scoped(
     Effect.gen(function* () {

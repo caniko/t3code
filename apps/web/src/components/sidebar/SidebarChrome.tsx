@@ -1,4 +1,10 @@
-import { ArrowLeftIcon, ArrowRightIcon, ChartNoAxesColumnIcon, SettingsIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  ChartNoAxesColumnIcon,
+  InboxIcon,
+  SettingsIcon,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import { memo } from "react";
 import { Link, useLocation, useNavigate } from "@tanstack/react-router";
@@ -14,6 +20,7 @@ import {
 import { primaryServerKeybindingsAtom } from "../../state/server";
 import { cn } from "../../lib/utils";
 import { usePullRequestsSupported } from "../../state/environments";
+import { usePendingOperatorRequestCount } from "../../state/operatorRequests";
 import { T3Wordmark } from "../T3Wordmark";
 import {
   resolveEnvironmentIdentificationPillLabel,
@@ -218,13 +225,48 @@ function SidebarUtilityItem({
   );
 }
 
+export function SidebarOperatorRequestsEntry({ collapsed = false }: { collapsed?: boolean }) {
+  const count = usePendingOperatorRequestCount();
+  const navigate = useNavigate();
+  const { isMobile, setOpenMobile } = useSidebar();
+  const label = count === 0 ? "Operator requests" : `Operator requests (${count} pending)`;
+  const open = () => {
+    if (isMobile) setOpenMobile(false);
+    void navigate({ to: "/operator-requests" });
+  };
+  const icon = (
+    <span className="relative inline-flex" aria-hidden="true">
+      <InboxIcon className="size-4" />
+      {count > 0 && (
+        <span className="absolute -top-2 -right-2 min-w-3.5 rounded-full bg-primary px-0.5 text-center text-3xs/3.5 font-semibold tabular-nums text-primary-foreground">
+          {count > 99 ? "99+" : count}
+        </span>
+      )}
+    </span>
+  );
+  if (!collapsed) return <SidebarUtilityItem icon={icon} label={label} onClick={open} />;
+  return (
+    <div className="pointer-events-auto ml-1 shrink-0" data-operator-requests-collapsed="">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <SidebarMenuButton aria-label={label} onClick={open} size="icon">
+              {icon}
+            </SidebarMenuButton>
+          }
+        />
+        <TooltipPopup side="bottom">{label}</TooltipPopup>
+      </Tooltip>
+    </div>
+  );
+}
+
 const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   const navigate = useNavigate();
   const navigateToMainApp = useNavigateToMainApp();
   const { isMobile, setOpenMobile } = useSidebar();
-  const isOnUtilityPage = useLocation({
-    select: (location) => isSidebarUtilityPage(location.pathname),
-  });
+  const pathname = useLocation({ select: (location) => location.pathname });
+  const isOnUtilityPage = isSidebarUtilityPage(pathname);
   const pullRequestsSupported = usePullRequestsSupported();
   const closeMobileSidebar = () => {
     if (isMobile) {
@@ -258,12 +300,15 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   return (
     <SidebarMenu className="flex-row items-center">
       {isOnUtilityPage ? (
-        <SidebarMenuItem className="min-w-0 flex-1">
-          <SidebarMenuButton onClick={handleBackClick}>
-            <ArrowLeftIcon />
-            <span>Back</span>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
+        <>
+          <SidebarMenuItem className="min-w-0 flex-1">
+            <SidebarMenuButton onClick={handleBackClick}>
+              <ArrowLeftIcon />
+              <span>Back</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          {pathname !== "/operator-requests" && <SidebarOperatorRequestsEntry />}
+        </>
       ) : (
         <>
           <SidebarUtilityItem
@@ -278,6 +323,7 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
               onClick={handlePullRequestsClick}
             />
           ) : null}
+          <SidebarOperatorRequestsEntry />
           <SidebarUtilityItem
             icon={<ChartNoAxesColumnIcon />}
             label="Usage"

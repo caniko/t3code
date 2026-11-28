@@ -1317,9 +1317,8 @@ export const make = Effect.gen(function* () {
       Effect.withSpan("EnvironmentAuth.issueStartupPairingUrl"),
     );
 
-  // Only the RPC socket's ticket is bound to the client's proof key. The media
-  // routes reuse one ticket across <img>, EventSource and several sockets, and
-  // each of those would need its own single-use proof.
+  // Media tickets carry the verified session's key for ownership, not a proof
+  // requirement: <img>, EventSource and media sockets share the same ticket.
   const issueWebSocketTicket: EnvironmentAuth["Service"]["issueWebSocketTicket"] = (
     session,
     input,
@@ -1329,6 +1328,9 @@ export const make = Effect.gen(function* () {
         ...(input?.use ? { audience: input.use } : {}),
         ...(input?.use === "rpc" && session.proofKeyThumbprint
           ? { proofKeyThumbprint: session.proofKeyThumbprint }
+          : {}),
+        ...(input?.use === "media" && session.proofKeyThumbprint
+          ? { mediaProofKeyThumbprint: session.proofKeyThumbprint }
           : {}),
       })
       .pipe(
@@ -1386,14 +1388,16 @@ export const make = Effect.gen(function* () {
               Effect.provideService(Digest.Digest, digest),
             );
           }
+          const proofKeyThumbprint =
+            use === "media" && session.audience === "media"
+              ? session.mediaProofKeyThumbprint
+              : session.proofKeyThumbprint;
           return {
             sessionId: session.sessionId,
             subject: session.subject,
             method: session.method,
             scopes: session.scopes,
-            ...(session.proofKeyThumbprint
-              ? { proofKeyThumbprint: session.proofKeyThumbprint }
-              : {}),
+            ...(proofKeyThumbprint ? { proofKeyThumbprint } : {}),
             ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
           };
         }

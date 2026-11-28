@@ -2,8 +2,15 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
+  projectBoundedProjectionForWire,
+  projectDomainEventForWire,
+  projectThreadProjectionForWire,
+  projectTurnItemForDetail,
+} from "../orchestration-v2/WireProjection.ts";
+import {
   ChatAttachmentId,
   CommandId,
+  EnvironmentId,
   EventId,
   GuestShareId,
   type GuestStreamEvent,
@@ -46,10 +53,16 @@ import * as CommandOutputHub from "../orchestration-v2/CommandOutputHub.ts";
 import * as EffectOutbox from "../orchestration-v2/EffectOutbox.ts";
 import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
+import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
+import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ResourceCleanupService from "../orchestration-v2/ResourceCleanupService.ts";
+import * as ProviderSessionManager from "../orchestration-v2/ProviderSessionManager.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
+import { ServerEnvironmentIdentity } from "../environment/ServerEnvironment.ts";
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -252,6 +265,123 @@ it.effect("streams the owner's thread events after the share and a snapshot", ()
   }).pipe(Effect.provide(layerTest)),
 );
 
+const privateSurfaces = {
+  previewUrl: "http://127.0.0.1:5400/?token=private-preview",
+  desktopAction: { kind: "vagrant", requestId: "desktop", socketPath: "/private/desk.sock" },
+  cliCommand: "private command",
+  inlineForm: { fields: [{ id: "answer", label: "Private form", type: "text" }] },
+} as const;
+
+it.effect("redacts operator-only data from snapshots, live updates and item detail", () =>
+  Effect.gen(function* () {
+    const { orchestrator, guestShares, credential } = yield* shareThread;
+    const { token: session } = yield* guestShares.redeem({ credential, name: "Sam" });
+    const now = DateTime.formatIso(yield* DateTime.now);
+    const turnItemId = TurnItemId.make("item:private-operator-request");
+    const command = { type: "operator_request.record", threadId, turnItemId } as const;
+    const request = {
+      requestId: "private-operator-request",
+      kind: "custom",
+      privilege: "user",
+      title: "Review report",
+      waitPolicy: { mode: "async" },
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+      surfaces: privateSurfaces,
+    } as const;
+    const { storedEvents } = yield* orchestrator.dispatch({
+      ...command,
+      commandId: CommandId.make("record:guest-private"),
+      request,
+    });
+    const { projection } = yield* orchestrator.getThreadSnapshotWindow(threadId, {
+      rowLimit: 10,
+      userTurnLimit: 10,
+    });
+    const original = projection.turnItems.find((item) => item.id === turnItemId);
+    if (original?.type !== "operator_request") return yield* Effect.die("Missing request");
+    assert.equal(original.request.surfaces?.previewUrl, privateSurfaces.previewUrl);
+    assert.notInclude(JSON.stringify(projectTurnItemForDetail(original)), "private-preview");
+    const event = storedEvents.find(({ event }) => event.type === "turn-item.updated")?.event;
+    if (event === undefined) return yield* Effect.die("Missing request event");
+    assert.notInclude(JSON.stringify(projectDomainEventForWire(event)), "private-preview");
+    for (const wire of [
+      projectThreadProjectionForWire(projection),
+      projectBoundedProjectionForWire(projection),
+      projectBoundedProjectionForWire({
+        ...projection,
+        turnItems: [],
+        visibleTurnItems: [
+          {
+            position: 0,
+            visibility: "inherited",
+            sourceThreadId: threadId,
+            sourceItemId: turnItemId,
+            item: original,
+          },
+        ],
+      }),
+    ]) {
+      const items = [...wire.turnItems, ...wire.visibleTurnItems.map((row) => row.item)];
+      const ownerItems = items.filter((item) => item.type === "operator_request");
+      assert.isNotEmpty(ownerItems);
+      for (const item of ownerItems) {
+        assert.isTrue(item.request.surfaces?.previewAvailable);
+        assert.notProperty(item.request.surfaces, "previewUrl");
+      }
+    }
+    const stream = yield* guestShares.stream(session);
+    yield* orchestrator.dispatch({
+      ...command,
+      commandId: CommandId.make("answer:guest-private"),
+      request: {
+        ...request,
+        status: "submitted",
+        receipt: {
+          status: "submitted",
+          decidedVia: "inline",
+          decidedAt: now,
+          summary: "Reviewed",
+          receiptPath: "/private/receipt.json",
+          artifacts: [{ label: "report", path: "/private/report.txt" }],
+        },
+      },
+    });
+    const detail = (yield* guestShares.item(session, turnItemId)).item;
+    yield* orchestrator.dispatch({
+      type: "thread.guest-share.close",
+      commandId: CommandId.make("close:guest-private"),
+      threadId,
+    });
+    const events = Array.from(yield* Stream.runCollect(stream));
+    const publicItems = events
+      .flatMap((entry) =>
+        entry.type !== "thread"
+          ? []
+          : entry.item.kind === "snapshot"
+            ? [
+                ...entry.item.projection.turnItems,
+                ...entry.item.projection.visibleTurnItems.map((row) => row.item),
+              ]
+            : entry.item.kind === "event" && entry.item.event.type === "turn-item.updated"
+              ? [entry.item.event.payload]
+              : [],
+      )
+      .filter((item) => item.type === "operator_request");
+    assert.includeMembers(
+      publicItems.map((item) => item.request.status),
+      ["pending", "submitted"],
+    );
+    assert.equal(detail?.type, "operator_request");
+    assert.notMatch(
+      JSON.stringify([detail, ...publicItems]),
+      /surfaces|receiptPath|artifacts|private-preview|\/private\//,
+    );
+    assert.include(JSON.stringify(detail), "Reviewed");
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect("starts a stream with the runs and items already in the thread", () =>
   Effect.gen(function* () {
     const { orchestrator, guestShares, credential } = yield* shareThread;
@@ -444,6 +574,10 @@ const writeItem = (
     | Pick<
         Extract<OrchestrationV2TurnItem, { type: "file_change" }>,
         "type" | "status" | "fileName" | "diffStr" | "oldStr" | "newStr"
+      >
+    | Pick<
+        Extract<OrchestrationV2TurnItem, { type: "dynamic_tool" }>,
+        "type" | "status" | "toolName" | "input" | "output"
       >,
 ) =>
   Effect.gen(function* () {
@@ -480,6 +614,107 @@ const writeItem = (
     });
     return TurnItemId.make(id);
   });
+
+it.effect(
+  "redacts recorded operator tool payloads in snapshots, live events, guest detail and transcripts",
+  () =>
+    Effect.gen(function* () {
+      const { orchestrator, guestShares, credential } = yield* shareThread;
+      const { token: session } = yield* guestShares.redeem({ credential, name: "Sam" });
+      const previewUrl = "http://127.0.0.1:3210/?token=private-preview";
+      const tool = {
+        type: "dynamic_tool",
+        status: "completed",
+        input: { surfaces: { previewUrl } },
+        output: {
+          content: [{ type: "text", text: JSON.stringify({ privateReceipt: "private-answer" }) }],
+        },
+      } as const;
+      // Seed old provider events directly to exercise reads even without ingestion-time redaction.
+      const snapshotId = yield* writeItem("item:snapshot-tool", {
+        ...tool,
+        toolName: "t3-code.t3_operator_request",
+      });
+      const events = yield* guestShares.stream(session);
+      const liveId = yield* writeItem("item:live-tool", {
+        ...tool,
+        toolName: "mcp__t3-code__t3_operator_request_status",
+      });
+      const detail = (yield* guestShares.item(session, liveId)).item;
+      const requestItemId = TurnItemId.make("item:transcript-request");
+      const now = DateTime.formatIso(yield* DateTime.now);
+      yield* orchestrator.dispatch({
+        type: "operator_request.record",
+        threadId,
+        turnItemId: requestItemId,
+        commandId: CommandId.make("record:transcript-request"),
+        request: {
+          requestId: "transcript-request",
+          title: "Review",
+          kind: "custom",
+          privilege: "user",
+          waitPolicy: { mode: "async" },
+          status: "pending",
+          createdAt: now,
+          updatedAt: now,
+          surfaces: { previewUrl },
+        },
+      });
+      const transcript = yield* ThreadManagementService.ThreadManagementService.use((service) =>
+        service.getThreadTranscript(threadId),
+      ).pipe(
+        Effect.provide(
+          ThreadManagementService.layer.pipe(
+            Layer.provide(Layer.succeed(Orchestrator.OrchestratorV2, orchestrator)),
+            Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
+            Layer.provide(
+              Layer.mock(LegacyV1ThreadImporter.LegacyV1ThreadImporter)({
+                ensureTranscript: () =>
+                  Effect.succeed({ importedThreadCount: 0, importedMessageCount: 0 }),
+              }),
+            ),
+            Layer.provide(ThreadCommandExecutor.layer),
+            Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
+          ),
+        ),
+        Effect.provideService(ServerEnvironmentIdentity, {
+          getEnvironmentId: Effect.succeed(EnvironmentId.make("transcript")),
+        }),
+      );
+      yield* orchestrator.dispatch({
+        type: "thread.guest-share.close",
+        commandId: CommandId.make("close:guest-private-tool"),
+        threadId,
+      });
+      const received = Array.from(yield* Stream.runCollect(events));
+      assert.isTrue(
+        received.some(
+          (entry) =>
+            entry.type === "thread" &&
+            entry.item.kind === "snapshot" &&
+            entry.item.projection.visibleTurnItems.some(({ item }) => item.id === snapshotId),
+        ),
+      );
+      assert.isTrue(
+        received.some(
+          (entry) =>
+            entry.type === "thread" &&
+            entry.item.kind === "event" &&
+            entry.item.event.type === "turn-item.updated" &&
+            entry.item.event.payload.id === liveId,
+        ),
+      );
+      assert.equal(detail?.id, liveId);
+      assert.includeMembers(
+        transcript.items.map(({ item }) => item.id),
+        [snapshotId, liveId, requestItemId],
+      );
+      assert.notMatch(
+        JSON.stringify({ received, detail, transcript }),
+        /previewUrl|privateReceipt|private-preview|private-answer/,
+      );
+    }).pipe(Effect.provide(layerTest)),
+);
 
 it.effect("gives the guest a command's detail and output, but no file diffs", () =>
   Effect.gen(function* () {
@@ -575,8 +810,28 @@ it.effect("pages the guest back through turns older than the stream's snapshot",
           text: `![Old](${shot})`,
           streaming: false,
         }),
+        turnItem("item:old-operator-request", 2, {
+          type: "operator_request",
+          request: {
+            requestId: "old-operator-request",
+            kind: "custom",
+            privilege: "user",
+            title: "Review",
+            waitPolicy: { mode: "async" },
+            status: "submitted",
+            createdAt: DateTime.formatIso(now),
+            updatedAt: DateTime.formatIso(now),
+            surfaces: privateSurfaces,
+            receipt: {
+              status: "submitted",
+              decidedVia: "inline",
+              decidedAt: DateTime.formatIso(now),
+              receiptPath: "/private/history.json",
+            },
+          },
+        }),
         ...Array.from({ length: 30 }, (_, index) =>
-          turnItem(`item:ask-${index}`, index + 2, {
+          turnItem(`item:ask-${index}`, index + 3, {
             type: "user_message",
             text: `Ask ${index}`,
             createdBy: "user",
@@ -607,10 +862,15 @@ it.effect("pages the guest back through turns older than the stream's snapshot",
     const older: Array<string> = [];
     while (cursor !== null) {
       const page: OrchestrationV2ThreadHistoryPage = yield* guestShares.history(session, cursor);
+      assert.notMatch(
+        JSON.stringify(page.items.filter((row) => row.item.type === "operator_request")),
+        /surfaces|receiptPath/,
+      );
       older.push(...ids(page.items));
       cursor = page.hasMoreHistory ? page.nextCursor : null;
     }
     assert.include(older, "item:old-image");
+    assert.include(older, "item:old-operator-request");
     assert.deepStrictEqual(yield* guestShares.media(session, shot), {
       path: shot,
       mimeType: "image/png",

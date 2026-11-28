@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeHttpPlatform from "@effect/platform-node/NodeHttpPlatform";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -7,25 +8,39 @@ import {
   AuthOrchestrationReadScope,
   AuthPreviewOperateScope,
   AuthSessionId,
+  ThreadId,
   PREVIEW_STREAM_HOST_SETUP_CLOSE_CODE,
   PreviewStreamHostSetup,
   type AuthEnvironmentScope,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as Redacted from "effect/Redacted";
+import * as TestClock from "effect/testing/TestClock";
 import { HttpRouter, HttpServer } from "effect/http";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as SessionStore from "../auth/SessionStore.ts";
+import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import * as PreviewManager from "./Manager.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
 import * as ServerBrowser from "./ServerBrowser.ts";
 import { routeLayer } from "./ServerBrowserStream.ts";
 
-const platformLayer = NodeHttpPlatform.layer.pipe(Layer.provideMerge(NodeServices.layer));
+const platformLayer = Layer.merge(
+  NodeHttpPlatform.layer.pipe(Layer.provideMerge(NodeServices.layer)),
+  Layer.mock(PreviewManager.PreviewManager)({ canView: () => Effect.succeed("allowed") }),
+);
 
 const makeAuth = (
   scopes: ReadonlyArray<AuthEnvironmentScope>,
@@ -318,6 +333,104 @@ it.effect("serves a tab's download only to an authorized session", () =>
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
+it.effect("a renewed DPoP session can access private preview media but another key cannot", () =>
+  Effect.gen(function* () {
+    const auth = yield* EnvironmentAuth.EnvironmentAuth;
+    const sessions = yield* SessionStore.SessionStore;
+    const manager = yield* PreviewManager.PreviewManager;
+    const fs = yield* FileSystem.FileSystem;
+    const path = `${yield* fs.makeTempDirectoryScoped({ prefix: "t3-private-download-" })}/file`;
+    yield* fs.writeFileString(path, "private preview");
+    const issue = (key: string, subject = "operator") =>
+      sessions
+        .issue({
+          subject,
+          method: "dpop-access-token",
+          scopes: [AuthOrchestrationReadScope],
+          proofKeyThumbprint: key,
+          ttl: Duration.hours(1),
+        })
+        .pipe(Effect.flatMap(({ token }) => sessions.verify(token)));
+    const original = yield* issue("original-key");
+    const threadId = ThreadId.make("thread");
+    const tab = yield* manager.open({
+      threadId,
+      runtime: "server",
+      privateTo: PreviewManager.previewOwner(original),
+    });
+    yield* TestClock.adjust("59 minutes");
+    const renewed = yield* issue("original-key");
+    expect(renewed.sessionId).not.toBe(original.sessionId);
+    yield* TestClock.adjust("2 minutes");
+    const originalStatus = yield* sessions
+      .verify(original.token)
+      .pipe(Effect.match({ onFailure: (error) => error._tag, onSuccess: () => "active" }));
+    expect(originalStatus).toBe("SessionTokenExpiredError");
+    const unrelated = yield* issue("other-key");
+    const otherSubject = yield* issue("original-key", "other-operator");
+    let downloadLookups = 0;
+    const browser = Layer.mock(ServerBrowser.ServerBrowser)({
+      openDownload: () =>
+        Effect.sync(() => {
+          downloadLookups++;
+          return Option.some({ path, fileName: "preview.txt" });
+        }),
+    });
+    const routeServices = yield* Effect.context<
+      EnvironmentAuth.EnvironmentAuth | PreviewManager.PreviewManager
+    >();
+    const handler = yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        HttpRouter.toWebHandler(
+          routeLayer.pipe(
+            Layer.provide(browser),
+            Layer.provide(NodeHttpPlatform.layer.pipe(Layer.provideMerge(NodeServices.layer))),
+            Layer.provideMerge(Layer.succeedContext(routeServices)),
+          ),
+          { disableLogger: true },
+        ),
+      ),
+      ({ dispose }) => Effect.promise(dispose),
+    );
+    const download = Effect.fn("test.downloadPrivatePreview")(function* (
+      session: EnvironmentAuth.AuthenticatedSession,
+    ) {
+      const { ticket } = yield* auth.issueWebSocketTicket(session, { use: "media" });
+      const url = new URL("http://t3.test/api/preview-stream/download");
+      url.search = new URLSearchParams({
+        threadId,
+        tabId: tab.tabId,
+        id: "file",
+        wsTicket: Redacted.value(ticket),
+      }).toString();
+      return yield* Effect.promise(() => handler.handler(new Request(url)));
+    });
+    const response = yield* download(renewed);
+    expect(response.status).toBe(200);
+    expect(yield* Effect.promise(() => response.text())).toBe("private preview");
+    expect((yield* download(unrelated)).status).toBe(404);
+    expect((yield* download(otherSubject)).status).toBe(404);
+    yield* manager.close({ threadId, tabId: tab.tabId }, PreviewManager.previewOwner(renewed));
+    // The browser still has the download until it processes the manager's close event.
+    expect((yield* download(unrelated)).status).toBe(404);
+    expect(downloadLookups).toBe(1);
+  }).pipe(
+    Effect.provide(
+      Layer.merge(
+        PreviewManager.layer,
+        EnvironmentAuth.layer.pipe(
+          Layer.provide(ManagedPolicy.layerTest()),
+          Layer.provide(SqlitePersistence.layerMemory),
+          Layer.provide(ServerSecretStore.layer),
+          Layer.provide(ServerEnvironment.layerIdentity),
+          Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-preview-auth-test-" })),
+        ),
+      ).pipe(Layer.provideMerge(Layer.merge(NodeServices.layer, NodeCrypto.layer))),
+    ),
+    Effect.scoped,
+  ),
+);
+
 it.effect("passes uploaded files to the page's open picker and needs operate scope", () =>
   Effect.gen(function* () {
     const answers: Array<{ chooserId: string; files: Array<{ name: string; text: string }> }> = [];
@@ -373,6 +486,55 @@ it.effect("passes uploaded files to the page's open picker and needs operate sco
 );
 
 const decodeHostSetup = Schema.decodeUnknownEffect(Schema.fromJsonString(PreviewStreamHostSetup));
+
+it.effect("closes a missing tab's stream without attaching a browser viewer", () =>
+  Effect.gen(function* () {
+    const manager = yield* PreviewManager.PreviewManager;
+    const threadId = ThreadId.make("thread");
+    const { tabId } = yield* manager.open({ threadId, runtime: "server", privateTo: "owner" });
+    yield* manager.close({ threadId, tabId }, "owner");
+    let attachments = 0;
+    const browser = Layer.mock(ServerBrowser.ServerBrowser)({
+      attachViewer: () => {
+        attachments++;
+        return Effect.die("missing tab must not attach");
+      },
+    });
+    const services = yield* Layer.build(
+      HttpRouter.serve(
+        routeLayer.pipe(
+          Layer.provide(browser),
+          Layer.provide(NodeHttpPlatform.layer.pipe(Layer.provideMerge(NodeServices.layer))),
+        ),
+        { disableListenLog: true },
+      ).pipe(
+        Layer.provideMerge(NodeHttpServer.layerTest),
+        Layer.provide(makeAuth([AuthOrchestrationReadScope]).layer),
+      ),
+    );
+    const server = Context.get(services, HttpServer.HttpServer);
+    const origin = HttpServer.formatAddress(server.address).replace(/^http/, "ws");
+    const closed = Promise.withResolvers<{ code: number; reason: string }>();
+    yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        const socket = new WebSocket(
+          `${origin}/api/preview-stream/ws?threadId=${threadId}&tabId=${tabId}&wsTicket=one-use-ticket`,
+        );
+        socket.addEventListener("close", ({ code, reason }) => closed.resolve({ code, reason }));
+        return socket;
+      }),
+      (socket) => Effect.sync(() => socket.close()),
+    );
+    expect(yield* Effect.promise(() => closed.promise)).toEqual({
+      code: 4404,
+      reason: "tab closed",
+    });
+    expect(attachments).toBe(0);
+  }).pipe(
+    Effect.provide(PreviewManager.layer.pipe(Layer.provide(NodeCrypto.layer))),
+    Effect.scoped,
+  ),
+);
 
 it.effect.each([
   {

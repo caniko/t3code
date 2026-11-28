@@ -46,6 +46,7 @@ import * as EventStore from "./EventStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
+import { projectOperatorTurnItemForWire } from "./WireProjection.ts";
 import * as ProviderUsageAnalytics from "../telemetry/ProviderUsageAnalytics.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as ProviderInstanceRegistry from "../provider/ProviderInstanceRegistry.ts";
@@ -1567,7 +1568,7 @@ layer("ProviderEventIngestorV2", (it) => {
         ordinal: number,
         toolName: string,
         output: unknown,
-      ): OrchestrationV2TurnItem => ({
+      ): Extract<OrchestrationV2TurnItem, { type: "dynamic_tool" }> => ({
         id: TurnItemId.make(id),
         threadId: threadEvent.threadId,
         runId: null,
@@ -1601,7 +1602,79 @@ layer("ProviderEventIngestorV2", (it) => {
       });
 
       yield* eventSink.write({ events: [threadEvent] });
-      for (const turnItem of [read, screenshot]) {
+      const operatorTools = (
+        [
+          ["t3_operator_request_status", null, "t3_operator_request_status"],
+          ["t3_operator_request_status_t3-code", null, "t3_operator_request_status"],
+          ["mcp__t3-code__t3_operator_request", null, "t3_operator_request"],
+          ["mcp__t3_code__t3_operator_request_status", null, "t3_operator_request_status"],
+          ["mcp__t3_code_direct__t3_operator_request_status", null, "t3_operator_request_status"],
+          [
+            'mcp__t3-code__t3_operator_request_resolve: {"privateReceipt":"secret-note"}',
+            null,
+            "t3_operator_request_resolve",
+          ],
+          [
+            "MCP",
+            'mcp__t3_code__t3_operator_request_resolve: {"privateReceipt":"secret-note"}',
+            "t3_operator_request_resolve",
+          ],
+          ["t3-code_t3_operator_request_status", null, "t3_operator_request_status"],
+          ["t3-code-thread_1_t3_operator_request_status", null, "t3_operator_request_status"],
+          [
+            't3-code:t3_operator_request({"surfaces":{"previewUrl":"secret-url"}})',
+            null,
+            "t3_operator_request",
+          ],
+          [
+            't3_operator_request_cancel{"privateReceipt":"secret-note"}',
+            null,
+            "t3_operator_request_cancel",
+          ],
+          [
+            't3_operator_request_list {"privateReceipt":"secret-note"}',
+            null,
+            "t3_operator_request_list",
+          ],
+        ] as const
+      ).map(([toolName, title, canonical], index) => ({
+        canonical,
+        item: {
+          ...toolItem(`turn-item:operator-${index}`, index + 3, toolName, {
+            structuredContent: { privateReceipt: { note: "secret-note" } },
+          }),
+          title,
+          input: { surfaces: { previewUrl: "secret-url" } },
+          outputOmitted: true,
+          viewedImagePath: "/private/operator-image.png",
+        },
+      }));
+      const ordinaryTools = (
+        [
+          ["Read", "Read docs/t3_operator_request.md", "docs/t3_operator_request.md"],
+          ["Read", "Read: docs/t3_operator_request.md", "docs/t3_operator_request.md"],
+          [
+            "Edit",
+            "Edit apps/server/src/mcp/toolkits/operatorRequest/tools.ts",
+            "apps/server/src/mcp/toolkits/operatorRequest/tools.ts",
+          ],
+        ] as const
+      ).map(([toolName, title, path], index) => ({
+        ...toolItem(
+          `turn-item:ordinary-${index}`,
+          operatorTools.length + index + 3,
+          toolName,
+          "file contents",
+        ),
+        title,
+        input: { path },
+      }));
+      for (const turnItem of [
+        read,
+        screenshot,
+        ...operatorTools.map(({ item }) => item),
+        ...ordinaryTools,
+      ]) {
         yield* ingestor.ingestNormalized({
           providerSessionId,
           providerInstanceId: modelSelection.instanceId,
@@ -1625,6 +1698,30 @@ layer("ProviderEventIngestorV2", (it) => {
 
       assert.equal(storedJson.includes(readBase64), false);
       assert.equal(storedJson.includes(screenshotBase64), true);
+      for (const { item, canonical } of operatorTools) {
+        assert.include(storedJson, item.id);
+        const projected = yield* projectionStore.getTurnItem({
+          threadId: threadEvent.threadId,
+          itemId: item.id,
+        });
+        const label = item.title ?? item.toolName ?? item.id;
+        assert.isNotNull(projected, label);
+        assert.include(projected, { toolName: canonical, title: null, input: null }, label);
+        assert.notMatch(
+          JSON.stringify(projected),
+          /"output"|"outputOmitted"|"viewedImagePath"/,
+          label,
+        );
+        assert.deepEqual(projected, projectOperatorTurnItemForWire(item), label);
+      }
+      assert.notMatch(storedJson, /previewUrl|privateReceipt|secret-url|secret-note/);
+      for (const item of ordinaryTools) {
+        assert.strictEqual(projectOperatorTurnItemForWire(item), item);
+        assert.deepEqual(
+          yield* projectionStore.getTurnItem({ threadId: threadEvent.threadId, itemId: item.id }),
+          item,
+        );
+      }
       assert.deepEqual(projectedRead?.type === "dynamic_tool" ? projectedRead.output : null, {
         type: "image",
         file: { type: "image/png", originalSize: 30_000, sizeBytes: 30_000 },

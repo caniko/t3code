@@ -14,7 +14,7 @@ export const layer = McpToolAccess.toLayer(PreviewControlsToolkit, {
   t3_preview_list: McpToolAccess.readsAsCaller((input) =>
     Effect.gen(function* () {
       const { scope, manager } = yield* access;
-      const result = yield* manager.list({ threadId: scope.thread.threadId });
+      const result = yield* manager.list({ threadId: scope.thread.threadId }, null);
       const start = input.cursor ?? 0;
       const end = start + (input.limit ?? 20);
       return {
@@ -27,7 +27,7 @@ export const layer = McpToolAccess.toLayer(PreviewControlsToolkit, {
   t3_preview_close: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const { scope, manager } = yield* access;
-      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId });
+      const { sessions } = yield* manager.list({ threadId: scope.thread.threadId }, null);
       if (
         sessions.some((session) => session.tabId === input.tabId && session.runtime === "server")
       ) {
@@ -36,7 +36,7 @@ export const layer = McpToolAccess.toLayer(PreviewControlsToolkit, {
         return {};
       }
       yield* manager
-        .close({ threadId: scope.thread.threadId, tabId: input.tabId })
+        .close({ threadId: scope.thread.threadId, tabId: input.tabId }, null)
         .pipe(Effect.mapError(unavailable));
       return {};
     }),

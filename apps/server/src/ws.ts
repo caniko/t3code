@@ -3,6 +3,7 @@ import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as PeerLinkRequests from "./peer/PeerLinkRequests.ts";
+import * as OperatorRequests from "./operatorRequests/OperatorRequests.ts";
 import * as PeerLinks from "./peer/PeerLinks.ts";
 
 import * as DateTime from "effect/DateTime";
@@ -91,6 +92,7 @@ import {
   ProjectMutationError,
   ProviderUploadFeedbackError,
   ProviderSetupError,
+  PreviewSessionLookupError,
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
   type ServerConfig as ClientServerConfig,
@@ -177,6 +179,7 @@ import {
 import {
   makeLiveBodyDeduper,
   projectDomainEventForWire,
+  projectOperatorRequestForWire,
   projectThreadProjectionForWire,
 } from "./orchestration-v2/WireProjection.ts";
 import { dedupeSnapshotBodies } from "@t3tools/shared/orchestrationV2DedupedBodies";
@@ -1367,6 +1370,7 @@ export const layerWsRpc = (
   Layer.effectContext(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
+      const previewOwner = PreviewManager.previewOwner(currentSession);
       const principal = principalOfSubject(currentSession.subject);
       const sql = yield* SqlClient.SqlClient;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
@@ -1481,6 +1485,7 @@ export const layerWsRpc = (
       const secretResolver = yield* SecretResolver.SecretResolver;
       const peerLinks = yield* PeerLinks.PeerLinks;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
+      const operatorRequests = yield* OperatorRequests.OperatorRequests;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -2026,6 +2031,23 @@ export const layerWsRpc = (
         );
       });
       const threadVisible = (threadId: ThreadId) => threadAllowed(threadId, "read");
+      const operatorRequestScope = (action: ThreadAction) => ({
+        ownerPrincipal: principal,
+        allowThread: (threadId: ThreadId) => threadAllowed(threadId, action),
+      });
+      const withVisiblePreview = <A, E>(
+        { threadId, tabId }: { readonly threadId: string; readonly tabId: string },
+        effect: Effect.Effect<A, E>,
+      ) =>
+        previewManager
+          .canView(threadId, tabId, previewOwner)
+          .pipe(
+            Effect.flatMap((access): Effect.Effect<A, E | PreviewSessionLookupError> =>
+              access === "allowed"
+                ? effect
+                : Effect.fail(new PreviewSessionLookupError({ threadId, tabId })),
+            ),
+          );
       const scopeSearchResult = Effect.fn("ws.scopeSearchResult")(function* <
         R extends {
           readonly matches: ReadonlyArray<{ readonly threadId: ThreadId }>;
@@ -2816,6 +2838,24 @@ export const layerWsRpc = (
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
             Effect.andThen(peerLinkRequests.answer(input)),
           ),
+        [WS_METHODS.operatorRequestsListPending]: (input) =>
+          operatorRequests.listPending(input, operatorRequestScope("read")).pipe(
+            Effect.map(({ requests }) => ({
+              requests: requests.map(projectOperatorRequestForWire),
+            })),
+          ),
+        [WS_METHODS.operatorRequestsAnswer]: (input) =>
+          operatorRequests
+            .answer(input, operatorRequestScope("write"))
+            .pipe(Effect.map(projectOperatorRequestForWire)),
+        [WS_METHODS.operatorRequestsCancel]: (input) =>
+          operatorRequests
+            .cancel(input, operatorRequestScope("write"))
+            .pipe(Effect.map(projectOperatorRequestForWire)),
+        [WS_METHODS.operatorRequestsGetPreviewUrl]: (input) =>
+          operatorRequests.getPreviewUrl(input, operatorRequestScope("write")),
+        [WS_METHODS.operatorRequestsLaunchDesktop]: (input) =>
+          operatorRequests.launchDesktop(input, operatorRequestScope("write")),
         [WS_METHODS.serverUpdateSettings]:
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(function* ({ patch, providerInstanceMutation }) {
@@ -3339,15 +3379,28 @@ export const layerWsRpc = (
               (unsubscribe) => Effect.sync(unsubscribe),
             ),
           ),
-        [WS_METHODS.previewOpen]: (input) => previewManager.open(input),
-        [WS_METHODS.previewResize]: (input) => previewManager.resize(input),
-        [WS_METHODS.previewAdjust]: (input) => previewManager.adjust(input),
-        [WS_METHODS.previewClose]: (input) => previewManager.close(input),
-        [WS_METHODS.previewList]: (input) => previewManager.list(input),
+        [WS_METHODS.previewOpen]: (input) =>
+          previewManager.open({
+            ...input,
+            ...(input.private === true ? { privateTo: previewOwner } : {}),
+          }),
+        [WS_METHODS.previewResize]: (input) =>
+          withVisiblePreview(input, previewManager.resize(input)),
+        [WS_METHODS.previewAdjust]: (input) =>
+          withVisiblePreview(input, previewManager.adjust(input)),
+        [WS_METHODS.previewClose]: (input) => previewManager.close(input, previewOwner),
+        [WS_METHODS.previewList]: (input) => previewManager.list(input, previewOwner),
         [WS_METHODS.previewClearProfile]: (input) => serverBrowser.clearProfile(input.profileId),
         [WS_METHODS.previewReportProfiles]: (input) => reportProfiles(input),
-        [WS_METHODS.previewReportStatus]: (input) => previewManager.reportStatus(input),
-        [WS_METHODS.subscribePreviewEvents]: (_input) => previewManager.events,
+        [WS_METHODS.previewReportStatus]: (input) =>
+          withVisiblePreview(input, previewManager.reportStatus(input)),
+        [WS_METHODS.subscribePreviewEvents]: (_input) =>
+          previewManager.events.pipe(
+            Stream.filter(
+              (event) => event.privateTo === undefined || event.privateTo === previewOwner,
+            ),
+            Stream.map(({ privateTo: _privateTo, ...event }) => event),
+          ),
         [WS_METHODS.deviceConfigure]: (input) => deviceService.configure(input),
         [WS_METHODS.deviceTestHost]: (input) => deviceService.testHost(input),
         [WS_METHODS.deviceEasAccount]: (input) => deviceService.easAccount(input),
@@ -3613,6 +3666,7 @@ export const layer = Layer.unwrap(
     const reviewGuides = yield* PullRequestReviewGuideService.PullRequestReviewGuideService;
     const peerLinks = yield* PeerLinks.PeerLinks;
     const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
+    const operatorRequests = yield* OperatorRequests.OperatorRequests;
     const sessionAccess = yield* SessionAccess.SessionAccess;
     const sql = yield* SqlClient.SqlClient;
     return HttpRouter.add(
@@ -3708,6 +3762,7 @@ export const layer = Layer.unwrap(
               Layer.provide(Layer.succeed(SessionAccess.SessionAccess, sessionAccess)),
               Layer.provide(Layer.succeed(PeerLinks.PeerLinks, peerLinks)),
               Layer.provide(Layer.succeed(PeerLinkRequests.PeerLinkRequests, peerLinkRequests)),
+              Layer.provide(Layer.succeed(OperatorRequests.OperatorRequests, operatorRequests)),
               Layer.provide(
                 SourceControlDiscovery.layer.pipe(
                   Layer.provide(

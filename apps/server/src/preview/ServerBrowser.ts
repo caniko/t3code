@@ -282,6 +282,7 @@ interface Recording {
 interface ServerTab {
   readonly threadId: ThreadId;
   readonly tabId: string;
+  readonly private: boolean;
   readonly page: Page;
   readonly cdp: CDPSession;
   readonly frameSessions: Map<Frame, CDPSession>;
@@ -605,6 +606,8 @@ const make = Effect.gen(function* () {
     });
   };
 
+  const automationTabs = () => [...tabs.values()].filter((tab) => !tab.private);
+
   const reportLiveTabs = () => {
     const connectionId = hostConnectionId;
     if (connectionId === null) return;
@@ -616,7 +619,7 @@ const make = Effect.gen(function* () {
             environmentId,
             connectionId,
             focused: true,
-            liveTabs: [...tabs.values()].map((tab) => ({
+            liveTabs: automationTabs().map((tab) => ({
               threadId: tab.threadId,
               tabId: tab.tabId,
               visible: tab.viewers.size > 0,
@@ -845,6 +848,7 @@ const make = Effect.gen(function* () {
     const tab: ServerTab = {
       threadId: ThreadId.make(snapshot.threadId),
       tabId: snapshot.tabId,
+      private: snapshot.private === true,
       page,
       cdp,
       frameSessions: new Map(),
@@ -1333,6 +1337,7 @@ const make = Effect.gen(function* () {
     await runPromise(
       openTab({
         threadId: opener.threadId,
+        openerTabId: opener.tabId,
         ...(/^https?:/i.test(url) ? { url } : {}),
         runtime: "server",
         ...(opener.profileId === undefined ? {} : { profileId: opener.profileId }),
@@ -1473,7 +1478,7 @@ const make = Effect.gen(function* () {
   };
 
   const latestThreadTab = (threadId: string, agentSessionId?: string) => {
-    const threadTabs = [...tabs.values()].filter((tab) => tab.threadId === threadId);
+    const threadTabs = automationTabs().filter((tab) => tab.threadId === threadId);
     return (
       threadTabs
         .filter((tab) => tab.control.agentId === agentSessionId)
@@ -1575,7 +1580,7 @@ const make = Effect.gen(function* () {
     tab: ServerTab | undefined,
     agentSessionId?: string,
   ): Promise<PreviewAutomationStatus> => {
-    if (!tab) {
+    if (!tab || tab.private) {
       return {
         available: false,
         visible: false,
@@ -1606,7 +1611,7 @@ const make = Effect.gen(function* () {
         : null,
       viewportSetting: tab.setting,
       ...(viewport ? { viewport } : {}),
-      tabs: [...tabs.values()]
+      tabs: automationTabs()
         .filter((candidate) => candidate.threadId === tab.threadId)
         .map((candidate) => ({
           tabId: candidate.tabId,
@@ -1894,7 +1899,7 @@ const make = Effect.gen(function* () {
   const requireTab = async (request: PreviewAutomationRequest) => {
     if (!request.agentSessionId)
       throw new BrowserControlInterrupted("The agent session is missing. Reconnect the provider.");
-    const owned = [...tabs.values()].filter(
+    const owned = automationTabs().filter(
       (tab) => tab.threadId === request.threadId && tab.control.agentId === request.agentSessionId,
     );
     if (!request.tabIdExplicit && owned.length > 1)
@@ -1908,7 +1913,7 @@ const make = Effect.gen(function* () {
         : await runPromise(
             findTab(request.threadId, request.tabId).pipe(Effect.orElseSucceed(constVoid)),
           );
-    if (!tab) {
+    if (!tab || tab.private) {
       throw new ServerBrowserPage.ServerBrowserOperationError(
         "PreviewAutomationTabNotFoundError",
         "No server preview tab is open for this thread. Call preview_open first.",
@@ -1924,7 +1929,7 @@ const make = Effect.gen(function* () {
 
   const markUsed = (request: PreviewAutomationRequest) => {
     const now = Date.now();
-    for (const tab of tabs.values()) {
+    for (const tab of automationTabs()) {
       if (
         tab.threadId === request.threadId &&
         (tab.control.agentId === request.agentSessionId || tab.tabId === request.tabId)
@@ -1938,6 +1943,19 @@ const make = Effect.gen(function* () {
     deadlineMs: number,
   ): Promise<unknown> => {
     const input = request.input;
+    const access =
+      request.tabId === undefined
+        ? undefined
+        : await runPromise(manager.canView(request.threadId, request.tabId, null));
+    if (
+      access === "denied" ||
+      (access === "missing" && (request.operation !== "open" || request.tabIdExplicit))
+    ) {
+      throw new ServerBrowserPage.ServerBrowserOperationError(
+        "PreviewAutomationTabNotFoundError",
+        "The requested server preview tab does not exist.",
+      );
+    }
     switch (request.operation) {
       case "status":
         return statusWithTitle(
@@ -1957,7 +1975,7 @@ const make = Effect.gen(function* () {
         if (
           reuse &&
           !request.tabIdExplicit &&
-          [...tabs.values()].filter(
+          automationTabs().filter(
             (tab) =>
               tab.threadId === request.threadId && tab.control.agentId === request.agentSessionId,
           ).length > 1
@@ -1968,7 +1986,7 @@ const make = Effect.gen(function* () {
           );
 
         const found =
-          reuse && request.tabId !== undefined
+          reuse && request.tabId !== undefined && access === "allowed"
             ? await runPromise(
                 findTab(request.threadId, request.tabId).pipe(
                   Effect.catchTags({
@@ -1979,7 +1997,7 @@ const make = Effect.gen(function* () {
             : undefined;
         if (reuse && request.tabIdExplicit && !found) {
           const { sessions } = await runPromise(
-            manager.list({ threadId: ThreadId.make(request.threadId) }),
+            manager.list({ threadId: ThreadId.make(request.threadId) }, null),
           );
           const desktop = sessions.some(
             (session) => session.tabId === request.tabId && session.runtime !== "server",
@@ -1993,7 +2011,9 @@ const make = Effect.gen(function* () {
         }
         // Reusing another session's tab requires explicit tabId; reading it grants no implicit takeover.
         const existing =
-          found && (request.tabIdExplicit || found.control.agentId === request.agentSessionId)
+          found &&
+          !found.private &&
+          (request.tabIdExplicit || found.control.agentId === request.agentSessionId)
             ? found
             : undefined;
         const navigationTimeout = Math.min(request.timeoutMs, NAVIGATION_TIMEOUT_MS);
@@ -2061,7 +2081,7 @@ const make = Effect.gen(function* () {
       case "recordingStop": {
         if (
           !request.tabIdExplicit &&
-          [...tabs.values()].filter(
+          automationTabs().filter(
             (candidate) =>
               candidate.threadId === request.threadId &&
               candidate.control.agentId === request.agentSessionId,
@@ -2071,7 +2091,7 @@ const make = Effect.gen(function* () {
             "Multiple tabs belong to this agent session. Pass a tabId from preview_open or preview_status tabs.",
             "tabRequired",
           );
-        const recordings = [...tabs.values()].filter(
+        const recordings = automationTabs().filter(
           (candidate) =>
             candidate.threadId === request.threadId &&
             candidate.control.agentMayAct(request.agentSessionId ?? "") &&

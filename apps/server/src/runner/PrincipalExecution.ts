@@ -81,7 +81,7 @@ export const PrincipalExecution = Context.Reference<PrincipalExecutionShape>(
 /** Principal ids are Linux user names, so anything else could not name a runner and must not reach a path. */
 const USERNAME = /^[a-z_][a-z0-9_-]{0,31}$/;
 
-export const runnerSocketPath = (template: string, principal: string) =>
+const runnerSocketPath = (template: string, principal: string) =>
   template.replaceAll("%u", principal);
 
 export const passthroughAgentScope: AgentScopeShape = {

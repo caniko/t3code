@@ -127,6 +127,47 @@ export const reads = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>)
     () => Effect.void,
   );
 
+export const createsOperatorRequest = <P, A, E, R>(
+  handle: (params: P, caller: Caller) => Effect.Effect<A, E, R>,
+) =>
+  declare(
+    (params: P) => orchestratingCaller.pipe(Effect.flatMap((caller) => handle(params, caller))),
+    undefined,
+  );
+
+export const decidesOperatorRequest = <P, A, E, R>(
+  handle: (params: P, caller: Caller) => Effect.Effect<A, E, R>,
+) =>
+  createsOperatorRequest<P, A, E | OrchestratorMcpFailure, R>((params, caller) =>
+    caller.scope.thread !== undefined ||
+    caller.scope.client === undefined ||
+    caller.scope.client.linked === true
+      ? Effect.fail(
+          new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "Deciding an operator request requires a writable operator credential.",
+          }),
+        )
+      : withDispatchModeLimit(caller, handle(params, caller)),
+  );
+
+const withDispatchModeLimit = Effect.fn("mcp.withDispatchModeLimit")(function* <A, E, R>(
+  caller: Caller,
+  effect: Effect.Effect<A, E, R>,
+) {
+  const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
+  return yield* effect.pipe(
+    Effect.provideService(DispatchModeLimit, { ...caller.limits, refused }),
+    Effect.catch((error) =>
+      Effect.flatMap(Ref.get(refused), (refusal) =>
+        Effect.fail<E | OrchestratorMcpFailure>(
+          refusal === undefined ? error : escalationDenied(refusal),
+        ),
+      ),
+    ),
+  );
+});
+
 export const readsAsCaller = <P, A, E, R>(handle: (params: P) => Effect.Effect<A, E, R>) =>
   declare((params: P) => requireThreadCaller.pipe(Effect.flatMap(() => handle(params))), undefined);
 
@@ -201,17 +242,7 @@ export const writesThreads = <P, A, E, R>(
           }
         }
         // Modes can rise after this check; the orchestrator rechecks under lock and records refusal before handlers wrap errors.
-        const refused = yield* Ref.make<DispatchModeRefusal | undefined>(undefined);
-        return yield* handle(params).pipe(
-          Effect.provideService(DispatchModeLimit, { ...caller.limits, refused }),
-          Effect.catch((error) =>
-            Effect.flatMap(Ref.get(refused), (refusal) =>
-              Effect.fail<E | OrchestratorMcpFailure>(
-                refusal === undefined ? error : escalationDenied(refusal),
-              ),
-            ),
-          ),
-        );
+        return yield* withDispatchModeLimit(caller, handle(params));
       }),
     () => writingCaller,
   );
@@ -380,7 +411,7 @@ const linksUnavailable = new OrchestratorMcpFailure({
 
 /**
  * A principal-bound MCP client owns no environment-wide state. These are the
- * exact tools the thread/project CLI uses; every other tool is refused before
+ * exact tools the thread, project, and operator-request CLIs use; every other tool is refused before
  * linked forwarding or handler side effects. Owner and thread callers are not
  * restricted.
  */
@@ -393,6 +424,11 @@ export const PRINCIPAL_CLIENT_TOOLS: ReadonlySet<string> = new Set([
   "t3_thread_send",
   "t3_thread_wait",
   "t3_thread_interrupt",
+  "t3_operator_request",
+  "t3_operator_request_status",
+  "t3_operator_request_list",
+  "t3_operator_request_resolve",
+  "t3_operator_request_cancel",
 ]);
 
 export const isPrincipalClientScope = (scope: McpInvocationContext.McpInvocationScope) =>

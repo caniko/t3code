@@ -59,6 +59,7 @@ import {
   projectDomainEventForWire,
   projectTurnItemForDetail,
   projectTurnItemForWire,
+  redactOperatorRequestToolItem,
 } from "../orchestration-v2/WireProjection.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -507,6 +508,14 @@ const make = Effect.gen(function* () {
     }
     return record;
   };
+  const guestTurnItem = (item: OrchestrationV2TurnItem): OrchestrationV2TurnItem => {
+    if (item.type !== "operator_request") return redactOperatorRequestToolItem(item);
+    const { surfaces: _surfaces, receipt, ...request } = item.request;
+    if (receipt === undefined) return { ...item, request };
+    const { receiptPath: _receiptPath, artifacts: _artifacts, ...publicReceipt } = receipt;
+    return { ...item, request: { ...request, receipt: publicReceipt } };
+  };
+
   const rememberSent = (shareId: GuestShareId, items: Iterable<OrchestrationV2TurnItem>) => {
     for (const item of items) {
       if (item.type !== "assistant_message") continue;
@@ -560,7 +569,11 @@ const make = Effect.gen(function* () {
         Stream.map((stored) => ({
           kind: "event" as const,
           sequence: stored.sequence,
-          event: projectDomainEventForWire(stored.event),
+          event: projectDomainEventForWire(
+            stored.event.type === "turn-item.updated"
+              ? { ...stored.event, payload: guestTurnItem(stored.event.payload) }
+              : stored.event,
+          ),
         })),
         // Ending the source here flushes what the coalescer holds, so `ended` is not held back.
         Stream.takeUntil((item) => endsShare(item.event)),
@@ -588,7 +601,14 @@ const make = Effect.gen(function* () {
     );
     const openingSnapshot = buildBoundedThreadStreamSnapshot({
       snapshotSequence: snapshot.snapshotSequence,
-      projection: snapshot.projection,
+      projection: {
+        ...snapshot.projection,
+        turnItems: snapshot.projection.turnItems.map(guestTurnItem),
+        visibleTurnItems: snapshot.projection.visibleTurnItems.map((row) => ({
+          ...row,
+          item: guestTurnItem(row.item),
+        })),
+      },
     });
     const opening: ReadonlyArray<GuestStreamEvent> = [
       { type: "view", view: initialView },
@@ -645,7 +665,9 @@ const make = Effect.gen(function* () {
     const item = yield* orchestrator
       .getTurnItem({ threadId: thread.id, itemId: TurnItemId.make(itemId) })
       .pipe(Effect.mapError(() => unavailable));
-    return item === null ? yield* unavailable : { thread, item };
+    return item === null
+      ? yield* unavailable
+      : { thread, item: redactOperatorRequestToolItem(item) };
   });
 
   const render = Effect.fn("GuestShareService.render")(function* (session: string, itemId: string) {
@@ -665,7 +687,9 @@ const make = Effect.gen(function* () {
     const { item } = yield* threadItem(session, itemId);
     return {
       item:
-        item.type === "file_change" ? projectTurnItemForWire(item) : projectTurnItemForDetail(item),
+        item.type === "file_change"
+          ? projectTurnItemForWire(item)
+          : projectTurnItemForDetail(guestTurnItem(item)),
     };
   });
 
@@ -681,7 +705,10 @@ const make = Effect.gen(function* () {
       share.id,
       page.items.map((row) => row.item),
     );
-    return page;
+    return {
+      ...page,
+      items: page.items.map((row) => ({ ...row, item: guestTurnItem(row.item) })),
+    };
   });
 
   const commandOutput = Effect.fn("GuestShareService.commandOutput")(function* (

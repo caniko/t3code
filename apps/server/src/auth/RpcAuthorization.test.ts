@@ -1,4 +1,5 @@
 import {
+  AuthPrincipalScopes,
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
   AuthFilesystemReadScope,
@@ -32,6 +33,22 @@ import {
 import * as RpcAuthorization from "./RpcAuthorization.ts";
 
 describe("RPC authorization scopes", () => {
+  it("grants signed-in principals access to operator requests through orchestration scopes", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.operatorRequestsListPending)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    for (const method of [
+      WS_METHODS.operatorRequestsAnswer,
+      WS_METHODS.operatorRequestsCancel,
+      WS_METHODS.operatorRequestsLaunchDesktop,
+      WS_METHODS.operatorRequestsGetPreviewUrl,
+    ]) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
+      expect(AuthPrincipalScopes).toContain(requiredScopeForRpcMethod(method));
+    }
+    expect(AuthPrincipalScopes).toContain(AuthOrchestrationReadScope);
+  });
+
   it("declares exactly one scope for every RPC in the server group", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
   });

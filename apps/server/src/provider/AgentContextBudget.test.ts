@@ -36,6 +36,7 @@ import { ProjectSetupScriptRunner } from "../project/ProjectSetupScriptRunner.ts
 import { PullRequestReviewGuideService } from "../pullRequest/PullRequestReviewGuideService.ts";
 import { ScheduledTaskService } from "../scheduledTasks/ScheduledTaskService.ts";
 import { SecretRequests } from "../secrets/SecretRequests.ts";
+import { OperatorRequests } from "../operatorRequests/OperatorRequests.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { SourceControlRepositoryService } from "../sourceControl/SourceControlRepositoryService.ts";
 import { GitVcsDriver } from "../vcs/GitVcsDriver.ts";
@@ -54,6 +55,7 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(ManagedProjectFolders)({ namedProjectsRoot: "" }),
   Layer.mock(McpProviderSessions)({}),
   Layer.mock(OrchestratorV2)({}),
+  Layer.mock(OperatorRequests)({}),
   Layer.mock(PeerForwarding)({}),
   Layer.mock(PeerLinkRequests)({}),
   Layer.mock(PeerLinks)({}),

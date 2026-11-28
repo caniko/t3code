@@ -1380,6 +1380,30 @@ describe("extractMcpToolCallIdentity", () => {
     }
   });
 
+  it("recovers operator request tool names without their streamed arguments", () => {
+    for (const tool of [
+      "t3_operator_request",
+      "t3_operator_request_status",
+      "t3_operator_request_list",
+      "t3_operator_request_resolve",
+      "t3_operator_request_cancel",
+    ]) {
+      for (const title of [
+        `mcp__t3-code__${tool}: {"requestId":"req`,
+        `${tool}({"requestId":"req`,
+      ]) {
+        const toolCall = toolCallFromUpdate({
+          sessionUpdate: "tool_call",
+          toolCallId: "operator-1",
+          kind: "other",
+          title,
+          status: "pending",
+        });
+        expect(extractMcpToolCallIdentity(toolCall), title).toEqual({ server: "t3-code", tool });
+      }
+    }
+  });
+
   it("does not claim an agent's own tool that shares a T3 tool name", () => {
     const toolCall = toolCallFromUpdate({
       sessionUpdate: "tool_call",

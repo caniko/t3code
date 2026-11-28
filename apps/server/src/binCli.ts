@@ -3,9 +3,10 @@ import { policyCommand } from "./cli/policy.ts";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { Argument, Command } from "effect/cli";
+import { Argument, CliOutput, Command } from "effect/cli";
 import * as CliError from "effect/cli/CliError";
 
 import * as NetService from "@t3tools/shared/Net";
@@ -21,6 +22,7 @@ import { hasCloudPublicConfig } from "./cloud/publicConfig.ts";
 import { extendConnectionAttemptTimeout, keepOutboundFetchOnHttp1 } from "./outboundHttp.ts";
 import { sharedServerCommandFlags } from "./cli/config.ts";
 import { projectCommand } from "./cli/project.ts";
+import { operatorRequestCommand } from "./cli/operatorRequest.ts";
 import { threadCommand } from "./cli/thread.ts";
 import { runDefaultServerCommand, serveCommand, startCommand } from "./cli/server.ts";
 import { updateCommand } from "./cli/update.ts";
@@ -88,6 +90,7 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
       unshareCommand,
       browserCommand,
       projectCommand,
+      operatorRequestCommand,
       threadCommand,
       upCommand,
       statusCommand,
@@ -111,11 +114,25 @@ export const makeCli = ({ cloudEnabled = hasCloudPublicConfig } = {}) =>
 
 export const cli = makeCli();
 
+export const cliPresenter: CliOutput.Presenter = {
+  present: (event) =>
+    event._tag === "InvalidInvocation" && event.commandPath[1] === "operator-request"
+      ? Console.Console.pipe(
+          Effect.flatMap((console) =>
+            CliOutput.defaultPresenter
+              .present(event)
+              .pipe(Effect.provideService(Console.Console, { ...console, log: console.error })),
+          ),
+        )
+      : CliOutput.defaultPresenter.present(event),
+};
+
 export function runCli() {
   extendConnectionAttemptTimeout();
   keepOutboundFetchOnHttp1();
   Command.run(cli, { version: packageJson.version }).pipe(
     Effect.scoped,
+    Effect.provideService(CliOutput.Presenter, cliPresenter),
     Effect.provide(layerCliRuntime),
     NodeRuntime.runMain,
   );
