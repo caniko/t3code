@@ -18,7 +18,7 @@ They go quite far:
 
 - **Identity.** Pairing grants and sessions already carry a `subject`, and a
   session inherits it from its grant. Encoding a person as `principal:<id>` in
-  that field (`t3 auth pairing create --principal dejana`) needs no new storage.
+  that field (`t3 auth pairing create --principal alice`) needs no new storage.
   Every existing subject maps to a default `owner`, so single-user installs don't
   change.
 - **Ownership.** `thread.create` gets an `ownerPrincipal` stamped server-side, in

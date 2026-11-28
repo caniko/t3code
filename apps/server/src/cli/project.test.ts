@@ -483,25 +483,25 @@ it.effect("adds a project through the remote MCP endpoint", () =>
         return Effect.succeed({
           id: "project:remote",
           title: "operations",
-          workspaceRoot: "/home/can/operations",
+          workspaceRoot: "/home/user/operations",
         });
       }) as ThreadTools["call"],
     };
 
     const created = yield* createRemoteProject(tools, {
-      workspaceRoot: "/home/can/operations",
+      workspaceRoot: "/home/user/operations",
       title: "operations",
     });
 
     assert.deepStrictEqual(created, {
       id: "project:remote",
       title: "operations",
-      workspaceRoot: "/home/can/operations",
+      workspaceRoot: "/home/user/operations",
     });
     assert.deepStrictEqual(calls, [
       {
         tool: "t3_project_create",
-        args: { workspaceRoot: "/home/can/operations", title: "operations" },
+        args: { workspaceRoot: "/home/user/operations", title: "operations" },
       },
     ]);
   }),

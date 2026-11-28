@@ -13,8 +13,9 @@ credentials. The machine runs one server on one port and is paired once per
 device, so nobody needs a URL or port of their own. Later, people can share a
 thread or project with a group and work on it together.
 
-The first deployment is a household: `can` and `dejana` each have an OS account
-on every PC (atlas, murph, nomad, starlord). Today each PC runs one `t3 serve`
+The first deployment is a household of two people (example names: `can` and
+`alice`) who each have an OS account on every PC (example hosts: host-a, host-b,
+host-c, host-d). Today each PC runs one `t3 serve`
 per person on separate ports. This design replaces that pair with one server per
 PC. There is no central hub server: a public ingress only proxies to these
 per-PC servers.
@@ -42,8 +43,8 @@ other subject (`browser`, `one-time-token`, `desktop-bootstrap`, `mcp-client`,
 …) to the default principal `owner`. A malformed `principal:` value maps to
 itself, never to `owner`, so a bad id cannot widen access.
 
-**Issuance.** `t3 auth pairing create --principal dejana` and
-`t3 auth session issue --principal dejana` mint credentials for a principal.
+**Issuance.** `t3 auth pairing create --principal alice` and
+`t3 auth session issue --principal alice` mint credentials for a principal.
 Only a session that holds `access:write` can create them, as today.
 
 **Default principal.** `owner` administers the environment: settings, provider
@@ -136,7 +137,7 @@ providers, terminals and Git with `HOME`, `XDG_*`, `CODEX_HOME`,
 
 **B. A separate OS user per principal (recommended).** The server runs as an
 unprivileged service user. Each principal maps to an OS account, for example
-`dejana → dejana`. Everything the server starts on a principal's behalf runs as
+`alice → alice`. Everything the server starts on a principal's behalf runs as
 that account, through a per-principal runner:
 
 - The runner is `t3 runner`: the same binary, started as the principal's own
@@ -218,7 +219,7 @@ before they paginate. Thread mentions in a message's context and
 - **Existing state.** Rows without an owner belong to `owner`. No data
   migration.
 - **Merging a second person's server** (today's per-user ports). A one-time
-  `t3 principal import --from <their T3 home> --as dejana` copies their projects
+  `t3 principal import --from <their T3 home> --as alice` copies their projects
   and threads into this database with `ownerPrincipal` set, then their old
   server retires. Until it exists, a principal starts with an empty workspace
   and old threads stay readable on the old server.

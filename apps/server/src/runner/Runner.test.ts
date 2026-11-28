@@ -70,7 +70,7 @@ const withRunner = <A, E, R>(
   Effect.acquireUseRelease(
     Effect.promise(async () => {
       const home = NodeFS.realpathSync(NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3r-")));
-      const socketPath = NodePath.join(home, "dejana.sock");
+      const socketPath = NodePath.join(home, "alice.sock");
       const server = await serveRunner({
         socketPath,
         home,
@@ -390,8 +390,8 @@ describe("runner", () => {
     withRunner(({ socketPath, home }) =>
       Effect.gen(function* () {
         const execution = makePrincipalExecution({
-          ownerOf: (threadId) => Effect.succeed(threadId === "mine" ? undefined : "dejana"),
-          ownersOfPath: (cwd) => Effect.succeed(cwd.startsWith(home) ? ["dejana"] : []),
+          ownerOf: (threadId) => Effect.succeed(threadId === "mine" ? undefined : "alice"),
+          ownersOfPath: (cwd) => Effect.succeed(cwd.startsWith(home) ? ["alice"] : []),
           socketExists: (path) => Effect.succeed(path === socketPath),
           socketTemplate: NodePath.join(home, "%u.sock"),
           serverEnv,
@@ -447,8 +447,8 @@ describe("runner", () => {
           socketTemplate: "/run/t3code/runner-%u.sock",
           serverEnv,
         });
-        const missing = yield* Effect.flip(execution.spawnerFor("dejana"));
-        expect(missing.message).toContain("/run/t3code/runner-dejana.sock");
+        const missing = yield* Effect.flip(execution.spawnerFor("alice"));
+        expect(missing.message).toContain("/run/t3code/runner-alice.sock");
         const traversal = yield* Effect.flip(execution.runnerFor("../../etc/x"));
         expect(traversal.socketPath).not.toContain("..");
       }),
@@ -458,7 +458,7 @@ describe("runner", () => {
     withRunner(({ socketPath, home }) =>
       Effect.gen(function* () {
         const execution = makePrincipalExecution({
-          ownerOf: (threadId) => Effect.succeed(threadId === "mine" ? undefined : "dejana"),
+          ownerOf: (threadId) => Effect.succeed(threadId === "mine" ? undefined : "alice"),
           ownersOfPath: () => Effect.succeed([]),
           socketExists: (path) => Effect.succeed(path === socketPath),
           socketTemplate: socketPath,
@@ -467,8 +467,8 @@ describe("runner", () => {
         const processes = makeOpenCodeThreadProcesses(execution);
         expect(yield* processes.forThread("mine")).toBeUndefined();
         const theirs = yield* processes.forThread("theirs");
-        expect(theirs?.owner).toBe("dejana");
-        expect(yield* processes.forThread("theirs-2")).toMatchObject({ owner: "dejana" });
+        expect(theirs?.owner).toBe("alice");
+        expect(yield* processes.forThread("theirs-2")).toMatchObject({ owner: "alice" });
         const [out, code] = yield* runShell(
           theirs!.spawner,
           'pwd; echo "$HOME|$OPENCODE_LOG|$SERVER_SECRET"',
@@ -478,7 +478,7 @@ describe("runner", () => {
         expect(out).toBe(`${home}\n${home}|debug|\n`);
 
         const offline = makePrincipalExecution({
-          ownerOf: () => Effect.succeed("dejana"),
+          ownerOf: () => Effect.succeed("alice"),
           ownersOfPath: () => Effect.succeed([]),
           socketExists: () => Effect.succeed(false),
           socketTemplate: "/run/t3code/runner-%u.sock",
@@ -487,7 +487,7 @@ describe("runner", () => {
         const missing = yield* Effect.flip(
           makeOpenCodeThreadProcesses(offline).forThread("theirs"),
         );
-        expect(missing.detail).toContain("/run/t3code/runner-dejana.sock");
+        expect(missing.detail).toContain("/run/t3code/runner-alice.sock");
       }),
     ),
   );
@@ -497,7 +497,7 @@ describe("runner", () => {
     () =>
       Effect.gen(function* () {
         const execution = makePrincipalExecution({
-          ownerOf: (threadId) => Effect.succeed(threadId === "mine" ? undefined : "dejana"),
+          ownerOf: (threadId) => Effect.succeed(threadId === "mine" ? undefined : "alice"),
           ownersOfPath: () => Effect.succeed([]),
           socketExists: () => Effect.succeed(true),
           socketTemplate: "/run/t3code/runner-%u.sock",

@@ -41,7 +41,7 @@ export function PrincipalRoleForm(props: {
         className="min-w-40 flex-1"
         nativeInput
         onChange={(event) => setPrincipal(event.currentTarget.value.trim())}
-        placeholder="Sign-in name, such as dejana"
+        placeholder="Sign-in name, such as alice"
         spellCheck={false}
         value={principal}
       />

@@ -15,7 +15,7 @@ const snapshot = {
 } as unknown as SessionAccessSnapshot;
 
 describe("partitionSharedThreads", () => {
-  const threads = [thread("t1", "dejana"), thread("t2", "can"), thread("t3", "can"), thread("t4")];
+  const threads = [thread("t1", "alice"), thread("t2", "can"), thread("t3", "can"), thread("t4")];
 
   it("leaves a default-principal session untouched", () => {
     const result = partitionSharedThreads({
@@ -29,7 +29,7 @@ describe("partitionSharedThreads", () => {
   it("splits a signed-in session by owner, then session group", () => {
     const result = partitionSharedThreads({
       threads,
-      principalByEnvironment: new Map([[env, "dejana"]]),
+      principalByEnvironment: new Map([[env, "alice"]]),
       snapshotByEnvironment: new Map([[env, snapshot]]),
     });
     expect(result.mine.map((t) => t.id)).toEqual(["t1"]);

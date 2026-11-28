@@ -337,16 +337,16 @@ it.effect("a principal-bound client can only register a plain existing project",
 
     for (const args of [
       { title: "work" },
-      { workspaceRoot: "/home/can/work", title: "work", scripts: [] },
-      { workspaceRoot: "/home/can/work", title: "work", createWorkspaceRootIfMissing: true },
-      { workspaceRoot: "/home/can/work", title: "work", defaultModelSelection: null },
+      { workspaceRoot: "/home/user/work", title: "work", scripts: [] },
+      { workspaceRoot: "/home/user/work", title: "work", createWorkspaceRootIfMissing: true },
+      { workspaceRoot: "/home/user/work", title: "work", defaultModelSelection: null },
     ]) {
       expect((yield* create(args)).at(-1)?.result).toMatchObject({ code: "invalid_request" });
     }
 
     expect(
-      (yield* create({ workspaceRoot: "/home/can/work", title: "work" })).at(-1)?.result,
-    ).toMatchObject({ workspaceRoot: "/home/can/work" });
+      (yield* create({ workspaceRoot: "/home/user/work", title: "work" })).at(-1)?.result,
+    ).toMatchObject({ workspaceRoot: "/home/user/work" });
   }),
 );
 

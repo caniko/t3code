@@ -29,7 +29,7 @@ import * as ServerSecretStore from "./ServerSecretStore.ts";
 
 const ISSUER = "https://idm.test/oauth2/openid/t3code";
 const ORIGIN = "http://127.0.0.1";
-const PROXY_ORIGIN = "https://t3-atlas.lan.candee.baby";
+const PROXY_ORIGIN = "https://t3.example.test";
 const CLIENT_ID = "t3code";
 const CLIENT_SECRET = "s3cret value";
 
@@ -48,7 +48,7 @@ interface Claims {
 }
 const goodClaims = (): Claims => ({
   groups: ["t3code_users@idm.test", "other@idm.test"],
-  preferred_username: "dejana",
+  preferred_username: "alice",
   expiresAt: 4_102_444_800,
 });
 
@@ -222,7 +222,7 @@ it.effect("signs a group member in with a principal browser session", () =>
     expect(cookie).toContain("HttpOnly");
     const probe = await get("/probe", { cookie: cookie?.split(";", 1)[0] ?? "" });
     expect(await probe.json()).toEqual({
-      subject: "principal:dejana",
+      subject: "principal:alice",
       method: "browser-session-cookie",
     });
   }),
