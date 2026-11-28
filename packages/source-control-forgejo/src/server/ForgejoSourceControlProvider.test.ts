@@ -2623,8 +2623,8 @@ it.effect("lists every fj login as a discovered account", () => {
       { host: "codeberg.org", account: "ana", active: true, authenticated: true },
       { host: "codefloe.com", account: "bo", active: false, authenticated: true },
       {
-        host: "git.tartanoglu.com",
-        account: "git.tartanoglu.com",
+        host: "forge.example.test",
+        account: "forge.example.test",
         active: false,
         authenticated: false,
       },
@@ -2632,7 +2632,7 @@ it.effect("lists every fj login as a discovered account", () => {
     assert.deepStrictEqual(probed.toSorted(), [
       "https://codeberg.org",
       "https://codefloe.com",
-      "https://git.tartanoglu.com",
+      "https://forge.example.test",
     ]);
   }).pipe(
     Effect.provide(
@@ -2641,8 +2641,8 @@ it.effect("lists every fj login as a discovered account", () => {
           { name: "codeberg.org", url: "https://codeberg.org", user: "", default: "false" },
           { name: "codefloe.com", url: "https://codefloe.com", user: "", default: "false" },
           {
-            name: "git.tartanoglu.com",
-            url: "https://git.tartanoglu.com",
+            name: "forge.example.test",
+            url: "https://forge.example.test",
             user: "",
             default: "false",
           },
